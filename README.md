@@ -169,11 +169,9 @@ Use the `ghcs .NET Launch (nowebclient, ffmpeg)` launch config to run with the j
 
 ### Running The Tests
 
-This repository also includes unit tests that are used to validate functionality as part of a CI pipeline on Azure. There are several ways to run these tests.
+The regression suite is maintained outside this public product repository. Pull requests run contributor-safe public checks that restore dependencies, verify formatting, build and type-check the server, and exercise the command-line entry point. A separate maintainer-approved check runs the private regression suite against the exact pull request commit and reports a stable public requirement ID with a sanitized failure reason.
 
-1. Run tests from the command line using `dotnet test`
-2. Run tests in Visual Studio using the [Test Explorer](https://docs.microsoft.com/en-us/visualstudio/test/run-unit-tests-with-test-explorer)
-3. Run individual tests in Visual Studio Code using the associated [CodeLens annotation](https://github.com/OmniSharp/omnisharp-vscode/wiki/How-to-run-and-debug-unit-tests)
+Tests submitted in a pull request cannot be accepted into this repository. Describe the behavior the change needs to cover in the pull request; maintainers will add the corresponding regression coverage to the private tier.
 
 ### Advanced Configuration
 

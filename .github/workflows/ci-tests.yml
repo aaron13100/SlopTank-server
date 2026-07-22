@@ -1,45 +1,46 @@
-name: Tests
+name: Public CI
 on:
   push:
     branches:
       - master
-  # Run tests against the forked branch, but
-  # do not allow access to secrets
-  # https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#workflows-in-forked-repositories
   pull_request:
+
+permissions:
+  contents: read
 
 env:
   SDK_VERSION: "10.0.x"
 
 jobs:
-  run-tests:
-    strategy:
-      matrix:
-        os: ["ubuntu-latest", "macos-latest", "windows-latest"]
-      fail-fast: false
-
-    runs-on: "${{ matrix.os }}"
+  validate-public-product:
+    name: Build, format, and smoke test
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: ${{ env.SDK_VERSION }}
 
-      - name: Run DotNet CLI Tests
-        run: >
-          dotnet test Jellyfin.sln
-          --configuration Release
-          --collect:"XPlat Code Coverage"
-          --settings tests/coverletArgs.runsettings
-          --verbosity minimal
+      - name: Restore product dependencies
+        run: dotnet restore Jellyfin.Server/Jellyfin.Server.csproj
 
-      - name: Merge code coverage results
-        uses: danielpalme/ReportGenerator-GitHub-Action@049f7ec958c672fd31d5cc1cb01622dc8d2e23ab # v5.5.10
-        with:
-          reports: "**/coverage.cobertura.xml"
-          targetdir: "merged/"
-          reporttypes: "Cobertura"
+      - name: Verify formatting
+        run: dotnet format Jellyfin.sln --verify-no-changes --no-restore --verbosity minimal
 
-      # TODO - which action / tool to use to publish code coverage results?
-      # - name: Publish code coverage results
+      - name: Build and type-check product
+        run: dotnet build Jellyfin.Server/Jellyfin.Server.csproj --configuration Release --no-restore
+
+      - name: Smoke test the public CLI
+        shell: bash
+        run: |
+          set +e
+          help_output="$(dotnet run --project Jellyfin.Server/Jellyfin.Server.csproj --configuration Release --no-build -- --help 2>&1)"
+          help_status=$?
+          set -e
+          printf '%s\n' "$help_output"
+          test "$help_status" -eq 1
+          grep -F -- '--datadir' <<< "$help_output"
+          grep -F -- '--nowebclient' <<< "$help_output"

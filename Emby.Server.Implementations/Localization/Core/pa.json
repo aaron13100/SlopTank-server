@@ -36,7 +36,7 @@
     "Undefined": "ਪਰਿਭਾਸ਼ਤ",
     "TvShows": "ਟੀਵੀ ਸ਼ੋਅ",
     "SubtitleDownloadFailureFromForItem": "ਉਪਸਿਰਲੇਖ {1} ਲਈ {0} ਤੋਂ ਡਾਊਨਲੋਡ ਕਰਨ ਵਿੱਚ ਅਸਫਲ ਰਹੇ",
-    "StartupEmbyServerIsLoading": "Jellyfin ਸਰਵਰ ਲੋਡ ਹੋ ਰਿਹਾ ਹੈ। ਛੇਤੀ ਹੀ ਫ਼ੇਰ ਕੋਸ਼ਿਸ਼ ਕਰੋ।",
+    "StartupEmbyServerIsLoading": "SlopTank ਸਰਵਰ ਲੋਡ ਹੋ ਰਿਹਾ ਹੈ। ਛੇਤੀ ਹੀ ਫ਼ੇਰ ਕੋਸ਼ਿਸ਼ ਕਰੋ।",
     "Shows": "ਸ਼ੋਅ",
     "ScheduledTaskFailedWithName": "{0} ਅਸਫਲ",
     "PluginUpdatedWithName": "{0} ਅਪਡੇਟ ਕੀਤਾ ਗਿਆ ਸੀ",

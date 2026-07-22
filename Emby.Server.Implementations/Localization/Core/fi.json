@@ -1,6 +1,6 @@
 {
     "HeaderLiveTV": "Televisio",
-    "NewVersionIsAvailable": "Uusi versio Jellyfin-palvelimesta on ladattavissa.",
+    "NewVersionIsAvailable": "Uusi versio SlopTank-palvelimesta on ladattavissa.",
     "NameSeasonUnknown": "Tuntematon kausi",
     "NameSeasonNumber": "Kausi {0}",
     "NameInstallFailed": "{0} asennus epäonnistui",
@@ -44,7 +44,7 @@
     "UserCreatedWithName": "Käyttäjä {0} on luotu",
     "TvShows": "Sarjat",
     "SubtitleDownloadFailureFromForItem": "Tekstityksen lataus lähteestä \"{0}\" kohteelle \"{1}\" epäonnistui",
-    "StartupEmbyServerIsLoading": "Jellyfin-palvelin on latautumassa. Yritä hetken kuluttua uudelleen.",
+    "StartupEmbyServerIsLoading": "SlopTank-palvelin on latautumassa. Yritä hetken kuluttua uudelleen.",
     "Shows": "Sarjat",
     "NotificationOptionVideoPlaybackStopped": "Videon toisto lopetettu",
     "NotificationOptionVideoPlayback": "Videon toisto aloitettu",

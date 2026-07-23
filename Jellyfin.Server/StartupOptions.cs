@@ -65,7 +65,7 @@ namespace Jellyfin.Server
         public string? PackageName { get; set; }
 
         /// <inheritdoc />
-        [Option("published-server-url", Required = false, HelpText = "Jellyfin Server URL to publish via auto discover process")]
+        [Option("published-server-url", Required = false, HelpText = "Server URL to publish via auto discover process")]
         public string? PublishedServerUrl { get; set; }
 
         /// <summary>

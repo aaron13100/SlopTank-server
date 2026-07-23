@@ -199,7 +199,7 @@ namespace Jellyfin.Server.Extensions
                 var version = typeof(ApplicationHost).Assembly.GetName().Version?.ToString(3) ?? "0.0.1";
                 c.SwaggerDoc("api-docs", new OpenApiInfo
                 {
-                    Title = "Jellyfin API",
+                    Title = "SlopTank API",
                     Version = version,
                     Extensions = new Dictionary<string, IOpenApiExtension>
                     {

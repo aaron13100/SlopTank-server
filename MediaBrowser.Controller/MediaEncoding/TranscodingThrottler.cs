@@ -19,7 +19,6 @@ public class TranscodingThrottler : IDisposable
     private readonly IFileSystem _fileSystem;
     private readonly IMediaEncoder _mediaEncoder;
     private Timer? _timer;
-    private bool _isPaused;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TranscodingThrottler"/> class.
@@ -39,6 +38,11 @@ public class TranscodingThrottler : IDisposable
     }
 
     /// <summary>
+    /// Gets a value indicating whether the transcoding process is currently paused by this throttler.
+    /// </summary>
+    public bool IsPaused { get; private set; }
+
+    /// <summary>
     /// Start timer.
     /// </summary>
     public void Start()
@@ -52,15 +56,15 @@ public class TranscodingThrottler : IDisposable
     /// <returns>A <see cref="Task"/>.</returns>
     public async Task UnpauseTranscoding()
     {
-        if (_isPaused)
+        if (IsPaused)
         {
             _logger.LogDebug("Sending resume command to ffmpeg");
 
             try
             {
                 var resumeKey = _mediaEncoder.IsPkeyPauseSupported ? "u" : Environment.NewLine;
-                await _job.Process!.StandardInput.WriteAsync(resumeKey).ConfigureAwait(false);
-                _isPaused = false;
+                await SendProcessInputAsync(resumeKey).ConfigureAwait(false);
+                IsPaused = false;
             }
             catch (Exception ex)
             {
@@ -105,7 +109,14 @@ public class TranscodingThrottler : IDisposable
         return _config.GetEncodingOptions();
     }
 
-    private async void TimerCallback(object? state)
+    private async void TimerCallback(object? state) => await EvaluateThrottleStateAsync().ConfigureAwait(false);
+
+    /// <summary>
+    /// Evaluates whether the transcoding process should currently be paused or running
+    /// and sends the matching command. Invoked from the timer; internal for tests.
+    /// </summary>
+    /// <returns>A <see cref="Task"/>.</returns>
+    internal async Task EvaluateThrottleStateAsync()
     {
         if (_job.HasExited)
         {
@@ -125,9 +136,20 @@ public class TranscodingThrottler : IDisposable
         }
     }
 
+    /// <summary>
+    /// Sends a control sequence to the transcoding process's standard input.
+    /// Virtual so tests can observe commands without a real ffmpeg process.
+    /// </summary>
+    /// <param name="text">The control text to send.</param>
+    /// <returns>A <see cref="Task"/>.</returns>
+    protected virtual async Task SendProcessInputAsync(string text)
+    {
+        await _job.Process!.StandardInput.WriteAsync(text).ConfigureAwait(false);
+    }
+
     private async Task PauseTranscoding()
     {
-        if (!_isPaused)
+        if (!IsPaused)
         {
             var pauseKey = _mediaEncoder.IsPkeyPauseSupported ? "p" : "c";
 
@@ -135,8 +157,8 @@ public class TranscodingThrottler : IDisposable
 
             try
             {
-                await _job.Process!.StandardInput.WriteAsync(pauseKey).ConfigureAwait(false);
-                _isPaused = true;
+                await SendProcessInputAsync(pauseKey).ConfigureAwait(false);
+                IsPaused = true;
             }
             catch (Exception ex)
             {
@@ -147,6 +169,16 @@ public class TranscodingThrottler : IDisposable
 
     private bool IsThrottleAllowed(TranscodingJob job, int thresholdSeconds)
     {
+        if (job.HasActiveSegmentWaiters)
+        {
+            // A segment request is blocked waiting for the transcoder to produce its
+            // segment. Pausing now (or staying paused) would deadlock the stream: a
+            // paused encoder never writes the segment, the response never completes,
+            // and DownloadPositionTicks never advances to lift the throttle.
+            _logger.LogDebug("Not throttling transcoder; a segment request is waiting on transcoder output");
+            return false;
+        }
+
         var bytesDownloaded = job.BytesDownloaded;
         var transcodingPositionTicks = job.TranscodingPositionTicks ?? 0;
         var downloadPositionTicks = job.DownloadPositionTicks ?? 0;

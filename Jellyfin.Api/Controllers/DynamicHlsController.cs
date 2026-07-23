@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
@@ -44,6 +45,18 @@ public class DynamicHlsController : BaseJellyfinApiController
     private const EncoderPreset DefaultVodEncoderPreset = EncoderPreset.veryfast;
     private const EncoderPreset DefaultEventEncoderPreset = EncoderPreset.superfast;
     private const TranscodingJobType TranscodingJobType = MediaBrowser.Controller.MediaEncoding.TranscodingJobType.Hls;
+
+    /// <summary>
+    /// Longest time a segment request may block waiting for the transcoder to produce
+    /// its segment before the request gives up with a retryable error instead of
+    /// hanging the HTTP response indefinitely.
+    /// </summary>
+    private static readonly TimeSpan _maxSegmentWait = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Interval between checks for the awaited segment appearing on disk.
+    /// </summary>
+    private static readonly TimeSpan _segmentWaitPollInterval = TimeSpan.FromMilliseconds(100);
 
     private readonly Version _minFFmpegFlacInMp4 = new Version(6, 0);
     private readonly Version _minFFmpegX265BframeInFmp4 = new Version(7, 0, 1);
@@ -102,6 +115,28 @@ public class DynamicHlsController : BaseJellyfinApiController
         _dynamicHlsPlaylistGenerator = dynamicHlsPlaylistGenerator;
 
         _encodingOptions = serverConfigurationManager.GetEncodingOptions();
+    }
+
+    /// <summary>
+    /// Outcome of waiting for a transcoded segment to become servable.
+    /// </summary>
+    internal enum SegmentWaitResult
+    {
+        /// <summary>
+        /// The segment is on disk and safe to serve.
+        /// </summary>
+        Ready,
+
+        /// <summary>
+        /// The transcode exited or the request was cancelled while waiting; serve
+        /// whatever is on disk (or fail) via the legacy path.
+        /// </summary>
+        TranscodeStopped,
+
+        /// <summary>
+        /// The transcoder produced nothing servable within the allotted wait.
+        /// </summary>
+        TimedOut
     }
 
     /// <summary>
@@ -1916,6 +1951,19 @@ public class DynamicHlsController : BaseJellyfinApiController
         TranscodingJob? transcodingJob,
         CancellationToken cancellationToken)
     {
+        if (transcodingJob is not null)
+        {
+            // Report the download position eagerly at request time (upstream jellyfin#16315):
+            // a client requesting segment N has necessarily consumed everything before it.
+            // The completion callback in the sync overload below never fires for a request
+            // that blocks waiting on the transcoder, so without this the throttler reads a
+            // stale position forever and keeps ffmpeg paused: the segment-wait deadlock.
+            var requestedPositionTicks = state.Request.CurrentRuntimeTicks;
+            transcodingJob.DownloadPositionTicks = Math.Max(
+                transcodingJob.DownloadPositionTicks ?? requestedPositionTicks,
+                requestedPositionTicks);
+        }
+
         var segmentExists = System.IO.File.Exists(segmentPath);
         if (segmentExists)
         {
@@ -1939,40 +1987,57 @@ public class DynamicHlsController : BaseJellyfinApiController
         var nextSegmentPath = GetSegmentPath(state, playlistPath, segmentIndex + 1);
         if (transcodingJob is not null)
         {
-            while (!cancellationToken.IsCancellationRequested && !transcodingJob.HasExited)
+            // Register as a waiter on transcoder output so the throttler never pauses
+            // (and actively resumes) ffmpeg while this request depends on it advancing.
+            transcodingJob.BeginSegmentWait();
+            try
             {
-                // To be considered ready, the segment file has to exist AND
-                // either the transcoding job should be done or next segment should also exist
-                if (segmentExists)
+                if (transcodingJob.TranscodingThrottler is not null)
                 {
-                    if (transcodingJob.HasExited || System.IO.File.Exists(nextSegmentPath))
-                    {
-                        _logger.LogDebug("Serving up {SegmentPath} as it deemed ready", segmentPath);
-                        return GetSegmentResult(state, segmentPath, transcodingJob);
-                    }
+                    // A paused transcoder can never produce the awaited segment; resume it
+                    // immediately rather than waiting for the next throttler timer tick.
+                    await transcodingJob.TranscodingThrottler.UnpauseTranscoding().ConfigureAwait(false);
+                }
+
+                var waitResult = await WaitForSegmentReadyAsync(
+                    transcodingJob,
+                    segmentPath,
+                    nextSegmentPath,
+                    _maxSegmentWait,
+                    _segmentWaitPollInterval,
+                    cancellationToken).ConfigureAwait(false);
+
+                if (waitResult == SegmentWaitResult.Ready)
+                {
+                    _logger.LogDebug("Serving up {SegmentPath} as it deemed ready", segmentPath);
+                    return GetSegmentResult(state, segmentPath, transcodingJob);
+                }
+
+                if (waitResult == SegmentWaitResult.TimedOut)
+                {
+                    // A retryable error beats hanging the HTTP response indefinitely: the
+                    // client re-requests the segment while the transcoder catches up.
+                    _logger.LogWarning("Timed out after {Timeout} waiting for transcoder to produce {SegmentPath}", _maxSegmentWait, segmentPath);
+                    _transcodeManager.OnTranscodeEndRequest(transcodingJob);
+                    return StatusCode(StatusCodes.Status503ServiceUnavailable);
+                }
+
+                // SegmentWaitResult.TranscodeStopped: serve whatever is on disk below.
+                if (!System.IO.File.Exists(segmentPath))
+                {
+                    _logger.LogWarning("cannot serve {0} as transcoding quit before we got there", segmentPath);
                 }
                 else
                 {
-                    segmentExists = System.IO.File.Exists(segmentPath);
-                    if (segmentExists)
-                    {
-                        continue; // avoid unnecessary waiting if segment just became available
-                    }
+                    _logger.LogDebug("serving {0} as it's on disk and transcoding stopped", segmentPath);
                 }
 
-                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
             }
-
-            if (!System.IO.File.Exists(segmentPath))
+            finally
             {
-                _logger.LogWarning("cannot serve {0} as transcoding quit before we got there", segmentPath);
+                transcodingJob.EndSegmentWait();
             }
-            else
-            {
-                _logger.LogDebug("serving {0} as it's on disk and transcoding stopped", segmentPath);
-            }
-
-            cancellationToken.ThrowIfCancellationRequested();
         }
         else
         {
@@ -1980,6 +2045,61 @@ public class DynamicHlsController : BaseJellyfinApiController
         }
 
         return GetSegmentResult(state, segmentPath, transcodingJob);
+    }
+
+    /// <summary>
+    /// Waits for a transcoded segment to become servable: the segment file must exist
+    /// and either the next segment must exist too or the transcode must be finished.
+    /// The wait is bounded so a stalled transcoder can never hang the HTTP response
+    /// indefinitely. Internal static for testability.
+    /// </summary>
+    /// <param name="transcodingJob">The transcoding job producing the segment.</param>
+    /// <param name="segmentPath">The path of the requested segment.</param>
+    /// <param name="nextSegmentPath">The path of the segment after the requested one.</param>
+    /// <param name="timeout">The maximum time to wait before giving up.</param>
+    /// <param name="pollInterval">The interval between checks.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The wait outcome.</returns>
+    internal static async Task<SegmentWaitResult> WaitForSegmentReadyAsync(
+        TranscodingJob transcodingJob,
+        string segmentPath,
+        string nextSegmentPath,
+        TimeSpan timeout,
+        TimeSpan pollInterval,
+        CancellationToken cancellationToken)
+    {
+        var segmentExists = System.IO.File.Exists(segmentPath);
+        var waitStart = Stopwatch.GetTimestamp();
+
+        while (!cancellationToken.IsCancellationRequested && !transcodingJob.HasExited)
+        {
+            // To be considered ready, the segment file has to exist AND
+            // either the transcoding job should be done or next segment should also exist
+            if (segmentExists)
+            {
+                if (transcodingJob.HasExited || System.IO.File.Exists(nextSegmentPath))
+                {
+                    return SegmentWaitResult.Ready;
+                }
+            }
+            else
+            {
+                segmentExists = System.IO.File.Exists(segmentPath);
+                if (segmentExists)
+                {
+                    continue; // avoid unnecessary waiting if segment just became available
+                }
+            }
+
+            if (Stopwatch.GetElapsedTime(waitStart) >= timeout)
+            {
+                return SegmentWaitResult.TimedOut;
+            }
+
+            await Task.Delay(pollInterval, cancellationToken).ConfigureAwait(false);
+        }
+
+        return SegmentWaitResult.TranscodeStopped;
     }
 
     private ActionResult GetSegmentResult(StreamState state, string segmentPath, TranscodingJob? transcodingJob)

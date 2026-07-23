@@ -12,6 +12,25 @@ env:
   SDK_VERSION: "10.0.x"
 
 jobs:
+  product-identity:
+    name: Debrand regression guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # Upstream merges reintroduce Jellyfin product-identity branding (README
+      # heading and logo banner, AssemblyProduct, tagline, donate link,
+      # localized strings, the fin logo assets). The checker self-tests its
+      # manifest, then scans every tracked file; compatibility identifiers
+      # (namespaces, wire protocol, plugin ABI) and GPL attribution are
+      # allowlisted so this check can never pressure anyone into breaking
+      # compat or stripping attribution.
+      - name: Enforce product identity
+        run: python3 scripts/check-product-identity.py --repo .
+
   validate-public-product:
     name: Build, format, and smoke test
     runs-on: ubuntu-latest

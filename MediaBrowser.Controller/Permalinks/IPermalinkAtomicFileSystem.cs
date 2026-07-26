@@ -20,6 +20,11 @@ public interface IPermalinkAtomicFileSystem
     string? ReadAnchorToken(string path);
 
     /// <summary>
+    /// Assigns an exact prepared anchor token to a fresh staging object.
+    /// </summary>
+    void AssignAnchorToken(string path, string anchorToken);
+
+    /// <summary>
     /// Durably creates each missing path component.
     /// </summary>
     void CreateDirectoryDurable(string path);

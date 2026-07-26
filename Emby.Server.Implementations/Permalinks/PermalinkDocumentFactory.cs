@@ -122,6 +122,31 @@ internal sealed class PermalinkDocumentFactory
     }
 
     /// <summary>
+    /// Constructs the exact content successor owned by a prepared mutation.
+    /// </summary>
+    public PermalinkEventDocument CreateControlledContentSuccessor(
+        PermalinkStoreRequest request,
+        PermalinkCapsuleSnapshot snapshot,
+        Guid operationId)
+    {
+        return new PermalinkEventDocument(
+            NewGuid(),
+            operationId,
+            [snapshot.ContentHead.EventId],
+            "controlled-mutation",
+            [],
+            snapshot.ContentHead.EventId,
+            snapshot.ContentHead.PreviousAssignmentEventId,
+            snapshot.ContentHead.AcceptedProviderClaim,
+            snapshot.ContentHead.ActiveExternalAliases,
+            request.ContentRoot,
+            request.Leaves,
+            snapshot.ContentHead.BindingInstanceId,
+            snapshot.ContentHead.PathAssignment,
+            UtcNow());
+    }
+
+    /// <summary>
     /// Constructs one first-alias successor for a seeded capsule.
     /// </summary>
     public PermalinkEventDocument CreateAliasSuccessor(

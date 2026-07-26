@@ -567,6 +567,11 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkEvidence>();
             serviceCollection.AddSingleton<IPermalinkStore, PermalinkStore>();
             serviceCollection.AddSingleton<IPermalinkManager, PermalinkManager>();
+            serviceCollection.AddSingleton<PermalinkOperationJournal>();
+            serviceCollection.AddSingleton<PermalinkMediaMutation>();
+            serviceCollection.AddSingleton<IPermalinkMutationCoordinator, PermalinkMutationCoordinator>();
+            serviceCollection.AddSingleton<PermalinkLeaseStore>();
+            serviceCollection.AddSingleton<IPermalinkResolutionService, PermalinkResolutionService>();
             serviceCollection.AddSingleton<NamingOptions>();
             serviceCollection.AddSingleton<VideoListResolver>();
 

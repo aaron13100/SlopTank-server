@@ -103,6 +103,34 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
     }
 
     /// <inheritdoc />
+    public void AssignAnchorToken(string path, string anchorToken)
+    {
+        _mountPolicy.EnsureAdmitted(path);
+        byte[] bytes;
+        try
+        {
+            bytes = Convert.FromHexString(anchorToken);
+        }
+        catch (FormatException exception)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "anchor-malformed",
+                $"Prepared anchor token '{anchorToken}' is malformed.",
+                exception);
+        }
+
+        if (bytes.Length != 16
+            || SetXattr(path, AnchorName, bytes, (nuint)bytes.Length, 0, XattrCreate) != 0)
+        {
+            throw FileSystemFailure("anchor-assign", path, Marshal.GetLastPInvokeError());
+        }
+
+        SyncPath(path);
+        SyncDirectory(Path.GetDirectoryName(path)!);
+    }
+
+    /// <inheritdoc />
     public void CreateDirectoryDurable(string path)
     {
         _mountPolicy.EnsureAdmitted(path);

@@ -219,7 +219,8 @@ internal sealed class PermalinkCapsuleStore
 
         ValidateParents(events, capsulePath);
         var contentEvents = events.Values
-            .Where(value => value.Kind is "mint" or "identity_seed" or "append-only-discovery")
+            .Where(value => value.Kind is "mint" or "identity_seed"
+                or "append-only-discovery" or "controlled-mutation")
             .ToArray();
         var heads = contentEvents
             .Where(candidate => !contentEvents.Any(

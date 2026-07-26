@@ -251,6 +251,42 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         return connection;
     }
 
+    /// <summary>
+    /// Permanently elects one mutation for an exact verified predecessor.
+    /// </summary>
+    public async Task ClaimMutationAsync(
+        Guid capsuleId,
+        string predecessorRoot,
+        Guid operationId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO MutationClaims
+                (capsule_id, predecessor_root, operation_id, created_at)
+            VALUES ($capsule, $root, $operation, $created)
+            ON CONFLICT(capsule_id, predecessor_root) DO NOTHING
+            """;
+        command.Parameters.AddWithValue("$capsule", capsuleId.ToString("D"));
+        command.Parameters.AddWithValue("$root", predecessorRoot);
+        command.Parameters.AddWithValue("$operation", operationId.ToString("D"));
+        command.Parameters.AddWithValue("$created", UtcNow());
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        command.CommandText = """
+            SELECT operation_id FROM MutationClaims
+             WHERE capsule_id = $capsule AND predecessor_root = $root
+            """;
+        var winner = (string?)await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        if (!string.Equals(winner, operationId.ToString("D"), StringComparison.Ordinal))
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "mutation-conflict",
+                $"Content predecessor '{predecessorRoot}' is already claimed by '{winner}'.");
+        }
+    }
+
     private static void AddCandidateParameters(
         SqliteCommand command,
         PermalinkGenesisCandidate candidate)

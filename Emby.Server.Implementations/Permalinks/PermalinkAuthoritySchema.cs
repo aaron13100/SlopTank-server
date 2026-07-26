@@ -53,6 +53,10 @@ internal static class PermalinkAuthoritySchema
                 decision TEXT NOT NULL, event_id TEXT NOT NULL,
                 event_digest TEXT NOT NULL, created_at TEXT NOT NULL,
                 PRIMARY KEY(operation_id, capsule_id, binding_id, predecessor));
+            CREATE TABLE IF NOT EXISTS MutationClaims (
+                capsule_id TEXT NOT NULL, predecessor_root TEXT NOT NULL,
+                operation_id TEXT NOT NULL, created_at TEXT NOT NULL,
+                PRIMARY KEY(capsule_id, predecessor_root));
             CREATE TABLE IF NOT EXISTS PermalinkBindings (
                 PermalinkId TEXT NOT NULL, ItemId TEXT NOT NULL,
                 ContentRoot TEXT NOT NULL, VerifiedToken TEXT NOT NULL,

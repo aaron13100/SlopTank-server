@@ -101,6 +101,8 @@ namespace MediaBrowser.Controller.Entities
             || ExcludeItemIds.Length > 0
             || AudioLanguages.Count > 0
             || SubtitleLanguages.Count > 0
+            || (HasAnyProviderId?.Count > 0)
+            || (HasAnyProviderIds?.Count > 0)
             || LinkedChildAncestorIds.Length > 0
             || AncestorIds.Length > 0
             || IsFavorite.HasValue

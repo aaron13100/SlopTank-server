@@ -165,11 +165,13 @@ public class ItemsController : BaseJellyfinApiController
     /// <param name="genreIds">Optional. If specified, results will be filtered based on genre id. This allows multiple, pipe delimited.</param>
     /// <param name="audioLanguages">Optional. If specified, results will be filtered based on audio language. This allows multiple, comma delimited values.</param>
     /// <param name="subtitleLanguages">Optional. If specified, results will be filtered based on subtitle language. This allows multiple, comma delimited values.</param>
+    /// <param name="anyProviderIdEquals">Optional. If specified, results will match any exact provider name and value pair, formatted as Provider:Value. Repeat the parameter for multiple pairs.</param>
     /// <param name="enableTotalRecordCount">Optional. Enable the total record count.</param>
     /// <param name="enableImages">Optional, include image information in output.</param>
     /// <returns>A <see cref="QueryResult{BaseItemDto}"/> with the items.</returns>
     [HttpGet("Items")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<QueryResult<BaseItemDto>>> GetItems(
         [FromQuery] Guid? userId,
         [FromQuery] string? maxOfficialRating,
@@ -257,9 +259,16 @@ public class ItemsController : BaseJellyfinApiController
         [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] genreIds,
         [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] audioLanguages,
         [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] subtitleLanguages,
+        [FromQuery] string[]? anyProviderIdEquals,
         [FromQuery] bool enableTotalRecordCount = true,
         [FromQuery] bool? enableImages = true)
     {
+        if (!TryParseAnyProviderIdEquals(anyProviderIdEquals, out var providerIds, out var invalidProviderId))
+        {
+            return BadRequest(
+                $"anyProviderIdEquals must contain one non-empty Provider:Value pair per parameter. Invalid value: '{invalidProviderId}'.");
+        }
+
         var isApiKey = User.GetIsApiKey();
         // if api key is used (auth.IsApiKey == true), then `user` will be null throughout this method
         userId = RequestHelpers.GetUserId(User, userId);
@@ -452,6 +461,7 @@ public class ItemsController : BaseJellyfinApiController
             AudioLanguages = audioLanguages,
             SubtitleLanguages = subtitleLanguages,
             LinkedChildAncestorIds = linkedChildAncestorIds,
+            HasAnyProviderIds = providerIds,
         };
 
         if (ids.Length != 0 || !string.IsNullOrWhiteSpace(searchTerm))
@@ -895,6 +905,7 @@ public class ItemsController : BaseJellyfinApiController
             genreIds,
             [],
             [],
+            null,
             enableTotalRecordCount,
             enableImages).ConfigureAwait(false);
 
@@ -1176,4 +1187,56 @@ public class ItemsController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId,
         [FromBody, Required] UpdateUserItemDataDto userDataDto)
         => UpdateItemUserData(userId, itemId, userDataDto);
+
+    private static bool TryParseAnyProviderIdEquals(
+        string[]? values,
+        out Dictionary<string, string[]>? providerIds,
+        out string? invalidValue)
+    {
+        providerIds = null;
+        invalidValue = null;
+        if (values is null || values.Length == 0)
+        {
+            return true;
+        }
+
+        var parsedValues = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var value in values)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                invalidValue = value;
+                return false;
+            }
+
+            var separatorIndex = value.IndexOf(':', StringComparison.Ordinal);
+            if (separatorIndex <= 0
+                || separatorIndex != value.LastIndexOf(':')
+                || separatorIndex == value.Length - 1
+                || !string.Equals(value, value.Trim(), StringComparison.Ordinal))
+            {
+                invalidValue = value;
+                return false;
+            }
+
+            var providerName = value[..separatorIndex].ToLowerInvariant();
+            var providerValue = value[(separatorIndex + 1)..].ToLowerInvariant();
+            if (!parsedValues.TryGetValue(providerName, out var providerValues))
+            {
+                providerValues = [];
+                parsedValues.Add(providerName, providerValues);
+            }
+
+            if (!providerValues.Contains(providerValue, StringComparer.Ordinal))
+            {
+                providerValues.Add(providerValue);
+            }
+        }
+
+        providerIds = parsedValues.ToDictionary(
+            entry => entry.Key,
+            entry => entry.Value.ToArray(),
+            StringComparer.Ordinal);
+        return true;
+    }
 }

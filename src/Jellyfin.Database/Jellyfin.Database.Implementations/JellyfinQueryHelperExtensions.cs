@@ -122,7 +122,7 @@ public static class JellyfinQueryHelperExtensions
         IReadOnlyDictionary<string, string[]> providerIds)
     {
         var providerKeys = providerIds
-            .SelectMany(kvp => kvp.Value.Select(v => $"{kvp.Key}:{v}"))
+            .SelectMany(kvp => kvp.Value.Select(v => $"{kvp.Key.ToLowerInvariant()}:{v.ToLowerInvariant()}"))
             .ToList();
 
         if (providerKeys.Count == 0)
@@ -130,7 +130,8 @@ public static class JellyfinQueryHelperExtensions
             return baseQuery;
         }
 
-        return baseQuery.Where(e => e.Provider!.Any(p => providerKeys.Contains(p.ProviderId + ":" + p.ProviderValue)));
+        return baseQuery.Where(e => e.Provider!.Any(p =>
+            providerKeys.Contains(p.ProviderId.ToLower() + ":" + p.ProviderValue.ToLower())));
     }
 
     /// <summary>

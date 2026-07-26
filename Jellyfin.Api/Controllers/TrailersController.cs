@@ -301,6 +301,7 @@ public class TrailersController : BaseJellyfinApiController
                 genreIds,
                 audioLanguages,
                 subtitleLanguages,
+                null,
                 enableTotalRecordCount,
                 enableImages).ConfigureAwait(false);
     }

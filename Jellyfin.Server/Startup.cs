@@ -223,6 +223,7 @@ namespace Jellyfin.Server
                         }
                     });
 
+                    mainApp.UsePermalinkRedirection();
                     mainApp.UseRobotsRedirection();
                 }
 

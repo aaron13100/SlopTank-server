@@ -7,7 +7,6 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using AsyncKeyedLock;
 using J2N.Collections.Generic.Extensions;
 using Jellyfin.Database.Implementations;
 using Jellyfin.Database.Implementations.Entities;
@@ -40,8 +39,10 @@ public partial class TrickplayManager : ITrickplayManager
     private readonly IDbContextFactory<JellyfinDbContext> _dbProvider;
     private readonly IApplicationPaths _appPaths;
     private readonly IPathManager _pathManager;
+    private readonly Lock _playbackGenerationLock = new();
+    private readonly Dictionary<Guid, Task> _playbackGenerationTasks = [];
 
-    private static readonly AsyncNonKeyedLocker _resourcePool = new(1);
+    private static readonly TrickplayGenerationQueue _generationQueue = new();
     private static readonly string[] _trickplayImgExtensions = [".jpg"];
 
     /// <summary>
@@ -76,6 +77,59 @@ public partial class TrickplayManager : ITrickplayManager
         _dbProvider = dbProvider;
         _appPaths = appPaths;
         _pathManager = pathManager;
+    }
+
+    /// <inheritdoc />
+    public void QueueTrickplayGenerationForPlayback(Video video, LibraryOptions libraryOptions)
+    {
+        lock (_playbackGenerationLock)
+        {
+            if (_playbackGenerationTasks.TryGetValue(video.Id, out var existingTask)
+                && !existingTask.IsCompleted)
+            {
+                return;
+            }
+
+            var generationTask = Task.Run(() => GenerateTrickplayForPlaybackAsync(video, libraryOptions));
+            _playbackGenerationTasks[video.Id] = generationTask;
+            _ = generationTask.ContinueWith(
+                completedTask =>
+                {
+                    lock (_playbackGenerationLock)
+                    {
+                        if (_playbackGenerationTasks.TryGetValue(video.Id, out var currentTask)
+                            && ReferenceEquals(currentTask, completedTask))
+                        {
+                            _playbackGenerationTasks.Remove(video.Id);
+                        }
+                    }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+    }
+
+    private async Task GenerateTrickplayForPlaybackAsync(Video video, LibraryOptions libraryOptions)
+    {
+        try
+        {
+            if (!libraryOptions.EnableTrickplayImageExtraction
+                || (await GetTrickplayResolutions(video.Id).ConfigureAwait(false)).Count > 0)
+            {
+                return;
+            }
+
+            _logger.LogInformation(
+                "Prioritizing trickplay generation for actively playing item {ItemName} [ID: {ItemId}]",
+                video.Name,
+                video.Id);
+            await RefreshTrickplayDataAsync(video, false, libraryOptions, true, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error queuing playback-priority trickplay generation for item {ItemId}", video.Id);
+        }
     }
 
     /// <inheritdoc />
@@ -278,7 +332,15 @@ public partial class TrickplayManager : ITrickplayManager
     }
 
     /// <inheritdoc />
-    public async Task RefreshTrickplayDataAsync(Video video, bool replace, LibraryOptions libraryOptions, CancellationToken cancellationToken)
+    public Task RefreshTrickplayDataAsync(Video video, bool replace, LibraryOptions libraryOptions, CancellationToken cancellationToken)
+        => RefreshTrickplayDataAsync(video, replace, libraryOptions, false, cancellationToken);
+
+    private async Task RefreshTrickplayDataAsync(
+        Video video,
+        bool replace,
+        LibraryOptions libraryOptions,
+        bool foreground,
+        CancellationToken cancellationToken)
     {
         var options = _config.Configuration.TrickplayOptions;
         if (!CanGenerateTrickplay(video, options.Interval) || libraryOptions is null)
@@ -350,6 +412,7 @@ public partial class TrickplayManager : ITrickplayManager
                     width,
                     options,
                     saveWithMedia,
+                    foreground,
                     cancellationToken).ConfigureAwait(false);
             }
 
@@ -386,11 +449,15 @@ public partial class TrickplayManager : ITrickplayManager
         int width,
         TrickplayOptions options,
         bool saveWithMedia,
+        bool foreground,
         CancellationToken cancellationToken)
     {
         var imgTempDir = string.Empty;
 
-        using (await _resourcePool.LockAsync(cancellationToken).ConfigureAwait(false))
+        using (var generationLease = await _generationQueue.AcquireAsync(foreground, cancellationToken).ConfigureAwait(false))
+        using (var generationCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                   cancellationToken,
+                   generationLease.PreemptionToken))
         {
             try
             {
@@ -493,7 +560,7 @@ public partial class TrickplayManager : ITrickplayManager
                     options.ProcessPriority,
                     options.EnableKeyFrameOnlyExtraction,
                     _encodingHelper,
-                    cancellationToken).ConfigureAwait(false);
+                    generationCancellation.Token).ConfigureAwait(false);
 
                 if (string.IsNullOrEmpty(imgTempDir) || !Directory.Exists(imgTempDir))
                 {
@@ -534,7 +601,17 @@ public partial class TrickplayManager : ITrickplayManager
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error creating trickplay images.");
+                if (generationLease.PreemptionToken.IsCancellationRequested
+                    && !cancellationToken.IsCancellationRequested)
+                {
+                    _logger.LogInformation(
+                        "Paused background trickplay generation for {Path} so an actively playing item can take priority",
+                        video.Path);
+                }
+                else
+                {
+                    _logger.LogError(ex, "Error creating trickplay images.");
+                }
             }
             finally
             {

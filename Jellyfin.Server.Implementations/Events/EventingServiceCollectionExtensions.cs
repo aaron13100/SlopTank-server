@@ -40,6 +40,7 @@ namespace Jellyfin.Server.Implementations.Events
 
             // Session consumers
             collection.AddScoped<IEventConsumer<PlaybackStartEventArgs>, PlaybackStartLogger>();
+            collection.AddScoped<IEventConsumer<PlaybackStartEventArgs>, PlaybackStartTrickplayGenerator>();
             collection.AddScoped<IEventConsumer<PlaybackStopEventArgs>, PlaybackStopLogger>();
             collection.AddScoped<IEventConsumer<SessionEndedEventArgs>, SessionEndedLogger>();
             collection.AddScoped<IEventConsumer<SessionStartedEventArgs>, SessionStartedLogger>();

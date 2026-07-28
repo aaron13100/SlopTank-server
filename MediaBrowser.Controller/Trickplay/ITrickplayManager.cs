@@ -14,6 +14,13 @@ namespace MediaBrowser.Controller.Trickplay;
 public interface ITrickplayManager
 {
     /// <summary>
+    /// Queues missing trickplay images for an actively playing video.
+    /// </summary>
+    /// <param name="video">The actively playing video.</param>
+    /// <param name="libraryOptions">The video's library options.</param>
+    void QueueTrickplayGenerationForPlayback(Video video, LibraryOptions libraryOptions);
+
+    /// <summary>
     /// Generates new trickplay images and metadata.
     /// </summary>
     /// <param name="video">The video.</param>

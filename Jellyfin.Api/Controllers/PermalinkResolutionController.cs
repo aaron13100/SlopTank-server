@@ -85,6 +85,25 @@ public sealed class PermalinkResolutionController : BaseJellyfinApiController
         }).ConfigureAwait(false);
     }
 
+    /// <summary>Exchanges one consumed details lease for a freshly checked playback lease.</summary>
+    /// <param name="handle">The opaque candidate handle.</param>
+    /// <param name="request">The details lease.</param>
+    /// <param name="cancellationToken">The request cancellation token.</param>
+    /// <returns>The playback-purpose candidate envelope.</returns>
+    [HttpPost("Candidates/{handle}/PlaybackLease")]
+    public async Task<ActionResult<PermalinkCandidateEnvelope>> PlaybackLease(
+        [FromRoute] string handle,
+        [FromBody] PermalinkLeaseRequest request,
+        CancellationToken cancellationToken)
+    {
+        return await ExecuteAsync(async userId => Ok(
+            await _resolution.ExchangePlaybackLeaseAsync(
+                handle,
+                request.Lease,
+                userId,
+                cancellationToken).ConfigureAwait(false))).ConfigureAwait(false);
+    }
+
     /// <summary>Consumes a playback lease and returns its immutable snapshot plan.</summary>
     /// <param name="handle">The opaque candidate handle.</param>
     /// <param name="request">The purpose-bound lease.</param>
@@ -96,10 +115,21 @@ public sealed class PermalinkResolutionController : BaseJellyfinApiController
         [FromBody] PermalinkLeaseRequest request,
         CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(request.PlaybackSessionId))
+        {
+            return Problem(
+                detail: "PlaybackSessionId is required when consuming a playback lease.",
+                statusCode: StatusCodes.Status409Conflict,
+                title: "playback-session-required");
+        }
+
         return await ExecuteAsync(async userId => Ok(
             await _resolution.RedeemPlaybackAsync(
                 handle,
                 request.Lease,
+                request.PlaybackSessionId,
+                request.QueueOrdinal,
+                request.Complete,
                 userId,
                 cancellationToken).ConfigureAwait(false))).ConfigureAwait(false);
     }

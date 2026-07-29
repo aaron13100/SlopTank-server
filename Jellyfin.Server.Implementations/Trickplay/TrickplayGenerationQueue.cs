@@ -165,7 +165,6 @@ internal sealed class TrickplayGenerationQueue : IDisposable
         }
 
         _resource.Dispose();
-        GC.SuppressFinalize(this);
     }
 
     /// <summary>

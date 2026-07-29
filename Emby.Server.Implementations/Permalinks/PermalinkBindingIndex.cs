@@ -312,7 +312,8 @@ internal sealed class PermalinkBindingIndex
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT b.PermalinkId, b.ItemId, a.capsule_id, b.ContentRoot,
-                   a.anchor_token, a.current_path, o.capsule_id IS NOT NULL
+                   a.anchor_token, a.binding_id, a.current_path,
+                   o.capsule_id IS NOT NULL
               FROM PermalinkBindings b
               JOIN FirstAliasClaims f ON f.permalink_id = b.PermalinkId
               LEFT JOIN PermalinkBindingCapsuleOverrides o
@@ -334,8 +335,9 @@ internal sealed class PermalinkBindingIndex
                 Guid.Parse(reader.GetString(2)),
                 reader.GetString(3),
                 reader.GetString(4),
-                reader.GetString(5),
-                reader.GetBoolean(6)));
+                Guid.Parse(reader.GetString(5)),
+                reader.GetString(6),
+                reader.GetBoolean(7)));
         }
 
         return result;

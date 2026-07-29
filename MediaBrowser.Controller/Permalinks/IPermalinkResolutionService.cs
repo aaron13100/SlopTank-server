@@ -35,15 +35,33 @@ public interface IPermalinkResolutionService
         Guid userId,
         CancellationToken cancellationToken);
 
+    /// <summary>Consumes a details lease and returns a playback lease after revalidation.</summary>
+    /// <param name="handle">The opaque candidate handle.</param>
+    /// <param name="lease">The details lease.</param>
+    /// <param name="userId">The authenticated user identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The replacement playback envelope.</returns>
+    Task<PermalinkCandidateEnvelope> ExchangePlaybackLeaseAsync(
+        string handle,
+        string lease,
+        Guid userId,
+        CancellationToken cancellationToken);
+
     /// <summary>Consumes a playback lease and materializes an immutable snapshot plan.</summary>
     /// <param name="handle">The opaque candidate handle.</param>
     /// <param name="lease">The purpose-bound lease.</param>
+    /// <param name="playbackSessionId">The playback session claiming the lease.</param>
+    /// <param name="queueOrdinal">The frozen queue ordinal to materialize.</param>
+    /// <param name="complete">Whether the final queue entry has completed.</param>
     /// <param name="userId">The authenticated user identifier.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The immutable playback snapshot.</returns>
     Task<PermalinkPlaybackSnapshot> RedeemPlaybackAsync(
         string handle,
         string lease,
+        string playbackSessionId,
+        int queueOrdinal,
+        bool complete,
         Guid userId,
         CancellationToken cancellationToken);
 }

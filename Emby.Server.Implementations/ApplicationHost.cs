@@ -580,6 +580,10 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IPermalinkMutationCoordinator, PermalinkMutationCoordinator>();
             serviceCollection.AddSingleton<IPermalinkIdentityMutationAdapter, PermalinkIdentityMutationAdapter>();
             serviceCollection.AddSingleton<PermalinkLeaseStore>();
+            serviceCollection.AddSingleton<PermalinkPlaybackDocumentStore>();
+            serviceCollection.AddSingleton<PermalinkPlaybackPlanStore>();
+            serviceCollection.AddSingleton<PermalinkPlaybackRecovery>();
+            serviceCollection.AddSingleton<PermalinkPlaybackStateStore>();
             serviceCollection.AddSingleton<IPermalinkResolutionService, PermalinkResolutionService>();
             serviceCollection.AddSingleton<NamingOptions>();
             serviceCollection.AddSingleton<VideoListResolver>();

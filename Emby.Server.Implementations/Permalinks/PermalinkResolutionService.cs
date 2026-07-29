@@ -5,9 +5,11 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
+using MediaBrowser.Model.Entities;
 
 namespace Emby.Server.Implementations.Permalinks;
 
@@ -21,8 +23,9 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
     private readonly PermalinkBindingIndex _bindings;
     private readonly PermalinkLeaseStore _leases;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
-    private readonly PermalinkAuthorityStore _authority;
     private readonly PermalinkOperationJournal _journal;
+    private readonly PermalinkPlaybackDocumentStore _playbackDocuments;
+    private readonly PermalinkPlaybackStateStore _playback;
 
     public PermalinkResolutionService(
         ILibraryManager libraryManager,
@@ -30,16 +33,18 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         PermalinkBindingIndex bindings,
         PermalinkLeaseStore leases,
         IPermalinkAtomicFileSystem fileSystem,
-        PermalinkAuthorityStore authority,
-        PermalinkOperationJournal journal)
+        PermalinkOperationJournal journal,
+        PermalinkPlaybackDocumentStore playbackDocuments,
+        PermalinkPlaybackStateStore playback)
     {
         _libraryManager = libraryManager;
         _manager = manager;
         _bindings = bindings;
         _leases = leases;
         _fileSystem = fileSystem;
-        _authority = authority;
         _journal = journal;
+        _playbackDocuments = playbackDocuments;
+        _playback = playback;
     }
 
     public async Task<IReadOnlyList<PermalinkCandidateEnvelope>> DiscoverAsync(
@@ -68,12 +73,27 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         var result = new List<PermalinkCandidateEnvelope>(candidates.Count);
         foreach (var candidate in candidates)
         {
-            await VerifyAsync(candidate, cancellationToken).ConfigureAwait(false);
-            result.Add(await _leases.IssueAsync(
+            var verified = await VerifyAsync(candidate, null, cancellationToken).ConfigureAwait(false);
+            var envelope = await _leases.IssueAsync(
                 candidate,
+                verified.Evidence,
                 purpose,
                 userId,
-                cancellationToken).ConfigureAwait(false));
+                cancellationToken).ConfigureAwait(false);
+            if (purpose == "playback")
+            {
+                await _playbackDocuments.PublishLeaseAsync(envelope.Handle, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            result.Add(envelope);
+        }
+
+        if (result.Count == 0 && IsExternalAlias(permalinkId))
+        {
+            throw Conflict(
+                "EvidenceRequired",
+                "EvidenceRequired: initialize protected evidence from the authenticated local item page.");
         }
 
         return result;
@@ -85,50 +105,92 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         Guid userId,
         CancellationToken cancellationToken)
     {
-        var document = _leases.Consume(handle, lease, "details", userId);
+        var document = await _leases.ConsumeAsync(
+            handle,
+            lease,
+            "details",
+            userId,
+            cancellationToken).ConfigureAwait(false);
         var binding = await _bindings.FindResolutionBindingAsync(
             document.PermalinkId,
             document.ItemId,
             cancellationToken).ConfigureAwait(false);
-        return await VerifyAsync(binding, cancellationToken).ConfigureAwait(false);
+        return (await VerifyAsync(binding, document, cancellationToken).ConfigureAwait(false)).Item;
     }
 
-    public async Task<PermalinkPlaybackSnapshot> RedeemPlaybackAsync(
+    public async Task<PermalinkCandidateEnvelope> ExchangePlaybackLeaseAsync(
         string handle,
         string lease,
         Guid userId,
         CancellationToken cancellationToken)
     {
-        var document = _leases.Consume(handle, lease, "playback", userId);
+        var document = await _leases.ConsumeAsync(
+            handle,
+            lease,
+            "details",
+            userId,
+            cancellationToken).ConfigureAwait(false);
         var binding = await _bindings.FindResolutionBindingAsync(
             document.PermalinkId,
             document.ItemId,
             cancellationToken).ConfigureAwait(false);
-        var item = await VerifyAsync(binding, cancellationToken).ConfigureAwait(false);
-        var queueCount = item is Series or Season
-            ? Math.Min(100, ((Folder)item).GetRecursiveChildren().Count(IsPlayable))
-            : 1;
-        if (item is Series or Season)
-        {
-            return new PermalinkPlaybackSnapshot(item.Id, string.Empty, queueCount);
-        }
-
-        var root = Path.Combine(
-            _authority.Root,
-            ".sloptank",
-            "permalink-playback-leases",
-            handle,
-            "entries",
-            "0",
-            "snapshots");
-        _fileSystem.CreateDirectoryDurable(root);
-        var snapshot = Path.Combine(root, Path.GetFileName(item.Path));
-        File.Copy(item.Path, snapshot);
-        return new PermalinkPlaybackSnapshot(item.Id, snapshot, queueCount);
+        var verified = await VerifyAsync(binding, document, cancellationToken).ConfigureAwait(false);
+        var envelope = await _leases.IssueAsync(
+            binding,
+            verified.Evidence,
+            "playback",
+            userId,
+            cancellationToken,
+            handle).ConfigureAwait(false);
+        await _playbackDocuments.PublishLeaseAsync(envelope.Handle, cancellationToken)
+            .ConfigureAwait(false);
+        return envelope;
     }
 
-    private async Task<BaseItem> VerifyAsync(
+    public async Task<PermalinkPlaybackSnapshot> RedeemPlaybackAsync(
+        string handle,
+        string lease,
+        string playbackSessionId,
+        int queueOrdinal,
+        bool complete,
+        Guid userId,
+        CancellationToken cancellationToken)
+    {
+        await _playback.RecoverAsync(cancellationToken).ConfigureAwait(false);
+        var continuation = _playback.IsActiveSession(handle, playbackSessionId, userId);
+        var document = await _leases.ValidatePlaybackAsync(
+            handle,
+            lease,
+            userId,
+            continuation,
+            cancellationToken).ConfigureAwait(false);
+        var binding = await _bindings.FindResolutionBindingAsync(
+            document.PermalinkId,
+            document.ItemId,
+            cancellationToken).ConfigureAwait(false);
+        var item = (await VerifyAsync(binding, document, cancellationToken).ConfigureAwait(false)).Item;
+        var entries = await BuildPlaybackPlanAsync(item, cancellationToken).ConfigureAwait(false);
+        var snapshot = await _playback.AdmitAsync(
+            handle,
+            playbackSessionId,
+            userId,
+            document.ServerId,
+            entries,
+            queueOrdinal,
+            complete,
+            cancellationToken).ConfigureAwait(false);
+        if (!continuation)
+        {
+            await _leases.MarkPlaybackConsumedAsync(document, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return snapshot;
+    }
+
+    private async Task<VerifiedCandidate> VerifyAsync(
         PermalinkResolutionBinding binding,
+        PermalinkLeaseDocument? lease,
         CancellationToken cancellationToken)
     {
         var item = _libraryManager.GetItemById<BaseItem>(binding.ItemId)
@@ -161,7 +223,147 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
             throw Conflict("assignment-mismatch", "Current provider assignment does not accept this alias.");
         }
 
-        return item;
+        var externalAliases = CurrentExternalAliases(item)
+            .OrderBy(value => value, StringComparer.Ordinal)
+            .ToArray();
+        var activeAliases = aliases.Ids.OrderBy(value => value, StringComparer.Ordinal).ToArray();
+        var providerDigest = CanonicalJson.Digest(CanonicalJson.Serialize(externalAliases));
+        var aliasDigest = CanonicalJson.Digest(CanonicalJson.Serialize(activeAliases));
+        var assignmentHead = CanonicalJson.Digest(CanonicalJson.Serialize(
+            new[] { providerDigest, aliasDigest }));
+        var evidence = new PermalinkLeaseStore.LeaseEvidence(
+            ObjectIdentity(item.Path),
+            assignmentHead,
+            providerDigest,
+            aliasDigest);
+        if (lease is not null
+            && (!lease.CapsuleId.Equals(binding.CapsuleId)
+                || !lease.BindingInstanceId.Equals(binding.BindingInstanceId)
+                || !string.Equals(lease.ContentRoot, binding.ContentRoot, StringComparison.Ordinal)
+                || !string.Equals(lease.AnchorToken, binding.AnchorToken, StringComparison.Ordinal)
+                || !string.Equals(lease.CurrentPath, binding.CurrentPath, StringComparison.Ordinal)
+                || !string.Equals(lease.ObjectIdentity, evidence.ObjectIdentity, StringComparison.Ordinal)
+                || !string.Equals(lease.AssignmentHead, evidence.AssignmentHead, StringComparison.Ordinal)
+                || !string.Equals(
+                    lease.AcceptedProviderDigest,
+                    evidence.AcceptedProviderDigest,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    lease.ActiveAliasSetDigest,
+                    evidence.ActiveAliasSetDigest,
+                    StringComparison.Ordinal)))
+        {
+            throw Conflict(
+                "lease-evidence-changed",
+                "The binding, assignment head, active aliases, provider claim, or live object changed.");
+        }
+
+        return new VerifiedCandidate(item, evidence);
+    }
+
+    private async Task<IReadOnlyList<PermalinkPlaybackPlanStore.PlaybackPlanEntry>> BuildPlaybackPlanAsync(
+        BaseItem item,
+        CancellationToken cancellationToken)
+    {
+        var selected = item switch
+        {
+            Series or Season => ((Folder)item).GetRecursiveChildren()
+                .Where(IsPlayable)
+                .Take(100),
+            BoxSet boxSet => boxSet.GetLinkedChildren().Where(IsPlayable),
+            _ => new[] { item }
+        };
+        var entries = new List<PermalinkPlaybackPlanStore.PlaybackPlanEntry>();
+        foreach (var selectedItem in selected)
+        {
+            var sources = await BuildSourcesAsync(selectedItem, cancellationToken).ConfigureAwait(false);
+            if (sources.Count > 0)
+            {
+                entries.Add(new PermalinkPlaybackPlanStore.PlaybackPlanEntry(selectedItem.Id, sources));
+            }
+        }
+
+        if (entries.Count == 0)
+        {
+            throw Conflict("playback-plan-empty", $"Item '{item.Id}' has no playable frozen plan.");
+        }
+
+        return entries;
+    }
+
+    private static async Task<IReadOnlyList<PermalinkPlaybackPlanStore.PlaybackSource>> BuildSourcesAsync(
+        BaseItem item,
+        CancellationToken cancellationToken)
+    {
+        var paths = new List<(string Path, string RelativePath)>();
+        if (item is Video { VideoType: VideoType.Dvd or VideoType.BluRay })
+        {
+            var mediaRoot = Directory.Exists(Path.Combine(item.Path, "BDMV"))
+                ? Path.Combine(item.Path, "BDMV")
+                : Path.Combine(item.Path, "VIDEO_TS");
+            paths.AddRange(Directory.EnumerateFiles(mediaRoot, "*", SearchOption.AllDirectories)
+                .OrderBy(value => value, StringComparer.Ordinal)
+                .Select(value => (
+                    value,
+                    Path.GetRelativePath(item.Path, value).Replace(
+                        Path.DirectorySeparatorChar,
+                        '/'))));
+        }
+        else if (item is Video video && !string.IsNullOrEmpty(item.Path))
+        {
+            paths.Add((item.Path, Path.GetFileName(item.Path)));
+            paths.AddRange(video.AdditionalParts.Select(value => (value, Path.GetFileName(value))));
+        }
+
+        var sources = new List<PermalinkPlaybackPlanStore.PlaybackSource>(paths.Count);
+        foreach (var (path, relativePath) in paths)
+        {
+            sources.Add(new PermalinkPlaybackPlanStore.PlaybackSource(
+                path,
+                relativePath,
+                await PermalinkPlaybackPlanStore.DigestFileAsync(path, cancellationToken)
+                    .ConfigureAwait(false)));
+        }
+
+        return sources;
+    }
+
+    private static string ObjectIdentity(string path)
+    {
+        if (File.Exists(path))
+        {
+            var info = new FileInfo(path);
+            return string.Join(
+                ":",
+                "file",
+                info.CreationTimeUtc.Ticks,
+                info.Length,
+                info.LastWriteTimeUtc.Ticks);
+        }
+
+        if (Directory.Exists(path))
+        {
+            var info = new DirectoryInfo(path);
+            return string.Join(":", "directory", info.CreationTimeUtc.Ticks, info.LastWriteTimeUtc.Ticks);
+        }
+
+        throw Conflict("binding-item-missing", $"Bound path '{path}' is missing.");
+    }
+
+    private static bool IsExternalAlias(string permalinkId)
+    {
+        if (permalinkId.StartsWith("tt", StringComparison.Ordinal)
+            && permalinkId.Length > 2
+            && permalinkId.AsSpan(2).IndexOfAnyExceptInRange('0', '9') < 0)
+        {
+            return true;
+        }
+
+        var separator = permalinkId.LastIndexOf('-');
+        return permalinkId.StartsWith("tm-", StringComparison.Ordinal)
+            && separator > 3
+            && separator < permalinkId.Length - 1
+            && permalinkId.AsSpan(separator + 1).IndexOfAnyExceptInRange('0', '9') < 0;
     }
 
     private static IEnumerable<string> CurrentExternalAliases(BaseItem item)
@@ -191,4 +393,6 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
     {
         return new PermalinkException(PermalinkErrorKind.Conflict, code, message);
     }
+
+    private sealed record VerifiedCandidate(BaseItem Item, PermalinkLeaseStore.LeaseEvidence Evidence);
 }

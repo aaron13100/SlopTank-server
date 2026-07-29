@@ -10,6 +10,7 @@ namespace Emby.Server.Implementations.Permalinks;
 /// <param name="CapsuleId">The logical capsule identifier.</param>
 /// <param name="ContentRoot">The verified content root.</param>
 /// <param name="AnchorToken">The stable physical anchor.</param>
+/// <param name="BindingInstanceId">The elected physical binding instance.</param>
 /// <param name="CurrentPath">The currently bound media path.</param>
 /// <param name="IsCapsuleOverride">Whether recovery state overrides the derived binding.</param>
 internal sealed record PermalinkResolutionBinding(
@@ -18,5 +19,6 @@ internal sealed record PermalinkResolutionBinding(
     Guid CapsuleId,
     string ContentRoot,
     string AnchorToken,
+    Guid BindingInstanceId,
     string CurrentPath,
     bool IsCapsuleOverride);

@@ -59,7 +59,8 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         }
 
         var effectiveKind = ResolveEffectiveKind(mutationItems, request, out var promotedItem);
-        if (promotedItem is not null && mutationItems.All(value => value.Id != promotedItem.Id))
+        if (promotedItem is not null
+            && mutationItems.All(value => !value.Id.Equals(promotedItem.Id)))
         {
             mutationItems = [.. mutationItems, promotedItem];
         }
@@ -302,7 +303,7 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         if (request.Kind != "deletion"
             || primary is null
             || primary.PrimaryVersionId.HasValue
-            || primary.OwnerId != Guid.Empty)
+            || !primary.OwnerId.Equals(Guid.Empty))
         {
             return request.Kind;
         }

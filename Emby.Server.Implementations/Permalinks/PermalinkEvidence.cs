@@ -18,8 +18,70 @@ namespace Emby.Server.Implementations.Permalinks;
 public sealed class PermalinkEvidence
 {
     /// <summary>
+    /// Computes canonical evidence with an operation-owned replacement main file.
+    /// </summary>
+    /// <param name="item">The library item.</param>
+    /// <param name="mainPath">The main path.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    public async Task<PermalinkEvidenceResult> ComputeMediaReplacementAsync(
+        BaseItem item,
+        string mainPath,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (item is not Video video)
+            {
+                throw new PermalinkException(
+                    PermalinkErrorKind.Ineligible,
+                    "content-shape",
+                    $"{item.GetType().Name} has no supported replacement media shape.");
+            }
+
+            var paths = new List<(string Role, string Path)> { ("main", mainPath) };
+            for (var index = 0; index < video.AdditionalParts.Length; index++)
+            {
+                paths.Add(($"additional:{index}", video.AdditionalParts[index]));
+            }
+
+            var leaves = new List<PermalinkLeaf>(paths.Count);
+            foreach (var (role, path) in paths)
+            {
+                leaves.Add(await HashFileAsync(
+                    "media",
+                    role,
+                    relativePath: null,
+                    path,
+                    cancellationToken).ConfigureAwait(false));
+            }
+
+            return Build(leaves);
+        }
+        catch (FileNotFoundException exception)
+        {
+            throw Unreachable(mainPath, exception);
+        }
+        catch (DirectoryNotFoundException exception)
+        {
+            throw Unreachable(mainPath, exception);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            throw Unreachable(mainPath, exception);
+        }
+        catch (IOException exception)
+        {
+            throw Unreachable(mainPath, exception);
+        }
+    }
+
+    /// <summary>
     /// Computes file, multipart, or optical evidence for a content item.
     /// </summary>
+    /// <param name="item">The library item.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<PermalinkEvidenceResult> ComputeContentItemAsync(
         BaseItem item,
         CancellationToken cancellationToken)
@@ -83,6 +145,8 @@ public sealed class PermalinkEvidence
     /// <summary>
     /// Computes a canonical descendant manifest for Series and Season.
     /// </summary>
+    /// <param name="descendants">The descendants.</param>
+    /// <returns>The resulting value.</returns>
     public PermalinkEvidenceResult ComputeDescendantManifest(
         IReadOnlyList<(BaseItem Item, PermalinkStoredState State)> descendants)
     {
@@ -102,6 +166,9 @@ public sealed class PermalinkEvidence
     /// <summary>
     /// Computes a finite direct-member graph manifest for one BoxSet root.
     /// </summary>
+    /// <param name="rootCapsuleId">The root capsule id.</param>
+    /// <param name="members">The members.</param>
+    /// <returns>The resulting value.</returns>
     public PermalinkEvidenceResult ComputeBoxSetManifest(
         Guid rootCapsuleId,
         IReadOnlyList<(BaseItem Item, PermalinkStoredState State)> members)
@@ -244,10 +311,3 @@ public sealed class PermalinkEvidence
             exception);
     }
 }
-
-/// <summary>
-/// Holds a canonical evidence root and its complete leaves.
-/// </summary>
-public sealed record PermalinkEvidenceResult(
-    string ContentRoot,
-    IReadOnlyList<PermalinkLeaf> Leaves);

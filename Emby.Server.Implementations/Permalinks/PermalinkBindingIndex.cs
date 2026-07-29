@@ -21,6 +21,8 @@ internal sealed class PermalinkBindingIndex
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkBindingIndex"/> class.
     /// </summary>
+    /// <param name="authority">The permalink authority store.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public PermalinkBindingIndex(
         PermalinkAuthorityStore authority,
         TimeProvider timeProvider)
@@ -32,6 +34,11 @@ internal sealed class PermalinkBindingIndex
     /// <summary>
     /// Replaces one derived alias/item binding after durable verification.
     /// </summary>
+    /// <param name="permalinkId">The permalink id.</param>
+    /// <param name="itemId">The Jellyfin item identifier.</param>
+    /// <param name="contentRoot">The verified content root.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task BindAsync(
         string permalinkId,
         Guid itemId,
@@ -63,6 +70,10 @@ internal sealed class PermalinkBindingIndex
     /// <summary>
     /// Advances only the derived current-path index after durable path adoption.
     /// </summary>
+    /// <param name="anchorToken">The anchor token.</param>
+    /// <param name="currentPath">The current path.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task UpdateCurrentPathAsync(
         string anchorToken,
         string currentPath,
@@ -90,6 +101,10 @@ internal sealed class PermalinkBindingIndex
     /// <summary>
     /// Finds the capsule owning one verified derived alias/item binding.
     /// </summary>
+    /// <param name="permalinkId">The permalink id.</param>
+    /// <param name="itemId">The Jellyfin item identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<Guid> FindCapsuleIdAsync(
         string permalinkId,
         Guid itemId,
@@ -123,6 +138,9 @@ internal sealed class PermalinkBindingIndex
     }
 
     /// <summary>Returns whether an item already has durable permalink identity.</summary>
+    /// <param name="itemId">The Jellyfin item identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<bool> HasItemBindingAsync(
         Guid itemId,
         CancellationToken cancellationToken)
@@ -141,9 +159,36 @@ internal sealed class PermalinkBindingIndex
         return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
     }
 
+    /// <summary>Returns whether an alias was durably issued even when no live binding remains.</summary>
+    /// <param name="permalinkId">The permalink identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>Whether the authority retains an immutable first-alias claim.</returns>
+    public async Task<bool> IsKnownAliasAsync(
+        string permalinkId,
+        CancellationToken cancellationToken)
+    {
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT 1
+              FROM FirstAliasClaims
+             WHERE permalink_id = $id
+             LIMIT 1
+            """;
+        command.Parameters.AddWithValue("$id", permalinkId);
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
+    }
+
     /// <summary>
     /// Moves every derived alias binding to a promoted item and its verified capsule.
     /// </summary>
+    /// <param name="oldItemId">The old item id.</param>
+    /// <param name="promotedItemId">The promoted item id.</param>
+    /// <param name="promotedPath">The promoted path.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task PromoteItemBindingsAsync(
         Guid oldItemId,
         Guid promotedItemId,
@@ -210,6 +255,9 @@ internal sealed class PermalinkBindingIndex
     }
 
     /// <summary>Removes a deleted item's rebuildable live bindings while retaining capsule history.</summary>
+    /// <param name="itemId">The Jellyfin item identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task RemoveItemBindingsAsync(
         Guid itemId,
         CancellationToken cancellationToken)
@@ -229,6 +277,10 @@ internal sealed class PermalinkBindingIndex
     /// <summary>
     /// Advances all derived aliases for one item after a controlled content commit.
     /// </summary>
+    /// <param name="itemId">The Jellyfin item identifier.</param>
+    /// <param name="contentRoot">The verified content root.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task UpdateContentRootAsync(
         Guid itemId,
         string contentRoot,
@@ -247,6 +299,9 @@ internal sealed class PermalinkBindingIndex
     }
 
     /// <summary>Returns all derived bindings for one exact alias.</summary>
+    /// <param name="permalinkId">The permalink id.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<IReadOnlyList<PermalinkResolutionBinding>> FindResolutionBindingsAsync(
         string permalinkId,
         CancellationToken cancellationToken)
@@ -287,6 +342,10 @@ internal sealed class PermalinkBindingIndex
     }
 
     /// <summary>Returns one exact derived alias/item binding.</summary>
+    /// <param name="permalinkId">The permalink id.</param>
+    /// <param name="itemId">The Jellyfin item identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<PermalinkResolutionBinding> FindResolutionBindingAsync(
         string permalinkId,
         Guid itemId,
@@ -294,7 +353,7 @@ internal sealed class PermalinkBindingIndex
     {
         var matches = await FindResolutionBindingsAsync(permalinkId, cancellationToken)
             .ConfigureAwait(false);
-        return matches.SingleOrDefault(value => value.ItemId == itemId)
+        return matches.SingleOrDefault(value => value.ItemId.Equals(itemId))
             ?? throw new PermalinkException(
                 PermalinkErrorKind.Conflict,
                 "binding-missing",
@@ -308,12 +367,3 @@ internal sealed class PermalinkBindingIndex
         return new Guid(bytes);
     }
 }
-
-internal sealed record PermalinkResolutionBinding(
-    string PermalinkId,
-    Guid ItemId,
-    Guid CapsuleId,
-    string ContentRoot,
-    string AnchorToken,
-    string CurrentPath,
-    bool IsCapsuleOverride);

@@ -15,6 +15,7 @@ internal sealed class PermalinkDocumentFactory
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkDocumentFactory"/> class.
     /// </summary>
+    /// <param name="timeProvider">The time provider.</param>
     public PermalinkDocumentFactory(TimeProvider timeProvider)
     {
         _timeProvider = timeProvider;
@@ -23,6 +24,13 @@ internal sealed class PermalinkDocumentFactory
     /// <summary>
     /// Freezes one candidate for the global stable-anchor genesis election.
     /// </summary>
+    /// <param name="request">The mutation request.</param>
+    /// <param name="root">The root.</param>
+    /// <param name="anchorToken">The anchor token.</param>
+    /// <param name="capsulePath">The durable capsule path.</param>
+    /// <param name="capsuleId">The logical capsule identifier.</param>
+    /// <param name="issuance">The issuance.</param>
+    /// <returns>The resulting value.</returns>
     public PermalinkGenesisCandidate CreateGenesis(
         PermalinkStoreRequest request,
         string root,
@@ -100,6 +108,9 @@ internal sealed class PermalinkDocumentFactory
     /// <summary>
     /// Constructs an append-only strict-superset content successor.
     /// </summary>
+    /// <param name="request">The mutation request.</param>
+    /// <param name="snapshot">The snapshot.</param>
+    /// <returns>The resulting value.</returns>
     public PermalinkEventDocument CreateContentSuccessor(
         PermalinkStoreRequest request,
         PermalinkCapsuleSnapshot snapshot)
@@ -124,6 +135,10 @@ internal sealed class PermalinkDocumentFactory
     /// <summary>
     /// Constructs the exact content successor owned by a prepared mutation.
     /// </summary>
+    /// <param name="request">The mutation request.</param>
+    /// <param name="snapshot">The snapshot.</param>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <returns>The resulting value.</returns>
     public PermalinkEventDocument CreateControlledContentSuccessor(
         PermalinkStoreRequest request,
         PermalinkCapsuleSnapshot snapshot,
@@ -149,6 +164,10 @@ internal sealed class PermalinkDocumentFactory
     /// <summary>
     /// Constructs one first-alias successor for a seeded capsule.
     /// </summary>
+    /// <param name="reservation">The reservation.</param>
+    /// <param name="snapshot">The snapshot.</param>
+    /// <param name="issuance">The issuance.</param>
+    /// <returns>The resulting value.</returns>
     public PermalinkEventDocument CreateAliasSuccessor(
         PermalinkGenesisReservation reservation,
         PermalinkCapsuleSnapshot snapshot,
@@ -174,6 +193,10 @@ internal sealed class PermalinkDocumentFactory
     /// <summary>
     /// Constructs one accepted-provider alias successor for a seeded capsule.
     /// </summary>
+    /// <param name="reservation">The reservation.</param>
+    /// <param name="snapshot">The snapshot.</param>
+    /// <param name="alias">The alias.</param>
+    /// <returns>The resulting value.</returns>
     public PermalinkEventDocument CreateExternalAliasSuccessor(
         PermalinkGenesisReservation reservation,
         PermalinkCapsuleSnapshot snapshot,

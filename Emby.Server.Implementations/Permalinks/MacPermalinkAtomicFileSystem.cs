@@ -27,6 +27,7 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
     /// <summary>
     /// Initializes a new instance of the <see cref="MacPermalinkAtomicFileSystem"/> class.
     /// </summary>
+    /// <param name="mountPolicy">The mount policy.</param>
     public MacPermalinkAtomicFileSystem(MacPermalinkMountPolicy mountPolicy)
     {
         _mountPolicy = mountPolicy;
@@ -106,6 +107,20 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
     public void AssignAnchorToken(string path, string anchorToken)
     {
         _mountPolicy.EnsureAdmitted(path);
+        var existing = ReadAnchorToken(path);
+        if (existing is not null)
+        {
+            if (string.Equals(existing, anchorToken, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "anchor-replacement",
+                $"Stable anchor at '{path}' does not match the prepared token.");
+        }
+
         byte[] bytes;
         try
         {
@@ -126,7 +141,15 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
             throw FileSystemFailure("anchor-assign", path, Marshal.GetLastPInvokeError());
         }
 
-        SyncPath(path);
+        if (Directory.Exists(path))
+        {
+            SyncDirectory(path);
+        }
+        else
+        {
+            SyncPath(path);
+        }
+
         SyncDirectory(Path.GetDirectoryName(path)!);
     }
 
@@ -158,6 +181,19 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
             SyncDirectory(directory);
             SyncDirectory(Path.GetDirectoryName(directory)!);
         }
+    }
+
+    /// <inheritdoc />
+    public void SyncFile(string path)
+    {
+        _mountPolicy.EnsureAdmitted(path);
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read);
+        FullSyncDescriptor(stream.SafeFileHandle.DangerousGetHandle().ToInt32(), path);
+        SyncDirectory(Path.GetDirectoryName(path)!);
     }
 
     /// <inheritdoc />

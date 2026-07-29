@@ -24,6 +24,8 @@ public sealed class PermalinkManager : IPermalinkManager
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkManager"/> class.
     /// </summary>
+    /// <param name="store">The store.</param>
+    /// <param name="evidence">The evidence.</param>
     public PermalinkManager(IPermalinkStore store, PermalinkEvidence evidence)
     {
         _store = store;

@@ -6,6 +6,8 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
 
@@ -21,7 +23,10 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         "media",
         "path",
         "cross-root",
+        "tree",
+        "multipart",
         "logical",
+        "aggregate",
         "alias-import",
         "promotion",
         "grouping",
@@ -41,12 +46,27 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     private readonly PermalinkOperationJournal _journal;
     private readonly PermalinkBindingIndex _bindings;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
+    private readonly PermalinkMutationBundleFactory _bundleFactory;
     private readonly PermalinkMediaMutation _mediaMutation;
+    private readonly PermalinkMediaRecovery _mediaRecovery;
+    private readonly PermalinkPathMutation _pathMutation;
     private readonly TimeProvider _timeProvider;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkMutationCoordinator"/> class.
     /// </summary>
+    /// <param name="libraryManager">The library manager.</param>
+    /// <param name="manager">The manager.</param>
+    /// <param name="evidence">The evidence.</param>
+    /// <param name="authority">The permalink authority store.</param>
+    /// <param name="journal">The journal.</param>
+    /// <param name="bindings">The bindings.</param>
+    /// <param name="fileSystem">The durable permalink filesystem.</param>
+    /// <param name="bundleFactory">The bundle factory.</param>
+    /// <param name="mediaMutation">The media mutation.</param>
+    /// <param name="mediaRecovery">The media recovery.</param>
+    /// <param name="pathMutation">The path mutation.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public PermalinkMutationCoordinator(
         ILibraryManager libraryManager,
         IPermalinkManager manager,
@@ -55,7 +75,10 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         PermalinkOperationJournal journal,
         PermalinkBindingIndex bindings,
         IPermalinkAtomicFileSystem fileSystem,
+        PermalinkMutationBundleFactory bundleFactory,
         PermalinkMediaMutation mediaMutation,
+        PermalinkMediaRecovery mediaRecovery,
+        PermalinkPathMutation pathMutation,
         TimeProvider timeProvider)
     {
         _libraryManager = libraryManager;
@@ -65,7 +88,10 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         _journal = journal;
         _bindings = bindings;
         _fileSystem = fileSystem;
+        _bundleFactory = bundleFactory;
         _mediaMutation = mediaMutation;
+        _mediaRecovery = mediaRecovery;
+        _pathMutation = pathMutation;
         _timeProvider = timeProvider;
     }
 
@@ -75,7 +101,9 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         PermalinkMutationPrepareRequest request,
         CancellationToken cancellationToken)
     {
-        if (request.OperationId == Guid.Empty || request.ItemId != item.Id || !_kinds.Contains(request.Kind))
+        if (request.OperationId.Equals(Guid.Empty)
+            || !request.ItemId.Equals(item.Id)
+            || !_kinds.Contains(request.Kind))
         {
             throw Conflict("mutation-input", "Mutation input has an invalid operation, item, or kind.");
         }
@@ -84,12 +112,17 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             .ConfigureAwait(false);
         var ensured = await _manager.EnsurePermalinkIdsAsync(item, cancellationToken)
             .ConfigureAwait(false);
-        var evidence = await _evidence.ComputeContentItemAsync(item, cancellationToken)
-            .ConfigureAwait(false);
-        var capsuleId = await _bindings.FindCapsuleIdAsync(
+        var binding = await _bindings.FindResolutionBindingAsync(
             ensured.CanonicalId,
             item.Id,
             cancellationToken).ConfigureAwait(false);
+        var oldContentRoot = item is Series or Season or BoxSet
+            ? binding.ContentRoot
+            : (await _evidence.ComputeContentItemAsync(item, cancellationToken)
+                .ConfigureAwait(false)).ContentRoot;
+        var capsuleId = binding.CapsuleId;
+        var bundle = await _bundleFactory.CreateAsync(item, request, cancellationToken)
+            .ConfigureAwait(false);
         var operation = new PermalinkOperationDocument(
             request.OperationId,
             item.Id,
@@ -97,12 +130,13 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             request.Kind,
             item.Path,
             request.DestinationPath,
-            evidence.ContentRoot,
+            oldContentRoot,
             new Dictionary<string, string>(item.ProviderIds, StringComparer.OrdinalIgnoreCase),
             request.DesiredProviderIds is null
                 ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 : new Dictionary<string, string>(request.DesiredProviderIds, StringComparer.OrdinalIgnoreCase),
             PermalinkIdentitySnapshot.Capture(item),
+            bundle,
             UtcNow());
         if (existing is not null
             && !CanonicalJson.Serialize(existing).Span.SequenceEqual(
@@ -115,7 +149,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         await _journal.WritePhaseAsync(
             request.OperationId,
             "prepared",
-            Phase(request.OperationId, "prepared", evidence.ContentRoot),
+            Phase(request.OperationId, "prepared", oldContentRoot),
             cancellationToken).ConfigureAwait(false);
         return new PermalinkMutationResult(request.OperationId, "prepared");
     }
@@ -138,12 +172,6 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         }
 
         var item = RequireItem(operation.ItemId);
-        var current = await _evidence.ComputeContentItemAsync(item, cancellationToken)
-            .ConfigureAwait(false);
-        if (!string.Equals(current.ContentRoot, operation.OldContentRoot, StringComparison.Ordinal))
-        {
-            throw Conflict("prepared-old-mismatch", "Live content no longer matches prepared-old evidence.");
-        }
 
         return operation.Kind switch
         {
@@ -151,10 +179,10 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
                 operation,
                 item,
                 request,
-                Phase(operation.OperationId, "ready", null),
                 cancellationToken)
                 .ConfigureAwait(false),
-            "path" or "cross-root" => await CommitPathAsync(operation, item, cancellationToken)
+            "path" or "cross-root" or "tree" or "multipart"
+                => await _pathMutation.CommitAsync(operation, item, cancellationToken)
                 .ConfigureAwait(false),
             "logical" or "identify" or "manual-metadata" or "automatic-refresh" or "nfo-refresh"
                 => await CommitLogicalAsync(operation, item, request, cancellationToken)
@@ -175,19 +203,43 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         }
 
         var item = RequireItem(operation.ItemId);
-        var staging = Path.Combine(_journal.GetOperationPath(operationId), "staging", "desired");
-        var quarantine = Path.Combine(_journal.GetOperationPath(operationId), "quarantine", "old");
-        if (operation.Kind == "media" && !File.Exists(item.Path)
-            && File.Exists(staging) && File.Exists(quarantine))
+        if (operation.Kind == "media")
         {
-            File.Move(staging, item.Path);
-            return await _mediaMutation.FinalizeAsync(operation, item, cancellationToken)
+            return await _mediaRecovery.RecoverAsync(operation, item, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (operation.Kind is "path" or "cross-root" or "tree" or "multipart")
+        {
+            return await _pathMutation.RecoverAsync(operation, item, cancellationToken)
                 .ConfigureAwait(false);
         }
 
         throw Conflict(
             "manual-intervention",
             $"Operation '{operationId}' evidence does not match an automatic recovery branch.");
+    }
+
+    /// <inheritdoc />
+    public async Task<PermalinkMutationResult> ResolveAsync(
+        Guid operationId,
+        PermalinkOperationResolutionRequest request,
+        CancellationToken cancellationToken)
+    {
+        var operation = await RequireOperationAsync(operationId, cancellationToken)
+            .ConfigureAwait(false);
+        if (_journal.HasPhase(operationId, "committed"))
+        {
+            return new PermalinkMutationResult(operationId, "committed");
+        }
+
+        var item = RequireItem(operation.ItemId);
+        return operation.Kind == "media"
+            ? await _mediaRecovery.ResolveAsync(operation, item, request, cancellationToken)
+                .ConfigureAwait(false)
+            : throw Conflict(
+                "resolution-action-invalid",
+                $"Operation kind '{operation.Kind}' has no guarded '{request.Action}' action.");
     }
 
     /// <inheritdoc />
@@ -223,37 +275,6 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             Phase(operation.OperationId, "cancelled", operation.OldContentRoot),
             cancellationToken).ConfigureAwait(false);
         return new PermalinkMutationResult(operationId, "cancelled");
-    }
-
-    private async Task<PermalinkMutationResult> CommitPathAsync(
-        PermalinkOperationDocument operation,
-        BaseItem item,
-        CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(operation.DestinationPath)
-            || File.Exists(operation.DestinationPath)
-            || Directory.Exists(operation.DestinationPath))
-        {
-            throw Conflict("destination-occupied", "The prepared destination is missing or occupied.");
-        }
-
-        _ = Path.GetDirectoryName(operation.DestinationPath) is { } parent
-            ? Directory.CreateDirectory(parent)
-            : null;
-        File.Move(item.Path, operation.DestinationPath);
-        item.Path = operation.DestinationPath;
-        await _libraryManager.UpdateItemAsync(
-            item,
-            item.GetParent()!,
-            ItemUpdateType.MetadataEdit,
-            cancellationToken).ConfigureAwait(false);
-        var anchor = _fileSystem.ReadAnchorToken(item.Path)
-            ?? throw Conflict("anchor-missing", "Moved item lost its stable anchor.");
-        await _bindings.UpdateCurrentPathAsync(anchor, item.Path, cancellationToken)
-            .ConfigureAwait(false);
-        await WritePublishedAndCommittedAsync(operation, operation.OldContentRoot, cancellationToken)
-            .ConfigureAwait(false);
-        return new PermalinkMutationResult(operation.OperationId, "committed");
     }
 
     private async Task<PermalinkMutationResult> CommitLogicalAsync(

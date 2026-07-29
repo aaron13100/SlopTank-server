@@ -14,6 +14,11 @@ public interface IPermalinkIdentityMutationAdapter
     /// <summary>
     /// Executes one mutation after all protected items have durable prepared state.
     /// </summary>
+    /// <param name="items">The complete protected item set.</param>
+    /// <param name="request">The immutable mutation intent.</param>
+    /// <param name="mutation">The live mutation invoked with its ambient operation token.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the durable mutation.</returns>
     Task ExecuteAsync(
         IReadOnlyList<BaseItem> items,
         PermalinkIdentityMutationRequest request,
@@ -23,6 +28,9 @@ public interface IPermalinkIdentityMutationAdapter
     /// <summary>
     /// Cancels the latest pending mutation for an item after verifying or restoring old identity.
     /// </summary>
+    /// <param name="item">The protected item.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The folded terminal or suspended operation state.</returns>
     Task<PermalinkMutationResult> CancelPendingAsync(
         BaseItem item,
         CancellationToken cancellationToken);
@@ -30,26 +38,14 @@ public interface IPermalinkIdentityMutationAdapter
     /// <summary>
     /// Commits one exact pending logical assignment after current identity revalidation.
     /// </summary>
+    /// <param name="item">The protected item.</param>
+    /// <param name="operationId">The prepared operation identifier.</param>
+    /// <param name="desiredProviderIds">The exact desired provider assignment.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The folded committed operation state.</returns>
     Task<PermalinkMutationResult> CommitPendingAsync(
         BaseItem item,
         Guid operationId,
         IReadOnlyDictionary<string, string> desiredProviderIds,
         CancellationToken cancellationToken);
-}
-
-/// <summary>
-/// Immutable identity mutation intent supplied before live state changes.
-/// </summary>
-public sealed record PermalinkIdentityMutationRequest(
-    string Kind,
-    IReadOnlyDictionary<string, string>? DesiredProviderIds = null,
-    string? DesiredItemKind = null);
-
-/// <summary>
-/// Opaque operation context accepted only while its owning adapter invocation is active.
-/// </summary>
-public interface IPermalinkMutationAmbientToken
-{
-    /// <summary>Gets the immutable operation ids prepared for this bundle.</summary>
-    IReadOnlyList<Guid> OperationIds { get; }
 }

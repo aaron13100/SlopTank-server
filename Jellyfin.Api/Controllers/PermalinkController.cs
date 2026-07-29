@@ -29,6 +29,10 @@ public sealed class PermalinkController : BaseJellyfinApiController
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkController"/> class.
     /// </summary>
+    /// <param name="libraryManager">The library manager.</param>
+    /// <param name="permalinkManager">The durable permalink manager.</param>
+    /// <param name="userManager">The user manager.</param>
+    /// <param name="identityMutationAdapter">The identity mutation adapter.</param>
     public PermalinkController(
         ILibraryManager libraryManager,
         IPermalinkManager permalinkManager,
@@ -89,6 +93,9 @@ public sealed class PermalinkController : BaseJellyfinApiController
     }
 
     /// <summary>Cancels the item's latest recoverable logical reassignment.</summary>
+    /// <param name="itemId">The visible item id.</param>
+    /// <param name="cancellationToken">The request cancellation token.</param>
+    /// <returns>The folded cancelled or restored mutation state.</returns>
     [HttpPost("Items/{itemId}/Permalink/CancelLogicalReassignment")]
     [ProducesResponseType<PermalinkMutationResult>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -119,6 +126,10 @@ public sealed class PermalinkController : BaseJellyfinApiController
     }
 
     /// <summary>Confirms an exact current provider assignment through the durable logical boundary.</summary>
+    /// <param name="itemId">The visible item id.</param>
+    /// <param name="request">The exact logical assignment confirmation.</param>
+    /// <param name="cancellationToken">The request cancellation token.</param>
+    /// <returns>A no-content response after durable confirmation.</returns>
     [HttpPost("Items/{itemId}/Permalink/LogicalAssignment")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -179,8 +190,3 @@ public sealed class PermalinkController : BaseJellyfinApiController
                 && string.Equals(pair.Value, value, StringComparison.Ordinal));
     }
 }
-
-/// <summary>Exact logical-assignment confirmation payload.</summary>
-public sealed record PermalinkLogicalAssignmentRequest(
-    string OperationId,
-    IReadOnlyDictionary<string, string>? ProviderIds);

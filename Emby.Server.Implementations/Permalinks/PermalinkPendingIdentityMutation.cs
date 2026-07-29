@@ -59,7 +59,7 @@ internal sealed class PermalinkPendingIdentityMutation
     {
         var operation = await _journal.ReadAsync(operationId, cancellationToken).ConfigureAwait(false);
         if (operation is null
-            || operation.ItemId != item.Id
+            || !operation.ItemId.Equals(item.Id)
             || !string.Equals(operation.Kind, "logical", StringComparison.Ordinal))
         {
             throw Conflict(

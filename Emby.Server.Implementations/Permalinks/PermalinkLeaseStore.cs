@@ -69,7 +69,7 @@ internal sealed class PermalinkLeaseStore
             || !CryptographicOperations.FixedTimeEquals(
                 System.Text.Encoding.UTF8.GetBytes(document.Lease),
                 System.Text.Encoding.UTF8.GetBytes(lease))
-            || document.UserId != userId
+            || !document.UserId.Equals(userId)
             || !string.Equals(document.Purpose, purpose, StringComparison.Ordinal)
             || DateTimeOffset.Parse(document.ExpiresAt, CultureInfo.InvariantCulture)
                 <= _timeProvider.GetUtcNow())
@@ -93,16 +93,3 @@ internal sealed class PermalinkLeaseStore
         return permalinkId.StartsWith("sk-", StringComparison.Ordinal) ? "sloptank" : "external";
     }
 }
-
-internal sealed record PermalinkLeaseDocument(
-    string Handle,
-    string Lease,
-    string PermalinkId,
-    Guid ItemId,
-    Guid CapsuleId,
-    string ContentRoot,
-    string AnchorToken,
-    string CurrentPath,
-    string Purpose,
-    Guid UserId,
-    string ExpiresAt);

@@ -24,7 +24,12 @@ public sealed class PermalinkResolutionController : BaseJellyfinApiController
     private readonly IUserManager _userManager;
     private readonly IDtoService _dtoService;
 
-    /// <summary>Initializes a new instance of the controller.</summary>
+    /// <summary>
+    /// Initializes a new instance of the <see cref="PermalinkResolutionController"/> class.
+    /// </summary>
+    /// <param name="resolution">The permalink resolution service.</param>
+    /// <param name="userManager">The user manager.</param>
+    /// <param name="dtoService">The item DTO service.</param>
     public PermalinkResolutionController(
         IPermalinkResolutionService resolution,
         IUserManager userManager,
@@ -36,6 +41,10 @@ public sealed class PermalinkResolutionController : BaseJellyfinApiController
     }
 
     /// <summary>Discovers verified opaque candidates for one alias.</summary>
+    /// <param name="permalinkId">The opaque permalink identifier.</param>
+    /// <param name="purpose">The requested redemption purpose.</param>
+    /// <param name="cancellationToken">The request cancellation token.</param>
+    /// <returns>The ordered metadata-free candidate envelopes.</returns>
     [HttpGet("{permalinkId}/Items")]
     public async Task<ActionResult<QueryResult<PermalinkCandidateEnvelope>>> Discover(
         [FromRoute] string permalinkId,
@@ -54,6 +63,10 @@ public sealed class PermalinkResolutionController : BaseJellyfinApiController
     }
 
     /// <summary>Consumes a details lease and returns the revalidated item DTO.</summary>
+    /// <param name="handle">The opaque candidate handle.</param>
+    /// <param name="request">The purpose-bound lease.</param>
+    /// <param name="cancellationToken">The request cancellation token.</param>
+    /// <returns>The revalidated item DTO.</returns>
     [HttpPost("Candidates/{handle}/Details")]
     public async Task<ActionResult<BaseItemDto>> Details(
         [FromRoute] string handle,
@@ -73,6 +86,10 @@ public sealed class PermalinkResolutionController : BaseJellyfinApiController
     }
 
     /// <summary>Consumes a playback lease and returns its immutable snapshot plan.</summary>
+    /// <param name="handle">The opaque candidate handle.</param>
+    /// <param name="request">The purpose-bound lease.</param>
+    /// <param name="cancellationToken">The request cancellation token.</param>
+    /// <returns>The immutable playback snapshot.</returns>
     [HttpPost("Candidates/{handle}/Playback")]
     public async Task<ActionResult<PermalinkPlaybackSnapshot>> Playback(
         [FromRoute] string handle,

@@ -24,6 +24,9 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkAuthorityStore"/> class.
     /// </summary>
+    /// <param name="configuration">The server configuration.</param>
+    /// <param name="fileSystem">The durable permalink filesystem.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public PermalinkAuthorityStore(
         IConfiguration configuration,
         IPermalinkAtomicFileSystem fileSystem,
@@ -43,6 +46,12 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// </summary>
     public string Root { get; }
 
+    private string AuthorityRoot => Path.Combine(Root, ".sloptank", "permalinks");
+
+    private string DatabasePath => Path.Combine(AuthorityRoot, "authority.db");
+
+    internal string IssuedRoot => Path.Combine(AuthorityRoot, "issued");
+
     /// <inheritdoc />
     public void Dispose()
     {
@@ -52,6 +61,8 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// <summary>
     /// Provisions and validates the authority before any content-root mutation.
     /// </summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public Task EnsureAvailableAsync(CancellationToken cancellationToken)
     {
         return EnsureProvisionedAsync(cancellationToken);
@@ -60,6 +71,9 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// <summary>
     /// Reads an existing global anchor election.
     /// </summary>
+    /// <param name="anchorToken">The anchor token.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<PermalinkGenesisReservation?> FindByAnchorAsync(
         string anchorToken,
         CancellationToken cancellationToken)
@@ -82,8 +96,38 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     }
 
     /// <summary>
+    /// Reads an existing global capsule election independently of the live filesystem anchor.
+    /// </summary>
+    /// <param name="capsuleId">The durable capsule identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The matching reservation, or <see langword="null"/> when it is unknown.</returns>
+    public async Task<PermalinkGenesisReservation?> FindByCapsuleAsync(
+        Guid capsuleId,
+        CancellationToken cancellationToken)
+    {
+        await EnsureProvisionedAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT anchor_token, capsule_id, binding_id, root_path, capsule_path,
+                   item_kind, content_root, current_path, header_json, event_json,
+                   anchor_json, issued_id, issuance_nonce, created_at
+              FROM AnchorTokenCapsules
+             WHERE capsule_id = $capsule_id
+            """;
+        command.Parameters.AddWithValue("$capsule_id", capsuleId.ToString("D"));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ? ReadReservation(reader, isWinner: false)
+            : null;
+    }
+
+    /// <summary>
     /// Finds the genesis occupying an exact current path, regardless of anchor token.
     /// </summary>
+    /// <param name="path">The filesystem path.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<PermalinkGenesisReservation?> FindByCurrentPathAsync(
         string path,
         CancellationToken cancellationToken)
@@ -108,6 +152,9 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// <summary>
     /// Atomically elects one genesis for a stable anchor.
     /// </summary>
+    /// <param name="candidate">The candidate.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<PermalinkGenesisReservation> ReserveGenesisAsync(
         PermalinkGenesisCandidate candidate,
         CancellationToken cancellationToken)
@@ -170,12 +217,6 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return reservation;
     }
-
-    private string AuthorityRoot => Path.Combine(Root, ".sloptank", "permalinks");
-
-    internal string IssuedRoot => Path.Combine(AuthorityRoot, "issued");
-
-    private string DatabasePath => Path.Combine(AuthorityRoot, "authority.db");
 
     private async Task EnsureProvisionedAsync(CancellationToken cancellationToken)
     {
@@ -254,6 +295,11 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// <summary>
     /// Permanently elects one mutation for an exact verified predecessor.
     /// </summary>
+    /// <param name="capsuleId">The logical capsule identifier.</param>
+    /// <param name="predecessorRoot">The predecessor root.</param>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task ClaimMutationAsync(
         Guid capsuleId,
         string predecessorRoot,

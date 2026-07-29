@@ -571,7 +571,12 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IPermalinkManager, PermalinkManager>();
             serviceCollection.AddSingleton<PermalinkOperationJournal>();
             serviceCollection.AddSingleton<PermalinkPendingIdentityMutation>();
+            serviceCollection.AddSingleton<PermalinkMutationBundleFactory>();
+            serviceCollection.AddSingleton<PermalinkMutationClaimStore>();
             serviceCollection.AddSingleton<PermalinkMediaMutation>();
+            serviceCollection.AddSingleton<PermalinkMediaRecovery>();
+            serviceCollection.AddSingleton<PermalinkCrossRootMutation>();
+            serviceCollection.AddSingleton<PermalinkPathMutation>();
             serviceCollection.AddSingleton<IPermalinkMutationCoordinator, PermalinkMutationCoordinator>();
             serviceCollection.AddSingleton<IPermalinkIdentityMutationAdapter, PermalinkIdentityMutationAdapter>();
             serviceCollection.AddSingleton<PermalinkLeaseStore>();

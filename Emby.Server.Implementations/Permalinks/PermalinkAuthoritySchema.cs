@@ -14,6 +14,9 @@ internal static class PermalinkAuthoritySchema
     /// <summary>
     /// Creates the append-only authority and derived binding tables.
     /// </summary>
+    /// <param name="connection">The SQLite authority connection.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public static async Task ApplyAsync(
         SqliteConnection connection,
         CancellationToken cancellationToken)
@@ -75,6 +78,11 @@ internal static class PermalinkAuthoritySchema
     /// <summary>
     /// Inserts the complete authorized null-predecessor genesis decision set.
     /// </summary>
+    /// <param name="connection">The SQLite authority connection.</param>
+    /// <param name="transaction">The active SQLite transaction.</param>
+    /// <param name="candidate">The candidate.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public static async Task InsertGenesisClaimsAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,

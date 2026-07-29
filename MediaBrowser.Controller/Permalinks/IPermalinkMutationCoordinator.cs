@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
@@ -12,46 +11,48 @@ namespace MediaBrowser.Controller.Permalinks;
 public interface IPermalinkMutationCoordinator
 {
     /// <summary>Freezes the verified old state before a caller mutates live state.</summary>
+    /// <param name="item">The protected library item.</param>
+    /// <param name="request">The immutable mutation intent.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The folded prepared operation state.</returns>
     Task<PermalinkMutationResult> PrepareAsync(
         BaseItem item,
         PermalinkMutationPrepareRequest request,
         CancellationToken cancellationToken);
 
     /// <summary>Commits the exact prepared mutation or fails without overwriting unknown bytes.</summary>
+    /// <param name="operationId">The prepared operation identifier.</param>
+    /// <param name="request">The exact caller-owned staging input.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The folded committed or suspended operation state.</returns>
     Task<PermalinkMutationResult> CommitAsync(
         Guid operationId,
         PermalinkMutationCommitRequest request,
         CancellationToken cancellationToken);
 
     /// <summary>Recovers one operation from its deterministic durable phases.</summary>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The folded recovered operation state.</returns>
     Task<PermalinkMutationResult> RecoverAsync(
         Guid operationId,
         CancellationToken cancellationToken);
 
+    /// <summary>Continues a suspended operation only when exact evidence authorizes the action.</summary>
+    /// <param name="operationId">The suspended operation identifier.</param>
+    /// <param name="request">The guarded administrator action.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The folded continued operation state.</returns>
+    Task<PermalinkMutationResult> ResolveAsync(
+        Guid operationId,
+        PermalinkOperationResolutionRequest request,
+        CancellationToken cancellationToken);
+
     /// <summary>Cancels a prepared logical mutation only when live identity still equals prepared-old.</summary>
+    /// <param name="operationId">The prepared logical operation identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The folded cancelled operation state.</returns>
     Task<PermalinkMutationResult> CancelAsync(
         Guid operationId,
         CancellationToken cancellationToken);
 }
-
-/// <summary>
-/// Immutable caller intent accepted by the Prepare boundary.
-/// </summary>
-public sealed record PermalinkMutationPrepareRequest(
-    Guid OperationId,
-    Guid ItemId,
-    string Kind,
-    string? DestinationPath,
-    IReadOnlyDictionary<string, string>? DesiredProviderIds);
-
-/// <summary>
-/// Exact caller-owned staging input accepted by Commit.
-/// </summary>
-public sealed record PermalinkMutationCommitRequest(
-    string? StagedPath,
-    IReadOnlyDictionary<string, string>? DesiredProviderIds = null);
-
-/// <summary>
-/// Public folded state of a durable mutation operation.
-/// </summary>
-public sealed record PermalinkMutationResult(Guid OperationId, string State);

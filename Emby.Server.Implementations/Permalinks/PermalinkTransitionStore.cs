@@ -25,6 +25,9 @@ internal sealed class PermalinkTransitionStore
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkTransitionStore"/> class.
     /// </summary>
+    /// <param name="authority">The permalink authority store.</param>
+    /// <param name="fileSystem">The durable permalink filesystem.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public PermalinkTransitionStore(
         PermalinkAuthorityStore authority,
         IPermalinkAtomicFileSystem fileSystem,
@@ -38,6 +41,8 @@ internal sealed class PermalinkTransitionStore
     /// <summary>
     /// Allocates and durably publishes one never-reusable fallback id.
     /// </summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<PermalinkIssuance> AllocateAsync(CancellationToken cancellationToken)
     {
         await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
@@ -73,6 +78,12 @@ internal sealed class PermalinkTransitionStore
     /// <summary>
     /// Elects one first fallback alias for a seeded-unpublished capsule.
     /// </summary>
+    /// <param name="capsuleId">The logical capsule identifier.</param>
+    /// <param name="issuance">The issuance.</param>
+    /// <param name="aliasEvent">The alias event.</param>
+    /// <param name="eventJson">The event json.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<PermalinkAliasClaim> ClaimFirstAliasAsync(
         Guid capsuleId,
         PermalinkIssuance issuance,
@@ -93,6 +104,12 @@ internal sealed class PermalinkTransitionStore
     /// <summary>
     /// Elects one accepted provider alias without allocating a fallback issuance.
     /// </summary>
+    /// <param name="capsuleId">The logical capsule identifier.</param>
+    /// <param name="alias">The alias.</param>
+    /// <param name="aliasEvent">The alias event.</param>
+    /// <param name="eventJson">The event json.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<PermalinkAliasClaim> ClaimExternalAliasAsync(
         Guid capsuleId,
         string alias,
@@ -185,12 +202,15 @@ internal sealed class PermalinkTransitionStore
             eventId,
             json,
             string.Equals(id, alias, StringComparison.Ordinal)
-                && nonce == issuanceNonce);
+                && Nullable.Equals(nonce, issuanceNonce));
     }
 
     /// <summary>
     /// Returns the authority-elected ordered alias set for a capsule.
     /// </summary>
+    /// <param name="capsuleId">The logical capsule identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<IReadOnlyList<string>> GetAliasesAsync(
         Guid capsuleId,
         CancellationToken cancellationToken)
@@ -218,6 +238,10 @@ internal sealed class PermalinkTransitionStore
     /// <summary>
     /// Validates an immutable issuance tombstone against its elected nonce.
     /// </summary>
+    /// <param name="id">The id.</param>
+    /// <param name="nonce">The nonce.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task ValidateIssuanceAsync(
         string id,
         Guid nonce,
@@ -237,7 +261,7 @@ internal sealed class PermalinkTransitionStore
         if (issuance.Type != "sloptank.permalink-issuance"
             || issuance.Version != 1
             || !string.Equals(issuance.Id, id, StringComparison.Ordinal)
-            || issuance.IssuanceNonce != nonce)
+            || !issuance.IssuanceNonce.Equals(nonce))
         {
             throw new PermalinkException(
                 PermalinkErrorKind.Conflict,
@@ -249,6 +273,12 @@ internal sealed class PermalinkTransitionStore
     /// <summary>
     /// Permanently claims one strict-superset content successor.
     /// </summary>
+    /// <param name="capsuleId">The logical capsule identifier.</param>
+    /// <param name="predecessorEventId">The predecessor event id.</param>
+    /// <param name="successor">The successor.</param>
+    /// <param name="eventJson">The event json.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task AuthorizeContentTransitionAsync(
         Guid capsuleId,
         Guid predecessorEventId,

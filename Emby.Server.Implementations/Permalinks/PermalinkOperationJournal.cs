@@ -35,6 +35,26 @@ internal sealed class PermalinkOperationJournal
             operationId.ToString("D"));
     }
 
+    /// <summary>
+    /// Returns the scan-excluded operation area on the affected content filesystem.
+    /// </summary>
+    /// <param name="operation">The immutable operation document.</param>
+    /// <returns>The resulting value.</returns>
+    public string GetContentOperationPath(PermalinkOperationDocument operation)
+    {
+        var root = operation.Bundle?.ContentRootPath
+            ?? Path.GetPathRoot(operation.SourcePath)
+            ?? throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "operation-root-missing",
+                $"Operation '{operation.OperationId}' has no content filesystem root.");
+        return Path.Combine(
+            root,
+            ".sloptank",
+            "permalink-operations",
+            operation.OperationId.ToString("D"));
+    }
+
     public async Task<PermalinkOperationDocument?> ReadAsync(
         Guid operationId,
         CancellationToken cancellationToken)
@@ -79,6 +99,47 @@ internal sealed class PermalinkOperationJournal
         return File.Exists(Path.Combine(GetOperationPath(operationId), phase + ".json"));
     }
 
+    /// <summary>Reads and validates one deterministic phase when it exists.</summary>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <param name="phase">The phase.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    public async Task<PermalinkOperationPhase?> ReadPhaseAsync(
+        Guid operationId,
+        string phase,
+        CancellationToken cancellationToken)
+    {
+        var path = Path.Combine(GetOperationPath(operationId), phase + ".json");
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        return CanonicalJson.Deserialize<PermalinkOperationPhase>(
+            await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false),
+            path);
+    }
+
+    /// <summary>Appends one immutable administrator resolution audit record.</summary>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <param name="resolution">The resolution.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    public async Task WriteResolutionAsync(
+        Guid operationId,
+        PermalinkOperationResolution resolution,
+        CancellationToken cancellationToken)
+    {
+        var root = GetOperationPath(operationId);
+        var ordinal = Directory.Exists(root)
+            ? Directory.EnumerateFiles(root, "resolution-*.json").Count() + 1
+            : 1;
+        await PublishExactAsync(
+            Path.Combine(root, $"resolution-{ordinal}.json"),
+            CanonicalJson.Serialize(resolution),
+            cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<PermalinkOperationDocument?> FindLatestPendingAsync(
         Guid itemId,
         CancellationToken cancellationToken)
@@ -97,6 +158,7 @@ internal sealed class PermalinkOperationJournal
             if (!Guid.TryParse(operationIdText, out var operationId)
                 || HasPhase(operationId, "committed")
                 || HasPhase(operationId, "cancelled")
+                || HasPhase(operationId, "detached")
                 || HasPhase(operationId, "assignment_unknown"))
             {
                 continue;
@@ -116,6 +178,9 @@ internal sealed class PermalinkOperationJournal
     }
 
     /// <summary>Returns whether any non-terminal durable operation fences an item.</summary>
+    /// <param name="itemId">The Jellyfin item identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<bool> HasPendingAsync(
         Guid itemId,
         CancellationToken cancellationToken)
@@ -151,104 +216,4 @@ internal sealed class PermalinkOperationJournal
                 $"Operation journal '{path}' already contains different immutable input.");
         }
     }
-}
-
-internal sealed record PermalinkOperationDocument(
-    Guid OperationId,
-    Guid ItemId,
-    Guid CapsuleId,
-    string Kind,
-    string SourcePath,
-    string? DestinationPath,
-    string OldContentRoot,
-    IReadOnlyDictionary<string, string> OldProviderIds,
-    IReadOnlyDictionary<string, string> DesiredProviderIds,
-    PermalinkIdentitySnapshot? OldIdentity,
-    string CreatedAt)
-{
-    public string Type { get; init; } = "sloptank.permalink-operation";
-
-    public int Version { get; init; } = 1;
-}
-
-internal sealed record PermalinkIdentitySnapshot(
-    IReadOnlyDictionary<string, string> ProviderIds,
-    string ItemKind,
-    string? Name,
-    string? OriginalTitle,
-    int? ProductionYear,
-    DateTime? PremiereDate,
-    string? SeriesName,
-    int? ParentIndexNumber,
-    int? IndexNumber,
-    int? IndexNumberEnd)
-{
-    public static PermalinkIdentitySnapshot Capture(BaseItem item)
-    {
-        return new PermalinkIdentitySnapshot(
-            new Dictionary<string, string>(item.ProviderIds, StringComparer.OrdinalIgnoreCase),
-            item.GetType().Name,
-            item.Name,
-            item.OriginalTitle,
-            item.ProductionYear,
-            item.PremiereDate,
-            item is IHasSeries hasSeries ? hasSeries.SeriesName : null,
-            item.ParentIndexNumber,
-            item.IndexNumber,
-            item is MediaBrowser.Controller.Entities.TV.Episode episode
-                ? episode.IndexNumberEnd
-                : null);
-    }
-
-    public bool Matches(BaseItem item)
-    {
-        return string.Equals(ItemKind, item.GetType().Name, StringComparison.Ordinal)
-            && string.Equals(Name, item.Name, StringComparison.Ordinal)
-            && string.Equals(OriginalTitle, item.OriginalTitle, StringComparison.Ordinal)
-            && ProductionYear == item.ProductionYear
-            && PremiereDate == item.PremiereDate
-            && string.Equals(
-                SeriesName,
-                item is IHasSeries hasSeries ? hasSeries.SeriesName : null,
-                StringComparison.Ordinal)
-            && ParentIndexNumber == item.ParentIndexNumber
-            && IndexNumber == item.IndexNumber
-            && IndexNumberEnd == (item is MediaBrowser.Controller.Entities.TV.Episode episode
-                ? episode.IndexNumberEnd
-                : null)
-            && ProviderIds.Count == item.ProviderIds.Count
-            && ProviderIds.All(pair => item.ProviderIds.TryGetValue(pair.Key, out var value)
-                && string.Equals(pair.Value, value, StringComparison.Ordinal));
-    }
-
-    public void Restore(BaseItem item)
-    {
-        item.ProviderIds = new Dictionary<string, string>(ProviderIds, StringComparer.OrdinalIgnoreCase);
-        item.Name = Name;
-        item.OriginalTitle = OriginalTitle;
-        item.ProductionYear = ProductionYear;
-        item.PremiereDate = PremiereDate;
-        item.ParentIndexNumber = ParentIndexNumber;
-        item.IndexNumber = IndexNumber;
-        if (item is MediaBrowser.Controller.Entities.TV.Episode episode)
-        {
-            episode.IndexNumberEnd = IndexNumberEnd;
-        }
-
-        if (item is IHasSeries hasSeries)
-        {
-            hasSeries.SeriesName = SeriesName;
-        }
-    }
-}
-
-internal sealed record PermalinkOperationPhase(
-    Guid OperationId,
-    string State,
-    string? ContentRoot,
-    string CreatedAt)
-{
-    public string Type { get; init; } = "sloptank.permalink-operation-phase";
-
-    public int Version { get; init; } = 1;
 }

@@ -19,6 +19,7 @@ public sealed class MacPermalinkMountPolicy
     /// <summary>
     /// Initializes a new instance of the <see cref="MacPermalinkMountPolicy"/> class.
     /// </summary>
+    /// <param name="configuration">The server configuration.</param>
     public MacPermalinkMountPolicy(IConfiguration configuration)
     {
         _allowTestMounts = configuration.GetValue("Permalinks:AllowTestMounts", false);
@@ -27,6 +28,7 @@ public sealed class MacPermalinkMountPolicy
     /// <summary>
     /// Rejects paths outside local APFS or journaled HFS+ volumes.
     /// </summary>
+    /// <param name="path">The filesystem path.</param>
     public void EnsureAdmitted(string path)
     {
         if (!OperatingSystem.IsMacOS())

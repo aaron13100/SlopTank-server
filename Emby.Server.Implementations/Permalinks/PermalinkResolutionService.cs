@@ -56,6 +56,15 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         var candidates = await _bindings.FindResolutionBindingsAsync(
             permalinkId,
             cancellationToken).ConfigureAwait(false);
+        if (candidates.Count == 0
+            && await _bindings.IsKnownAliasAsync(permalinkId, cancellationToken)
+                .ConfigureAwait(false))
+        {
+            throw Conflict(
+                "alias-detached",
+                $"Permalink '{permalinkId}' has no verified live binding.");
+        }
+
         var result = new List<PermalinkCandidateEnvelope>(candidates.Count);
         foreach (var candidate in candidates)
         {

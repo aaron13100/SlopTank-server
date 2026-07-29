@@ -25,6 +25,14 @@ internal sealed class PermalinkStore : IPermalinkStore
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkStore"/> class.
     /// </summary>
+    /// <param name="authority">The permalink authority store.</param>
+    /// <param name="transitions">The transitions.</param>
+    /// <param name="bindings">The bindings.</param>
+    /// <param name="capsules">The capsules.</param>
+    /// <param name="documents">The documents.</param>
+    /// <param name="publisher">The publisher.</param>
+    /// <param name="fileSystem">The durable permalink filesystem.</param>
+    /// <param name="configuration">The server configuration.</param>
     public PermalinkStore(
         PermalinkAuthorityStore authority,
         PermalinkTransitionStore transitions,

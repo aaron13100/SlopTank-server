@@ -19,6 +19,7 @@ internal sealed class PermalinkCapsuleStore
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkCapsuleStore"/> class.
     /// </summary>
+    /// <param name="fileSystem">The durable permalink filesystem.</param>
     public PermalinkCapsuleStore(IPermalinkAtomicFileSystem fileSystem)
     {
         _fileSystem = fileSystem;
@@ -27,6 +28,11 @@ internal sealed class PermalinkCapsuleStore
     /// <summary>
     /// Computes the immutable capsule placement for a current local binding.
     /// </summary>
+    /// <param name="rootPath">The admitted content root.</param>
+    /// <param name="itemPath">The item path.</param>
+    /// <param name="itemKind">The item kind.</param>
+    /// <param name="capsuleId">The logical capsule identifier.</param>
+    /// <returns>The resulting value.</returns>
     public string GetCapsulePath(
         string rootPath,
         string itemPath,
@@ -55,6 +61,11 @@ internal sealed class PermalinkCapsuleStore
     /// <summary>
     /// Publishes or exactly adopts the authority-frozen capsule and anchor record.
     /// </summary>
+    /// <param name="reservation">The reservation.</param>
+    /// <param name="currentRoot">The current root.</param>
+    /// <param name="currentPath">The current path.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<string> PublishGenesisAsync(
         PermalinkGenesisReservation reservation,
         string currentRoot,
@@ -112,6 +123,10 @@ internal sealed class PermalinkCapsuleStore
     /// <summary>
     /// Appends an exact authority-elected alias event.
     /// </summary>
+    /// <param name="capsulePath">The durable capsule path.</param>
+    /// <param name="claim">The claim.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task AppendAliasAsync(
         string capsulePath,
         PermalinkAliasClaim claim,
@@ -130,6 +145,11 @@ internal sealed class PermalinkCapsuleStore
     /// <summary>
     /// Appends an exact authority-authorized content successor.
     /// </summary>
+    /// <param name="capsulePath">The durable capsule path.</param>
+    /// <param name="successor">The successor.</param>
+    /// <param name="eventJson">The event json.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task AppendContentAsync(
         string capsulePath,
         PermalinkEventDocument successor,
@@ -149,6 +169,11 @@ internal sealed class PermalinkCapsuleStore
     /// <summary>
     /// Reads and fail-closed validates a complete capsule.
     /// </summary>
+    /// <param name="capsulePath">The durable capsule path.</param>
+    /// <param name="expectedCapsuleId">The expected capsule id.</param>
+    /// <param name="expectedKind">The expected kind.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<PermalinkCapsuleSnapshot> ReadValidatedAsync(
         string capsulePath,
         Guid expectedCapsuleId,
@@ -175,7 +200,7 @@ internal sealed class PermalinkCapsuleStore
                 $"Capsule '{headerPath}' has unknown version {header.Version}.");
         }
 
-        if (header.CapsuleId != expectedCapsuleId
+        if (!header.CapsuleId.Equals(expectedCapsuleId)
             || !string.Equals(header.ItemKind, expectedKind, StringComparison.Ordinal))
         {
             throw Conflict(
@@ -224,7 +249,7 @@ internal sealed class PermalinkCapsuleStore
             .ToArray();
         var heads = contentEvents
             .Where(candidate => !contentEvents.Any(
-                other => other.PreviousContentEventId == candidate.EventId))
+                other => Nullable.Equals(other.PreviousContentEventId, candidate.EventId)))
             .ToArray();
         if (heads.Length != 1)
         {
@@ -302,11 +327,3 @@ internal sealed class PermalinkCapsuleStore
         return new PermalinkException(PermalinkErrorKind.Conflict, code, message);
     }
 }
-
-/// <summary>
-/// Holds the validated folded capsule state.
-/// </summary>
-internal sealed record PermalinkCapsuleSnapshot(
-    PermalinkCapsuleDocument Header,
-    PermalinkEventDocument ContentHead,
-    IReadOnlyList<PermalinkEventDocument> Events);

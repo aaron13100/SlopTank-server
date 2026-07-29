@@ -12,6 +12,11 @@ namespace MediaBrowser.Controller.Permalinks;
 public interface IPermalinkResolutionService
 {
     /// <summary>Returns metadata-free verified candidate envelopes.</summary>
+    /// <param name="permalinkId">The opaque permalink identifier.</param>
+    /// <param name="purpose">The requested redemption purpose.</param>
+    /// <param name="userId">The authenticated user identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The ordered opaque candidate envelopes.</returns>
     Task<IReadOnlyList<PermalinkCandidateEnvelope>> DiscoverAsync(
         string permalinkId,
         string purpose,
@@ -19,6 +24,11 @@ public interface IPermalinkResolutionService
         CancellationToken cancellationToken);
 
     /// <summary>Consumes a details lease after repeating all evidence checks.</summary>
+    /// <param name="handle">The opaque candidate handle.</param>
+    /// <param name="lease">The purpose-bound lease.</param>
+    /// <param name="userId">The authenticated user identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The verified local item.</returns>
     Task<BaseItem> RedeemDetailsAsync(
         string handle,
         string lease,
@@ -26,18 +36,14 @@ public interface IPermalinkResolutionService
         CancellationToken cancellationToken);
 
     /// <summary>Consumes a playback lease and materializes an immutable snapshot plan.</summary>
+    /// <param name="handle">The opaque candidate handle.</param>
+    /// <param name="lease">The purpose-bound lease.</param>
+    /// <param name="userId">The authenticated user identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The immutable playback snapshot.</returns>
     Task<PermalinkPlaybackSnapshot> RedeemPlaybackAsync(
         string handle,
         string lease,
         Guid userId,
         CancellationToken cancellationToken);
 }
-
-/// <summary>Metadata-free candidate returned by discovery.</summary>
-public sealed record PermalinkCandidateEnvelope(int Rank, string Namespace, string Handle, string Lease);
-
-/// <summary>Opaque lease body accepted by candidate redemption.</summary>
-public sealed record PermalinkLeaseRequest(string Lease);
-
-/// <summary>Verified immutable playback result.</summary>
-public sealed record PermalinkPlaybackSnapshot(Guid ItemId, string SnapshotPath, int QueueCount);

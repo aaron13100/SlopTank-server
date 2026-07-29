@@ -19,6 +19,9 @@ internal sealed class PermalinkTransitionPublisher
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkTransitionPublisher"/> class.
     /// </summary>
+    /// <param name="transitions">The transitions.</param>
+    /// <param name="capsules">The capsules.</param>
+    /// <param name="documents">The documents.</param>
     public PermalinkTransitionPublisher(
         PermalinkTransitionStore transitions,
         PermalinkCapsuleStore capsules,
@@ -32,6 +35,11 @@ internal sealed class PermalinkTransitionPublisher
     /// <summary>
     /// Verifies exact content or publishes one authorized strict-superset successor.
     /// </summary>
+    /// <param name="request">The mutation request.</param>
+    /// <param name="capsulePath">The durable capsule path.</param>
+    /// <param name="snapshot">The snapshot.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<PermalinkCapsuleSnapshot> ReconcileContentAsync(
         PermalinkStoreRequest request,
         string capsulePath,
@@ -77,6 +85,12 @@ internal sealed class PermalinkTransitionPublisher
     /// <summary>
     /// Returns existing aliases or elects, publishes, and verifies the first alias.
     /// </summary>
+    /// <param name="request">The mutation request.</param>
+    /// <param name="reservation">The reservation.</param>
+    /// <param name="capsulePath">The durable capsule path.</param>
+    /// <param name="snapshot">The snapshot.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<IReadOnlyList<string>> GetOrPublishAliasesAsync(
         PermalinkStoreRequest request,
         PermalinkGenesisReservation reservation,

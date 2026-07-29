@@ -26,7 +26,12 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         "promotion",
         "grouping",
         "deletion",
-        "kind-reclassification"
+        "kind-reclassification",
+        "identify",
+        "manual-metadata",
+        "automatic-refresh",
+        "nfo-refresh",
+        "scan-replacement"
     };
 
     private readonly ILibraryManager _libraryManager;
@@ -97,8 +102,11 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             request.DesiredProviderIds is null
                 ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 : new Dictionary<string, string>(request.DesiredProviderIds, StringComparer.OrdinalIgnoreCase),
+            PermalinkIdentitySnapshot.Capture(item),
             UtcNow());
-        if (existing is not null && existing != operation)
+        if (existing is not null
+            && !CanonicalJson.Serialize(existing).Span.SequenceEqual(
+                CanonicalJson.Serialize(operation with { CreatedAt = existing.CreatedAt }).Span))
         {
             throw Conflict("operation-id-reused", $"Operation '{request.OperationId}' has different input.");
         }
@@ -124,6 +132,11 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             return new PermalinkMutationResult(operationId, "committed");
         }
 
+        if (operation.Kind is "deletion" or "promotion" or "kind-reclassification")
+        {
+            return await CommitStateOnlyAsync(operation, cancellationToken).ConfigureAwait(false);
+        }
+
         var item = RequireItem(operation.ItemId);
         var current = await _evidence.ComputeContentItemAsync(item, cancellationToken)
             .ConfigureAwait(false);
@@ -143,7 +156,8 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
                 .ConfigureAwait(false),
             "path" or "cross-root" => await CommitPathAsync(operation, item, cancellationToken)
                 .ConfigureAwait(false),
-            "logical" => await CommitLogicalAsync(operation, item, cancellationToken)
+            "logical" or "identify" or "manual-metadata" or "automatic-refresh" or "nfo-refresh"
+                => await CommitLogicalAsync(operation, item, request, cancellationToken)
                 .ConfigureAwait(false),
             _ => await CommitStateOnlyAsync(operation, cancellationToken).ConfigureAwait(false)
         };
@@ -174,6 +188,41 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         throw Conflict(
             "manual-intervention",
             $"Operation '{operationId}' evidence does not match an automatic recovery branch.");
+    }
+
+    /// <inheritdoc />
+    public async Task<PermalinkMutationResult> CancelAsync(
+        Guid operationId,
+        CancellationToken cancellationToken)
+    {
+        var operation = await RequireOperationAsync(operationId, cancellationToken).ConfigureAwait(false);
+        if (_journal.HasPhase(operationId, "cancelled"))
+        {
+            return new PermalinkMutationResult(operationId, "cancelled");
+        }
+
+        if (_journal.HasPhase(operationId, "committed"))
+        {
+            throw Conflict("operation-committed", $"Operation '{operationId}' is already committed.");
+        }
+
+        var item = RequireItem(operation.ItemId);
+        var oldIdentity = operation.OldIdentity;
+        if (oldIdentity is not null
+            ? !oldIdentity.Matches(item)
+            : !ProviderIdsEqual(item.ProviderIds, operation.OldProviderIds))
+        {
+            throw Conflict(
+                "prepared-old-mismatch",
+                "Live identity does not equal the complete prepared-old assignment.");
+        }
+
+        await _journal.WritePhaseAsync(
+            operation.OperationId,
+            "cancelled",
+            Phase(operation.OperationId, "cancelled", operation.OldContentRoot),
+            cancellationToken).ConfigureAwait(false);
+        return new PermalinkMutationResult(operationId, "cancelled");
     }
 
     private async Task<PermalinkMutationResult> CommitPathAsync(
@@ -210,9 +259,11 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     private async Task<PermalinkMutationResult> CommitLogicalAsync(
         PermalinkOperationDocument operation,
         BaseItem item,
+        PermalinkMutationCommitRequest request,
         CancellationToken cancellationToken)
     {
-        if (!ProviderIdsEqual(item.ProviderIds, operation.DesiredProviderIds))
+        var desired = request.DesiredProviderIds ?? operation.DesiredProviderIds;
+        if (!ProviderIdsEqual(item.ProviderIds, desired))
         {
             throw Conflict("desired-assignment-mismatch", "Live provider assignment does not match desired state.");
         }

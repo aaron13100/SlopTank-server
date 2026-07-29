@@ -12,6 +12,7 @@ using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Providers;
@@ -32,6 +33,7 @@ public class ItemLookupController : BaseJellyfinApiController
     private readonly IProviderManager _providerManager;
     private readonly IFileSystem _fileSystem;
     private readonly ILibraryManager _libraryManager;
+    private readonly IPermalinkIdentityMutationAdapter _identityMutationAdapter;
     private readonly ILogger<ItemLookupController> _logger;
 
     /// <summary>
@@ -40,16 +42,19 @@ public class ItemLookupController : BaseJellyfinApiController
     /// <param name="providerManager">Instance of the <see cref="IProviderManager"/> interface.</param>
     /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
     /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
+    /// <param name="identityMutationAdapter">Durable identity mutation adapter.</param>
     /// <param name="logger">Instance of the <see cref="ILogger{ItemLookupController}"/> interface.</param>
     public ItemLookupController(
         IProviderManager providerManager,
         IFileSystem fileSystem,
         ILibraryManager libraryManager,
+        IPermalinkIdentityMutationAdapter identityMutationAdapter,
         ILogger<ItemLookupController> logger)
     {
         _providerManager = providerManager;
         _fileSystem = fileSystem;
         _libraryManager = libraryManager;
+        _identityMutationAdapter = identityMutationAdapter;
         _logger = logger;
     }
 
@@ -262,18 +267,25 @@ public class ItemLookupController : BaseJellyfinApiController
             item.Name,
             searchResult.ProviderIds);
 
-        // Since the refresh process won't erase provider Ids, we need to set this explicitly now.
-        item.ProviderIds = searchResult.ProviderIds;
-        await _providerManager.RefreshFullItem(
-            item,
-            new MetadataRefreshOptions(new DirectoryService(_fileSystem))
+        await _identityMutationAdapter.ExecuteAsync(
+            [item],
+            new PermalinkIdentityMutationRequest("identify", searchResult.ProviderIds),
+            async (_, cancellationToken) =>
             {
-                MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
-                ImageRefreshMode = MetadataRefreshMode.FullRefresh,
-                ReplaceAllMetadata = true,
-                ReplaceAllImages = replaceAllImages,
-                SearchResult = searchResult,
-                RemoveOldMetadata = true
+                // Since the refresh process won't erase provider Ids, we need to set this explicitly now.
+                item.ProviderIds = searchResult.ProviderIds;
+                await _providerManager.RefreshFullItem(
+                    item,
+                    new MetadataRefreshOptions(new DirectoryService(_fileSystem))
+                    {
+                        MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
+                        ImageRefreshMode = MetadataRefreshMode.FullRefresh,
+                        ReplaceAllMetadata = true,
+                        ReplaceAllImages = replaceAllImages,
+                        SearchResult = searchResult,
+                        RemoveOldMetadata = true
+                    },
+                    cancellationToken).ConfigureAwait(false);
             },
             CancellationToken.None).ConfigureAwait(false);
 

@@ -15,6 +15,7 @@ using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
+using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -38,6 +39,7 @@ public class ItemUpdateController : BaseJellyfinApiController
     private readonly ILocalizationManager _localizationManager;
     private readonly IFileSystem _fileSystem;
     private readonly IServerConfigurationManager _serverConfigurationManager;
+    private readonly IPermalinkIdentityMutationAdapter _identityMutationAdapter;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="ItemUpdateController"/> class.
@@ -47,18 +49,21 @@ public class ItemUpdateController : BaseJellyfinApiController
     /// <param name="providerManager">Instance of the <see cref="IProviderManager"/> interface.</param>
     /// <param name="localizationManager">Instance of the <see cref="ILocalizationManager"/> interface.</param>
     /// <param name="serverConfigurationManager">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
+    /// <param name="identityMutationAdapter">Durable identity mutation adapter.</param>
     public ItemUpdateController(
         IFileSystem fileSystem,
         ILibraryManager libraryManager,
         IProviderManager providerManager,
         ILocalizationManager localizationManager,
-        IServerConfigurationManager serverConfigurationManager)
+        IServerConfigurationManager serverConfigurationManager,
+        IPermalinkIdentityMutationAdapter identityMutationAdapter)
     {
         _libraryManager = libraryManager;
         _providerManager = providerManager;
         _localizationManager = localizationManager;
         _fileSystem = fileSystem;
         _serverConfigurationManager = serverConfigurationManager;
+        _identityMutationAdapter = identityMutationAdapter;
     }
 
     /// <summary>
@@ -80,16 +85,37 @@ public class ItemUpdateController : BaseJellyfinApiController
             return NotFound();
         }
 
+        try
+        {
+            await _identityMutationAdapter.ExecuteAsync(
+                [item],
+                new PermalinkIdentityMutationRequest(
+                    "manual-metadata",
+                    request.ProviderIds,
+                    request.Type == default ? null : request.Type.ToString()),
+                async (_, _) => await ApplyItemUpdateAsync(item, request).ConfigureAwait(false),
+                CancellationToken.None).ConfigureAwait(false);
+            return NoContent();
+        }
+        catch (PermalinkException exception)
+        {
+            return Problem(
+                detail: exception.Message,
+                statusCode: StatusCodes.Status409Conflict,
+                title: exception.Code);
+        }
+    }
+
+    private async Task ApplyItemUpdateAsync(BaseItem item, BaseItemDto request)
+    {
         var newLockData = request.LockData ?? false;
         var isLockedChanged = item.IsLocked != newLockData;
-
         var series = item as Series;
         var displayOrderChanged = series is not null && !string.Equals(
             series.DisplayOrder ?? string.Empty,
             request.DisplayOrder ?? string.Empty,
             StringComparison.OrdinalIgnoreCase);
 
-        // Do this first so that metadata savers can pull the updates from the database.
         if (request.People is not null)
         {
             _libraryManager.UpdatePeople(
@@ -103,15 +129,11 @@ public class ItemUpdateController : BaseJellyfinApiController
         }
 
         await UpdateItem(request, item).ConfigureAwait(false);
-
         item.OnMetadataChanged();
-
         await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
 
-        if (isLockedChanged && item.IsFolder)
+        if (isLockedChanged && item is Folder folder)
         {
-            var folder = (Folder)item;
-
             foreach (var child in folder.GetRecursiveChildren())
             {
                 child.IsLocked = newLockData;
@@ -131,8 +153,6 @@ public class ItemUpdateController : BaseJellyfinApiController
                 },
                 RefreshPriority.High);
         }
-
-        return NoContent();
     }
 
     /// <summary>

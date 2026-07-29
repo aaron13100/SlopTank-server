@@ -27,6 +27,11 @@ public interface IPermalinkMutationCoordinator
     Task<PermalinkMutationResult> RecoverAsync(
         Guid operationId,
         CancellationToken cancellationToken);
+
+    /// <summary>Cancels a prepared logical mutation only when live identity still equals prepared-old.</summary>
+    Task<PermalinkMutationResult> CancelAsync(
+        Guid operationId,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -42,7 +47,9 @@ public sealed record PermalinkMutationPrepareRequest(
 /// <summary>
 /// Exact caller-owned staging input accepted by Commit.
 /// </summary>
-public sealed record PermalinkMutationCommitRequest(string? StagedPath);
+public sealed record PermalinkMutationCommitRequest(
+    string? StagedPath,
+    IReadOnlyDictionary<string, string>? DesiredProviderIds = null);
 
 /// <summary>
 /// Public folded state of a durable mutation operation.

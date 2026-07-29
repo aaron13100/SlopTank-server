@@ -554,6 +554,8 @@ namespace Emby.Server.Implementations
             serviceCollection.AddTransient(provider => new Lazy<IProviderManager>(provider.GetRequiredService<IProviderManager>));
             serviceCollection.AddTransient(provider => new Lazy<IUserViewManager>(provider.GetRequiredService<IUserViewManager>));
             serviceCollection.AddTransient(provider => new Lazy<IExternalDataManager>(provider.GetRequiredService<IExternalDataManager>));
+            serviceCollection.AddTransient(provider => new Lazy<IPermalinkIdentityMutationAdapter>(
+                provider.GetRequiredService<IPermalinkIdentityMutationAdapter>));
             serviceCollection.AddSingleton<ILibraryManager, LibraryManager>();
             serviceCollection.AddSingleton(TimeProvider.System);
             serviceCollection.AddSingleton<MacPermalinkMountPolicy>();
@@ -568,8 +570,10 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IPermalinkStore, PermalinkStore>();
             serviceCollection.AddSingleton<IPermalinkManager, PermalinkManager>();
             serviceCollection.AddSingleton<PermalinkOperationJournal>();
+            serviceCollection.AddSingleton<PermalinkPendingIdentityMutation>();
             serviceCollection.AddSingleton<PermalinkMediaMutation>();
             serviceCollection.AddSingleton<IPermalinkMutationCoordinator, PermalinkMutationCoordinator>();
+            serviceCollection.AddSingleton<IPermalinkIdentityMutationAdapter, PermalinkIdentityMutationAdapter>();
             serviceCollection.AddSingleton<PermalinkLeaseStore>();
             serviceCollection.AddSingleton<IPermalinkResolutionService, PermalinkResolutionService>();
             serviceCollection.AddSingleton<NamingOptions>();
@@ -706,6 +710,7 @@ namespace Emby.Server.Implementations
             Folder.UserViewManager = Resolve<IUserViewManager>();
             Folder.CollectionManager = Resolve<ICollectionManager>();
             Folder.LimitedConcurrencyLibraryScheduler = Resolve<ILimitedConcurrencyLibraryScheduler>();
+            Folder.PermalinkIdentityMutationAdapter = Resolve<IPermalinkIdentityMutationAdapter>();
             Episode.MediaEncoder = Resolve<IMediaEncoder>();
             UserView.TVSeriesManager = Resolve<ITVSeriesManager>();
             Video.RecordingsManager = Resolve<IRecordingsManager>();

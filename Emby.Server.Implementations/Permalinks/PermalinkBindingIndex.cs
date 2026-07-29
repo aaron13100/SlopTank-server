@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Permalinks;
+using Microsoft.Data.Sqlite;
 
 namespace Emby.Server.Implementations.Permalinks;
 
@@ -98,10 +99,15 @@ internal sealed class PermalinkBindingIndex
             .ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT FirstAliasClaims.capsule_id
+            SELECT COALESCE(
+                       PermalinkBindingCapsuleOverrides.capsule_id,
+                       FirstAliasClaims.capsule_id)
               FROM FirstAliasClaims
               JOIN PermalinkBindings
                 ON PermalinkBindings.PermalinkId = FirstAliasClaims.permalink_id
+              LEFT JOIN PermalinkBindingCapsuleOverrides
+                ON PermalinkBindingCapsuleOverrides.PermalinkId = PermalinkBindings.PermalinkId
+               AND PermalinkBindingCapsuleOverrides.ItemId = PermalinkBindings.ItemId
              WHERE PermalinkBindings.PermalinkId = $id
                AND PermalinkBindings.ItemId = $item
             """;
@@ -114,6 +120,110 @@ internal sealed class PermalinkBindingIndex
                 "binding-missing",
                 $"Verified binding '{permalinkId}' for item '{itemId}' is missing.")
             : Guid.Parse(value);
+    }
+
+    /// <summary>Returns whether an item already has durable permalink identity.</summary>
+    public async Task<bool> HasItemBindingAsync(
+        Guid itemId,
+        CancellationToken cancellationToken)
+    {
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT 1
+              FROM PermalinkBindings
+             WHERE ItemId = $item
+             LIMIT 1
+            """;
+        command.Parameters.AddWithValue("$item", itemId.ToString("D"));
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
+    }
+
+    /// <summary>
+    /// Moves every derived alias binding to a promoted item and its verified capsule.
+    /// </summary>
+    public async Task PromoteItemBindingsAsync(
+        Guid oldItemId,
+        Guid promotedItemId,
+        string promotedPath,
+        CancellationToken cancellationToken)
+    {
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection
+            .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT f.capsule_id
+              FROM FirstAliasClaims f
+              JOIN PermalinkBindings b ON b.PermalinkId = f.permalink_id
+              JOIN AnchorTokenCapsules a ON a.capsule_id = f.capsule_id
+             WHERE b.ItemId = $promoted
+               AND a.current_path = $path
+             LIMIT 1
+            """;
+        command.Parameters.AddWithValue("$promoted", promotedItemId.ToString("D"));
+        command.Parameters.AddWithValue("$path", promotedPath);
+        var promotedCapsule = (string?)await command.ExecuteScalarAsync(cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "promotion-target-unprotected",
+                $"Promoted item '{promotedItemId}' has no verified permalink capsule.");
+
+        command.Parameters.AddWithValue("$old", oldItemId.ToString("D"));
+        command.CommandText = """
+            INSERT INTO PermalinkBindings
+                (PermalinkId, ItemId, ContentRoot, VerifiedToken, VerifiedAt, CreatedAt)
+            SELECT PermalinkId, $promoted, ContentRoot, VerifiedToken, VerifiedAt, CreatedAt
+              FROM PermalinkBindings
+             WHERE ItemId = $old
+            ON CONFLICT(PermalinkId, ItemId) DO UPDATE SET
+                ContentRoot = excluded.ContentRoot,
+                VerifiedToken = excluded.VerifiedToken,
+                VerifiedAt = excluded.VerifiedAt
+            """;
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        command.Parameters.AddWithValue("$capsule", promotedCapsule);
+        command.Parameters.AddWithValue(
+            "$created",
+            _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture));
+        command.CommandText = """
+            INSERT INTO PermalinkBindingCapsuleOverrides
+                (PermalinkId, ItemId, capsule_id, created_at)
+            SELECT PermalinkId, $promoted, $capsule, $created
+              FROM PermalinkBindings
+             WHERE ItemId = $old
+            ON CONFLICT(PermalinkId, ItemId) DO UPDATE SET
+                capsule_id = excluded.capsule_id
+            """;
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        command.CommandText = "DELETE FROM PermalinkBindings WHERE ItemId = $old";
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        command.CommandText = "DELETE FROM PermalinkBindingCapsuleOverrides WHERE ItemId = $old";
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Removes a deleted item's rebuildable live bindings while retaining capsule history.</summary>
+    public async Task RemoveItemBindingsAsync(
+        Guid itemId,
+        CancellationToken cancellationToken)
+    {
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            DELETE FROM PermalinkBindingCapsuleOverrides WHERE ItemId = $item;
+            DELETE FROM PermalinkBindings WHERE ItemId = $item;
+            """;
+        command.Parameters.AddWithValue("$item", itemId.ToString("D"));
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -147,10 +257,14 @@ internal sealed class PermalinkBindingIndex
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT b.PermalinkId, b.ItemId, a.capsule_id, b.ContentRoot,
-                   a.anchor_token, a.current_path
+                   a.anchor_token, a.current_path, o.capsule_id IS NOT NULL
               FROM PermalinkBindings b
               JOIN FirstAliasClaims f ON f.permalink_id = b.PermalinkId
-              JOIN AnchorTokenCapsules a ON a.capsule_id = f.capsule_id
+              LEFT JOIN PermalinkBindingCapsuleOverrides o
+                ON o.PermalinkId = b.PermalinkId
+               AND o.ItemId = b.ItemId
+              JOIN AnchorTokenCapsules a
+                ON a.capsule_id = COALESCE(o.capsule_id, f.capsule_id)
              WHERE b.PermalinkId = $id
              ORDER BY b.ItemId
             """;
@@ -165,7 +279,8 @@ internal sealed class PermalinkBindingIndex
                 Guid.Parse(reader.GetString(2)),
                 reader.GetString(3),
                 reader.GetString(4),
-                reader.GetString(5)));
+                reader.GetString(5),
+                reader.GetBoolean(6)));
         }
 
         return result;
@@ -200,4 +315,5 @@ internal sealed record PermalinkResolutionBinding(
     Guid CapsuleId,
     string ContentRoot,
     string AnchorToken,
-    string CurrentPath);
+    string CurrentPath,
+    bool IsCapsuleOverride);

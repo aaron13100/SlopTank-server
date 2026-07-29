@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Extensions;
@@ -22,6 +24,7 @@ public sealed class PermalinkController : BaseJellyfinApiController
     private readonly ILibraryManager _libraryManager;
     private readonly IPermalinkManager _permalinkManager;
     private readonly IUserManager _userManager;
+    private readonly IPermalinkIdentityMutationAdapter _identityMutationAdapter;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkController"/> class.
@@ -29,11 +32,13 @@ public sealed class PermalinkController : BaseJellyfinApiController
     public PermalinkController(
         ILibraryManager libraryManager,
         IPermalinkManager permalinkManager,
-        IUserManager userManager)
+        IUserManager userManager,
+        IPermalinkIdentityMutationAdapter identityMutationAdapter)
     {
         _libraryManager = libraryManager;
         _permalinkManager = permalinkManager;
         _userManager = userManager;
+        _identityMutationAdapter = identityMutationAdapter;
     }
 
     /// <summary>
@@ -82,4 +87,100 @@ public sealed class PermalinkController : BaseJellyfinApiController
                 title: exception.Code);
         }
     }
+
+    /// <summary>Cancels the item's latest recoverable logical reassignment.</summary>
+    [HttpPost("Items/{itemId}/Permalink/CancelLogicalReassignment")]
+    [ProducesResponseType<PermalinkMutationResult>(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<PermalinkMutationResult>> CancelLogicalReassignment(
+        [FromRoute, Required] Guid itemId,
+        CancellationToken cancellationToken)
+    {
+        var item = GetVisibleItem(itemId);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        try
+        {
+            return Ok(await _identityMutationAdapter.CancelPendingAsync(
+                item,
+                cancellationToken).ConfigureAwait(false));
+        }
+        catch (PermalinkException exception)
+        {
+            return Problem(
+                detail: exception.Message,
+                statusCode: StatusCodes.Status409Conflict,
+                title: exception.Code);
+        }
+    }
+
+    /// <summary>Confirms an exact current provider assignment through the durable logical boundary.</summary>
+    [HttpPost("Items/{itemId}/Permalink/LogicalAssignment")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult> ConfirmLogicalAssignment(
+        [FromRoute, Required] Guid itemId,
+        [FromBody, Required] PermalinkLogicalAssignmentRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(request.OperationId, out var operationId)
+            || request.ProviderIds is null)
+        {
+            return BadRequest("A parseable operation id and provider assignment are required.");
+        }
+
+        var item = GetVisibleItem(itemId);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        if (!ProviderIdsEqual(item.ProviderIds, request.ProviderIds))
+        {
+            return Conflict("Current provider assignment does not match the requested confirmation.");
+        }
+
+        try
+        {
+            _ = await _identityMutationAdapter.CommitPendingAsync(
+                item,
+                operationId,
+                request.ProviderIds,
+                cancellationToken).ConfigureAwait(false);
+            return NoContent();
+        }
+        catch (PermalinkException exception)
+        {
+            return Problem(
+                detail: exception.Message,
+                statusCode: StatusCodes.Status409Conflict,
+                title: exception.Code);
+        }
+    }
+
+    private BaseItem? GetVisibleItem(Guid itemId)
+    {
+        var user = _userManager.GetUserById(User.GetUserId());
+        return user is null ? null : _libraryManager.GetItemById<BaseItem>(itemId, user);
+    }
+
+    private static bool ProviderIdsEqual(
+        IReadOnlyDictionary<string, string> current,
+        IReadOnlyDictionary<string, string> desired)
+    {
+        return current.Count == desired.Count
+            && current.All(pair => desired.TryGetValue(pair.Key, out var value)
+                && string.Equals(pair.Value, value, StringComparison.Ordinal));
+    }
 }
+
+/// <summary>Exact logical-assignment confirmation payload.</summary>
+public sealed record PermalinkLogicalAssignmentRequest(
+    string OperationId,
+    IReadOnlyDictionary<string, string>? ProviderIds);

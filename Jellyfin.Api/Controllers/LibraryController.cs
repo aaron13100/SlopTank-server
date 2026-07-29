@@ -26,6 +26,7 @@ using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Activity;
 using MediaBrowser.Model.Configuration;
@@ -58,6 +59,7 @@ public class LibraryController : BaseJellyfinApiController
     private readonly ILibraryMonitor _libraryMonitor;
     private readonly ILogger<LibraryController> _logger;
     private readonly IServerConfigurationManager _serverConfigurationManager;
+    private readonly IPermalinkIdentityMutationAdapter _identityMutationAdapter;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="LibraryController"/> class.
@@ -73,6 +75,7 @@ public class LibraryController : BaseJellyfinApiController
     /// <param name="libraryMonitor">Instance of the <see cref="ILibraryMonitor"/> interface.</param>
     /// <param name="logger">Instance of the <see cref="ILogger{LibraryController}"/> interface.</param>
     /// <param name="serverConfigurationManager">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
+    /// <param name="identityMutationAdapter">Durable identity mutation adapter.</param>
     public LibraryController(
         IProviderManager providerManager,
         ISimilarItemsManager similarItemsManager,
@@ -84,7 +87,8 @@ public class LibraryController : BaseJellyfinApiController
         ILocalizationManager localization,
         ILibraryMonitor libraryMonitor,
         ILogger<LibraryController> logger,
-        IServerConfigurationManager serverConfigurationManager)
+        IServerConfigurationManager serverConfigurationManager,
+        IPermalinkIdentityMutationAdapter identityMutationAdapter)
     {
         _providerManager = providerManager;
         _similarItemsManager = similarItemsManager;
@@ -97,6 +101,7 @@ public class LibraryController : BaseJellyfinApiController
         _libraryMonitor = libraryMonitor;
         _logger = logger;
         _serverConfigurationManager = serverConfigurationManager;
+        _identityMutationAdapter = identityMutationAdapter;
     }
 
     /// <summary>
@@ -364,7 +369,7 @@ public class LibraryController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public ActionResult DeleteItem(Guid itemId)
+    public async Task<ActionResult> DeleteItem(Guid itemId)
     {
         var userId = User.GetUserId();
         var isApiKey = User.GetIsApiKey();
@@ -388,10 +393,18 @@ public class LibraryController : BaseJellyfinApiController
             return Unauthorized("Unauthorized access");
         }
 
-        _libraryManager.DeleteItem(
-            item,
-            new DeleteOptions { DeleteFileLocation = true },
-            true);
+        await _identityMutationAdapter.ExecuteAsync(
+            [item],
+            new PermalinkIdentityMutationRequest("deletion"),
+            (_, _) =>
+            {
+                _libraryManager.DeleteItem(
+                    item,
+                    new DeleteOptions { DeleteFileLocation = true },
+                    true);
+                return Task.CompletedTask;
+            },
+            CancellationToken.None).ConfigureAwait(false);
 
         return NoContent();
     }
@@ -408,7 +421,7 @@ public class LibraryController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public ActionResult DeleteItems([FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] ids)
+    public async Task<ActionResult> DeleteItems([FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] ids)
     {
         var isApiKey = User.GetIsApiKey();
         var userId = User.GetUserId();
@@ -421,6 +434,7 @@ public class LibraryController : BaseJellyfinApiController
             return Unauthorized("Unauthorized access");
         }
 
+        var items = new List<BaseItem>(ids.Length);
         foreach (var i in ids)
         {
             var item = _libraryManager.GetItemById<BaseItem>(i, user);
@@ -434,11 +448,25 @@ public class LibraryController : BaseJellyfinApiController
                 return Unauthorized("Unauthorized access");
             }
 
-            _libraryManager.DeleteItem(
-                item,
-                new DeleteOptions { DeleteFileLocation = true },
-                true);
+            items.Add(item);
         }
+
+        await _identityMutationAdapter.ExecuteAsync(
+            items,
+            new PermalinkIdentityMutationRequest("deletion"),
+            (_, _) =>
+            {
+                foreach (var item in items)
+                {
+                    _libraryManager.DeleteItem(
+                        item,
+                        new DeleteOptions { DeleteFileLocation = true },
+                        true);
+                }
+
+                return Task.CompletedTask;
+            },
+            CancellationToken.None).ConfigureAwait(false);
 
         return NoContent();
     }

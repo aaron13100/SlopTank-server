@@ -26,6 +26,7 @@ using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Lyrics;
 using MediaBrowser.Controller.MediaSegments;
+using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Subtitles;
 using MediaBrowser.Model.Configuration;
@@ -68,6 +69,7 @@ namespace MediaBrowser.Providers.Manager
         private readonly IMemoryCache _memoryCache;
         private readonly IMediaSegmentManager _mediaSegmentManager;
         private readonly ISimilarItemsManager _similarItemsManager;
+        private readonly IPermalinkIdentityMutationAdapter _identityMutationAdapter;
         private readonly AsyncKeyedLocker<string> _imageSaveLock = new(o =>
         {
             o.PoolSize = 20;
@@ -106,6 +108,7 @@ namespace MediaBrowser.Providers.Manager
         /// <param name="memoryCache">The memory cache.</param>
         /// <param name="mediaSegmentManager">The media segment manager.</param>
         /// <param name="similarItemsManager">The similar items manager.</param>
+        /// <param name="identityMutationAdapter">Durable identity mutation adapter.</param>
         public ProviderManager(
             IHttpClientFactory httpClientFactory,
             ISubtitleManager subtitleManager,
@@ -119,7 +122,8 @@ namespace MediaBrowser.Providers.Manager
             ILyricManager lyricManager,
             IMemoryCache memoryCache,
             IMediaSegmentManager mediaSegmentManager,
-            ISimilarItemsManager similarItemsManager)
+            ISimilarItemsManager similarItemsManager,
+            IPermalinkIdentityMutationAdapter identityMutationAdapter)
         {
             _logger = logger;
             _httpClientFactory = httpClientFactory;
@@ -134,6 +138,7 @@ namespace MediaBrowser.Providers.Manager
             _memoryCache = memoryCache;
             _mediaSegmentManager = mediaSegmentManager;
             _similarItemsManager = similarItemsManager;
+            _identityMutationAdapter = identityMutationAdapter;
 
             CollectionFolder.LibraryOptionsUpdated += OnLibraryOptionsUpdated;
         }
@@ -166,7 +171,7 @@ namespace MediaBrowser.Providers.Manager
         }
 
         /// <inheritdoc/>
-        public Task<ItemUpdateType> RefreshSingleItem(BaseItem item, MetadataRefreshOptions options, CancellationToken cancellationToken)
+        public async Task<ItemUpdateType> RefreshSingleItem(BaseItem item, MetadataRefreshOptions options, CancellationToken cancellationToken)
         {
             var type = item.GetType();
 
@@ -176,10 +181,43 @@ namespace MediaBrowser.Providers.Manager
             if (service is null)
             {
                 _logger.LogError("Unable to find a metadata service for item of type {TypeName}", type.Name);
-                return Task.FromResult(ItemUpdateType.None);
+                return ItemUpdateType.None;
             }
 
-            return service.RefreshMetadata(item, options, cancellationToken);
+            var updateType = ItemUpdateType.None;
+            await _identityMutationAdapter.ExecuteAsync(
+                [item],
+                new PermalinkIdentityMutationRequest(
+                    ClassifyIdentityMutation(item, options),
+                    options.SearchResult?.ProviderIds),
+                async (_, ambientCancellationToken) =>
+                {
+                    updateType = await service.RefreshMetadata(
+                        item,
+                        options,
+                        ambientCancellationToken).ConfigureAwait(false);
+                },
+                cancellationToken).ConfigureAwait(false);
+            return updateType;
+        }
+
+        private string ClassifyIdentityMutation(
+            BaseItem item,
+            MetadataRefreshOptions options)
+        {
+            if (options.SearchResult is not null)
+            {
+                return "identify";
+            }
+
+            var nfoPath = string.IsNullOrEmpty(item.Path)
+                ? string.Empty
+                : item is Series
+                ? Path.Combine(item.Path, "tvshow.nfo")
+                : Path.ChangeExtension(item.Path, ".nfo");
+            return _fileSystem.FileExists(nfoPath)
+                ? "nfo-refresh"
+                : "automatic-refresh";
         }
 
         /// <inheritdoc/>

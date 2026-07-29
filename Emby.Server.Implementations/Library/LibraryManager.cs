@@ -36,6 +36,7 @@ using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Playlists;
 using MediaBrowser.Controller.Providers;
@@ -90,6 +91,7 @@ namespace Emby.Server.Implementations.Library
         private readonly DotIgnoreIgnoreRule _dotIgnoreIgnoreRule;
         private readonly IMediaStreamRepository _mediaStreamRepository;
         private readonly Lazy<IExternalDataManager> _externalDataManagerFactory;
+        private readonly Lazy<IPermalinkIdentityMutationAdapter> _identityMutationAdapter;
 
         /// <summary>
         /// The _root folder sync lock.
@@ -134,6 +136,7 @@ namespace Emby.Server.Implementations.Library
         /// <param name="dotIgnoreIgnoreRule">The .ignore rule handler.</param>
         /// <param name="mediaStreamRepository">The media stream repository.</param>
         /// <param name="externalDataManagerFactory">The external data manager (lazy, to break the DI cycle through ChapterManager).</param>
+        /// <param name="identityMutationAdapter">The durable identity mutation adapter.</param>
         public LibraryManager(
             IServerApplicationHost appHost,
             ILoggerFactory loggerFactory,
@@ -158,7 +161,8 @@ namespace Emby.Server.Implementations.Library
             IPathManager pathManager,
             DotIgnoreIgnoreRule dotIgnoreIgnoreRule,
             IMediaStreamRepository mediaStreamRepository,
-            Lazy<IExternalDataManager> externalDataManagerFactory)
+            Lazy<IExternalDataManager> externalDataManagerFactory,
+            Lazy<IPermalinkIdentityMutationAdapter> identityMutationAdapter)
         {
             _appHost = appHost;
             _logger = loggerFactory.CreateLogger<LibraryManager>();
@@ -190,6 +194,7 @@ namespace Emby.Server.Implementations.Library
 
             _mediaStreamRepository = mediaStreamRepository;
             _externalDataManagerFactory = externalDataManagerFactory;
+            _identityMutationAdapter = identityMutationAdapter;
 
             RecordConfigurationValues(_configurationManager.Configuration);
         }
@@ -410,6 +415,19 @@ namespace Emby.Server.Implementations.Library
         }
 
         public void DeleteItem(BaseItem item, DeleteOptions options, BaseItem parent, bool notifyParentItem)
+        {
+            _identityMutationAdapter.Value.ExecuteAsync(
+                [item],
+                new PermalinkIdentityMutationRequest("deletion"),
+                (_, _) =>
+                {
+                    DeleteItemCore(item, options, parent, notifyParentItem);
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None).GetAwaiter().GetResult();
+        }
+
+        private void DeleteItemCore(BaseItem item, DeleteOptions options, BaseItem parent, bool notifyParentItem)
         {
             ArgumentNullException.ThrowIfNull(item);
 
@@ -863,7 +881,19 @@ namespace Emby.Server.Implementations.Library
                         wrongTypeItem.GetType().Name,
                         expectedVideoType.Name,
                         path);
-                    DeleteItem(wrongTypeItem, new DeleteOptions { DeleteFileLocation = false });
+                    _identityMutationAdapter.Value.ExecuteAsync(
+                        [wrongTypeItem],
+                        new PermalinkIdentityMutationRequest(
+                            "kind-reclassification",
+                            DesiredItemKind: expectedVideoType.Name),
+                        (_, _) =>
+                        {
+                            DeleteItem(
+                                wrongTypeItem,
+                                new DeleteOptions { DeleteFileLocation = false });
+                            return Task.CompletedTask;
+                        },
+                        CancellationToken.None).GetAwaiter().GetResult();
                 }
             }
 

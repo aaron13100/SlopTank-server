@@ -25,6 +25,7 @@ using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LibraryTaskScheduler;
+using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.IO;
@@ -52,6 +53,8 @@ namespace MediaBrowser.Controller.Entities
         public static IUserViewManager UserViewManager { get; set; }
 
         public static ILimitedConcurrencyLibraryScheduler LimitedConcurrencyLibraryScheduler { get; set; }
+
+        public static IPermalinkIdentityMutationAdapter PermalinkIdentityMutationAdapter { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is root.
@@ -453,15 +456,26 @@ namespace MediaBrowser.Controller.Entities
                         validChildren.Add(currentChild);
                         accessibleChildren.Add(currentChild);
 
-                        if (currentChild.UpdateFromResolvedItem(child) > ItemUpdateType.None)
-                        {
-                            await currentChild.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cancellationToken).ConfigureAwait(false);
-                        }
-                        else
-                        {
-                            // metadata is up-to-date; make sure DB has correct images dimensions and hash
-                            await LibraryManager.UpdateImagesAsync(currentChild).ConfigureAwait(false);
-                        }
+                        await PermalinkIdentityMutationAdapter.ExecuteAsync(
+                            [currentChild],
+                            new PermalinkIdentityMutationRequest(
+                                "scan-replacement",
+                                child.ProviderIds,
+                                child.GetBaseItemKind().ToString()),
+                            async (_, ambientCancellationToken) =>
+                            {
+                                if (currentChild.UpdateFromResolvedItem(child) > ItemUpdateType.None)
+                                {
+                                    await currentChild.UpdateToRepositoryAsync(
+                                        ItemUpdateType.MetadataImport,
+                                        ambientCancellationToken).ConfigureAwait(false);
+                                }
+                                else
+                                {
+                                    await LibraryManager.UpdateImagesAsync(currentChild).ConfigureAwait(false);
+                                }
+                            },
+                            cancellationToken).ConfigureAwait(false);
 
                         continue;
                     }
@@ -477,10 +491,24 @@ namespace MediaBrowser.Controller.Entities
                             staleItem.GetType().Name,
                             child.GetType().Name);
 
-                        currentChildren.Remove(staleItem.Id);
-                        currentChildrenByPath.Remove(child.Path);
-                        staleItem.SetParent(null);
-                        LibraryManager.DeleteItem(staleItem, new DeleteOptions { DeleteFileLocation = false }, this, false);
+                        await PermalinkIdentityMutationAdapter.ExecuteAsync(
+                            [staleItem],
+                            new PermalinkIdentityMutationRequest(
+                                "kind-reclassification",
+                                DesiredItemKind: child.GetBaseItemKind().ToString()),
+                            (_, _) =>
+                            {
+                                currentChildren.Remove(staleItem.Id);
+                                currentChildrenByPath.Remove(child.Path);
+                                staleItem.SetParent(null);
+                                LibraryManager.DeleteItem(
+                                    staleItem,
+                                    new DeleteOptions { DeleteFileLocation = false },
+                                    this,
+                                    false);
+                                return Task.CompletedTask;
+                            },
+                            cancellationToken).ConfigureAwait(false);
                         actuallyRemoved.Add(staleItem);
                     }
 
@@ -570,39 +598,49 @@ namespace MediaBrowser.Controller.Entities
                 // This avoids the premature promotion that would occur if DeleteItem ran before CreateItems.
                 foreach (var (oldPrimary, newPrimary) in replacedPrimaries)
                 {
-                    Logger.LogInformation(
-                        "Processing deferred deletion of replaced primary {OldName} ({OldId}), new primary {NewName} ({NewId})",
-                        oldPrimary.Name,
-                        oldPrimary.Id,
-                        newPrimary.Name,
-                        newPrimary.Id);
-
-                    // Reroute collection/playlist references from old primary to new primary
-                    await LibraryManager.RerouteLinkedChildReferencesAsync(oldPrimary.Id, newPrimary.Id).ConfigureAwait(false);
-
-                    // Transfer alternates from old primary to new primary
-                    var localAlternateIds = LibraryManager.GetLocalAlternateVersionIds(oldPrimary).ToHashSet();
-                    var allAlternateIds = localAlternateIds
-                        .Concat(LibraryManager.GetLinkedAlternateVersions(oldPrimary).Select(v => v.Id))
-                        .Distinct()
-                        .ToList();
-
-                    foreach (var altId in allAlternateIds)
-                    {
-                        if (LibraryManager.GetItemById(altId) is Video altVideo && !altVideo.Id.Equals(newPrimary.Id))
+                    await PermalinkIdentityMutationAdapter.ExecuteAsync(
+                        [oldPrimary, newPrimary],
+                        new PermalinkIdentityMutationRequest("promotion"),
+                        async (_, ambientCancellationToken) =>
                         {
-                            altVideo.SetPrimaryVersionId(newPrimary.Id);
-                            altVideo.OwnerId = localAlternateIds.Contains(altVideo.Id) ? newPrimary.Id : Guid.Empty;
-                            await altVideo.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, cancellationToken).ConfigureAwait(false);
-                        }
-                    }
+                            Logger.LogInformation(
+                                "Processing deferred deletion of replaced primary {OldName} ({OldId}), new primary {NewName} ({NewId})",
+                                oldPrimary.Name,
+                                oldPrimary.Id,
+                                newPrimary.Name,
+                                newPrimary.Id);
+                            await LibraryManager.RerouteLinkedChildReferencesAsync(
+                                oldPrimary.Id,
+                                newPrimary.Id).ConfigureAwait(false);
+                            var localAlternateIds = LibraryManager.GetLocalAlternateVersionIds(oldPrimary).ToHashSet();
+                            var allAlternateIds = localAlternateIds
+                                .Concat(LibraryManager.GetLinkedAlternateVersions(oldPrimary).Select(v => v.Id))
+                                .Distinct()
+                                .ToList();
+                            foreach (var altId in allAlternateIds)
+                            {
+                                if (LibraryManager.GetItemById(altId) is Video altVideo
+                                    && !altVideo.Id.Equals(newPrimary.Id))
+                                {
+                                    altVideo.SetPrimaryVersionId(newPrimary.Id);
+                                    altVideo.OwnerId = localAlternateIds.Contains(altVideo.Id)
+                                        ? newPrimary.Id
+                                        : Guid.Empty;
+                                    await altVideo.UpdateToRepositoryAsync(
+                                        ItemUpdateType.MetadataEdit,
+                                        ambientCancellationToken).ConfigureAwait(false);
+                                }
+                            }
 
-                    // Clear alternate arrays so DeleteItem won't trigger promotion
-                    oldPrimary.LocalAlternateVersions = [];
-                    oldPrimary.LinkedAlternateVersions = [];
-
-                    // Safe to delete now — no promotion will happen
-                    LibraryManager.DeleteItem(oldPrimary, new DeleteOptions { DeleteFileLocation = false }, this, false);
+                            oldPrimary.LocalAlternateVersions = [];
+                            oldPrimary.LinkedAlternateVersions = [];
+                            LibraryManager.DeleteItem(
+                                oldPrimary,
+                                new DeleteOptions { DeleteFileLocation = false },
+                                this,
+                                false);
+                        },
+                        cancellationToken).ConfigureAwait(false);
                 }
 
                 // Demote old primaries that are now alternate versions of newly created primaries.
@@ -630,40 +668,46 @@ namespace MediaBrowser.Controller.Entities
 
                 foreach (var (oldPrimary, newPrimary) in oldPrimariesToDemote)
                 {
-                    Logger.LogInformation(
-                        "Demoting old primary {OldName} ({OldId}) to alternate of new primary {NewName} ({NewId})",
-                        oldPrimary.Name,
-                        oldPrimary.Id,
-                        newPrimary.Name,
-                        newPrimary.Id);
-
-                    // First: update old primary's alternate items to point to new primary.
-                    // Order matters — update alternates FIRST so they don't get orphan-deleted
-                    // when old primary's arrays are cleared.
-                    var oldAlternateIds = LibraryManager.GetLocalAlternateVersionIds(oldPrimary)
-                        .Concat(LibraryManager.GetLinkedAlternateVersions(oldPrimary).Select(v => v.Id))
-                        .Distinct()
-                        .ToList();
-
-                    foreach (var altId in oldAlternateIds)
-                    {
-                        if (LibraryManager.GetItemById(altId) is Video altVideo && !altVideo.Id.Equals(newPrimary.Id))
+                    await PermalinkIdentityMutationAdapter.ExecuteAsync(
+                        [oldPrimary, newPrimary],
+                        new PermalinkIdentityMutationRequest("grouping"),
+                        async (_, ambientCancellationToken) =>
                         {
-                            altVideo.SetPrimaryVersionId(newPrimary.Id);
-                            altVideo.OwnerId = newPrimary.Id;
-                            await altVideo.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, cancellationToken).ConfigureAwait(false);
-                        }
-                    }
+                            Logger.LogInformation(
+                                "Demoting old primary {OldName} ({OldId}) to alternate of new primary {NewName} ({NewId})",
+                                oldPrimary.Name,
+                                oldPrimary.Id,
+                                newPrimary.Name,
+                                newPrimary.Id);
+                            var oldAlternateIds = LibraryManager.GetLocalAlternateVersionIds(oldPrimary)
+                                .Concat(LibraryManager.GetLinkedAlternateVersions(oldPrimary).Select(v => v.Id))
+                                .Distinct()
+                                .ToList();
+                            foreach (var altId in oldAlternateIds)
+                            {
+                                if (LibraryManager.GetItemById(altId) is Video altVideo
+                                    && !altVideo.Id.Equals(newPrimary.Id))
+                                {
+                                    altVideo.SetPrimaryVersionId(newPrimary.Id);
+                                    altVideo.OwnerId = newPrimary.Id;
+                                    await altVideo.UpdateToRepositoryAsync(
+                                        ItemUpdateType.MetadataEdit,
+                                        ambientCancellationToken).ConfigureAwait(false);
+                                }
+                            }
 
-                    // Then: demote old primary — clear its arrays and set it as alternate of new primary
-                    oldPrimary.LocalAlternateVersions = [];
-                    oldPrimary.LinkedAlternateVersions = [];
-                    oldPrimary.SetPrimaryVersionId(newPrimary.Id);
-                    oldPrimary.OwnerId = newPrimary.Id;
-                    await oldPrimary.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, cancellationToken).ConfigureAwait(false);
-
-                    // Re-route playlist/collection references from old primary to new primary
-                    await LibraryManager.RerouteLinkedChildReferencesAsync(oldPrimary.Id, newPrimary.Id).ConfigureAwait(false);
+                            oldPrimary.LocalAlternateVersions = [];
+                            oldPrimary.LinkedAlternateVersions = [];
+                            oldPrimary.SetPrimaryVersionId(newPrimary.Id);
+                            oldPrimary.OwnerId = newPrimary.Id;
+                            await oldPrimary.UpdateToRepositoryAsync(
+                                ItemUpdateType.MetadataEdit,
+                                ambientCancellationToken).ConfigureAwait(false);
+                            await LibraryManager.RerouteLinkedChildReferencesAsync(
+                                oldPrimary.Id,
+                                newPrimary.Id).ConfigureAwait(false);
+                        },
+                        cancellationToken).ConfigureAwait(false);
                 }
 
                 // After removing items, reattach any detached user data to remaining children

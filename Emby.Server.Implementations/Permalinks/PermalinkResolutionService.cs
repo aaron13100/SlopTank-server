@@ -22,6 +22,7 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
     private readonly PermalinkLeaseStore _leases;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly PermalinkAuthorityStore _authority;
+    private readonly PermalinkOperationJournal _journal;
 
     public PermalinkResolutionService(
         ILibraryManager libraryManager,
@@ -29,7 +30,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         PermalinkBindingIndex bindings,
         PermalinkLeaseStore leases,
         IPermalinkAtomicFileSystem fileSystem,
-        PermalinkAuthorityStore authority)
+        PermalinkAuthorityStore authority,
+        PermalinkOperationJournal journal)
     {
         _libraryManager = libraryManager;
         _manager = manager;
@@ -37,6 +39,7 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         _leases = leases;
         _fileSystem = fileSystem;
         _authority = authority;
+        _journal = journal;
     }
 
     public async Task<IReadOnlyList<PermalinkCandidateEnvelope>> DiscoverAsync(
@@ -121,9 +124,17 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
     {
         var item = _libraryManager.GetItemById<BaseItem>(binding.ItemId)
             ?? throw Conflict("binding-item-missing", $"Bound item '{binding.ItemId}' is missing.");
+        if (await _journal.HasPendingAsync(item.Id, cancellationToken).ConfigureAwait(false))
+        {
+            throw Conflict(
+                "identity-mutation-pending",
+                $"Item '{item.Id}' has an unfinished durable identity mutation.");
+        }
+
         var aliases = await _manager.EnsurePermalinkIdsAsync(item, cancellationToken)
             .ConfigureAwait(false);
-        if (!aliases.Ids.Contains(binding.PermalinkId, StringComparer.Ordinal))
+        if (!binding.IsCapsuleOverride
+            && !aliases.Ids.Contains(binding.PermalinkId, StringComparer.Ordinal))
         {
             throw Conflict("assignment-mismatch", "The requested alias is not active for this assignment.");
         }

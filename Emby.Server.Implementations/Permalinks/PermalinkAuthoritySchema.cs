@@ -36,6 +36,10 @@ internal static class PermalinkAuthoritySchema
                 issuance_nonce TEXT NULL, alias_event_id TEXT NOT NULL,
                 event_digest TEXT NOT NULL, event_json TEXT NOT NULL,
                 created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS PermalinkBindingCapsuleOverrides (
+                PermalinkId TEXT NOT NULL, ItemId TEXT NOT NULL,
+                capsule_id TEXT NOT NULL, created_at TEXT NOT NULL,
+                PRIMARY KEY(PermalinkId, ItemId));
             CREATE TABLE IF NOT EXISTS ContentTransitionClaims (
                 capsule_id TEXT NOT NULL, predecessor TEXT NOT NULL,
                 operation_id TEXT NOT NULL, event_id TEXT NOT NULL,

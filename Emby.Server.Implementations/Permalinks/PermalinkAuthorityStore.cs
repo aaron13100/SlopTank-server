@@ -19,6 +19,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _provisionLock = new(1, 1);
+    private readonly string? _configuredRoot;
     private bool _provisioned;
 
     /// <summary>
@@ -32,11 +33,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         IPermalinkAtomicFileSystem fileSystem,
         TimeProvider timeProvider)
     {
-        Root = configuration["Permalinks:AuthorityRoot"]
-            ?? throw new PermalinkException(
-                PermalinkErrorKind.Unavailable,
-                "authority-not-configured",
-                "Permalinks:AuthorityRoot is not configured.");
+        _configuredRoot = configuration["Permalinks:AuthorityRoot"];
         _fileSystem = fileSystem;
         _timeProvider = timeProvider;
     }
@@ -44,7 +41,26 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// <summary>
     /// Gets the configured authority root.
     /// </summary>
-    public string Root { get; }
+    public string Root
+    {
+        get
+        {
+            if (!IsConfigured)
+            {
+                throw new PermalinkException(
+                    PermalinkErrorKind.Unavailable,
+                    "authority-not-configured",
+                    "Permalinks:AuthorityRoot is not configured.");
+            }
+
+            return _configuredRoot!;
+        }
+    }
+
+    /// <summary>
+    /// Gets a value indicating whether permalink authority is configured.
+    /// </summary>
+    internal bool IsConfigured => !string.IsNullOrWhiteSpace(_configuredRoot);
 
     private string AuthorityRoot => Path.Combine(Root, ".sloptank", "permalinks");
 

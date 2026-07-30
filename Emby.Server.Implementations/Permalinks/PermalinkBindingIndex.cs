@@ -145,6 +145,11 @@ internal sealed class PermalinkBindingIndex
         Guid itemId,
         CancellationToken cancellationToken)
     {
+        if (!_authority.IsConfigured)
+        {
+            return false;
+        }
+
         await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
             .ConfigureAwait(false);

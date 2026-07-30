@@ -2,6 +2,9 @@ using System;
 using System.Linq;
 using System.Security.Claims;
 using Jellyfin.Api.Constants;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Extensions;
+using MediaBrowser.Controller.Library;
 
 namespace Jellyfin.Api.Extensions;
 
@@ -21,6 +24,29 @@ public static class ClaimsPrincipalExtensions
         return string.IsNullOrEmpty(value)
             ? default
             : Guid.Parse(value);
+    }
+
+    /// <summary>
+    /// Resolves the user a request was made on behalf of, or <c>null</c> when the
+    /// token carries no user at all.
+    /// </summary>
+    /// <remarks>
+    /// An API key satisfies <c>[Authorize]</c> but authenticates the server rather
+    /// than a person, so <see cref="GetUserId"/> yields <see cref="Guid.Empty"/> for
+    /// it. <see cref="IUserManager.GetUserById"/> throws on an empty id rather than
+    /// returning <c>null</c>, so calling it directly turns "there is no user" into an
+    /// unhandled exception and an untyped error response. Endpoints that require a
+    /// user must ask through here, where the absence is a value they can refuse on.
+    /// </remarks>
+    /// <param name="user">Current claims principal.</param>
+    /// <param name="userManager">The user manager to resolve the claim against.</param>
+    /// <returns>The authenticated user, or <c>null</c> when the request has none.</returns>
+    public static User? GetRequestUser(this ClaimsPrincipal user, IUserManager userManager)
+    {
+        ArgumentNullException.ThrowIfNull(userManager);
+
+        var userId = user.GetUserId();
+        return userId.IsEmpty() ? null : userManager.GetUserById(userId);
     }
 
     /// <summary>

@@ -47,7 +47,7 @@ public sealed class PermalinkRewriteController : BaseJellyfinApiController
         [FromBody] PermalinkMutationPrepareRequest request,
         CancellationToken cancellationToken)
     {
-        var user = _userManager.GetUserById(User.GetUserId());
+        var user = User.GetRequestUser(_userManager);
         var item = user is null
             ? null
             : _libraryManager.GetItemById<BaseItem>(request.ItemId, user);

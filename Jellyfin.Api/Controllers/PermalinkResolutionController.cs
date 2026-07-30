@@ -75,7 +75,7 @@ public sealed class PermalinkResolutionController : BaseJellyfinApiController
     {
         return await ExecuteAsync(async userId =>
         {
-            var user = _userManager.GetUserById(userId)!;
+            var user = User.GetRequestUser(_userManager)!;
             var item = await _resolution.RedeemDetailsAsync(
                 handle,
                 request.Lease,
@@ -136,15 +136,16 @@ public sealed class PermalinkResolutionController : BaseJellyfinApiController
 
     private async Task<ActionResult<T>> ExecuteAsync<T>(Func<Guid, Task<ActionResult<T>>> action)
     {
-        var userId = User.GetUserId();
-        if (_userManager.GetUserById(userId) is null)
+        // Leases are bound to a user, so a token without one (an API key) has
+        // nothing to bind to and is refused here rather than deeper in.
+        if (User.GetRequestUser(_userManager) is null)
         {
             return Unauthorized();
         }
 
         try
         {
-            return await action(userId).ConfigureAwait(false);
+            return await action(User.GetUserId()).ConfigureAwait(false);
         }
         catch (PermalinkException exception)
         {

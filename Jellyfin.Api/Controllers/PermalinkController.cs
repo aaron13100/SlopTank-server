@@ -61,7 +61,7 @@ public sealed class PermalinkController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId,
         CancellationToken cancellationToken)
     {
-        var user = _userManager.GetUserById(User.GetUserId());
+        var user = User.GetRequestUser(_userManager);
         var item = user is null
             ? null
             : _libraryManager.GetItemById<BaseItem>(itemId, user);
@@ -177,7 +177,7 @@ public sealed class PermalinkController : BaseJellyfinApiController
 
     private BaseItem? GetVisibleItem(Guid itemId)
     {
-        var user = _userManager.GetUserById(User.GetUserId());
+        var user = User.GetRequestUser(_userManager);
         return user is null ? null : _libraryManager.GetItemById<BaseItem>(itemId, user);
     }
 

@@ -72,6 +72,7 @@ internal sealed class PermalinkMediaMutation
             File.Move(staging, item.Path);
         }
 
+        _evidence.InvalidateContentDigest(item.Path);
         return await FinalizeAsync(operation, item, cancellationToken).ConfigureAwait(false);
     }
 

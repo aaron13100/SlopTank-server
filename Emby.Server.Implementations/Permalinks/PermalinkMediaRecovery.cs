@@ -64,6 +64,7 @@ internal sealed class PermalinkMediaRecovery
                 .ConfigureAwait(false);
             File.Move(item.Path, _mutation.GetQuarantinePath(operation));
             File.Move(_mutation.GetStagingPath(operation), item.Path);
+            _evidence.InvalidateContentDigest(item.Path);
             return await _mutation.FinalizeAsync(operation, item, cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -73,6 +74,7 @@ internal sealed class PermalinkMediaRecovery
             await RequireClaimsAsync(bundle, operation.OperationId, cancellationToken)
                 .ConfigureAwait(false);
             File.Move(_mutation.GetStagingPath(operation), item.Path);
+            _evidence.InvalidateContentDigest(item.Path);
             return await _mutation.FinalizeAsync(operation, item, cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -166,6 +168,7 @@ internal sealed class PermalinkMediaRecovery
             }
 
             File.Move(_mutation.GetQuarantinePath(operation), item.Path);
+            _evidence.InvalidateContentDigest(item.Path);
             await _journal.WritePhaseAsync(
                 operation.OperationId,
                 "restored",

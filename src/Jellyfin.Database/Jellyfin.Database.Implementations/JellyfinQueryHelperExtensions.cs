@@ -131,7 +131,7 @@ public static class JellyfinQueryHelperExtensions
         }
 
         return baseQuery.Where(e => e.Provider!.Any(p =>
-            providerKeys.Contains(p.ProviderId.ToLower() + ":" + p.ProviderValue.ToLower())));
+            providerKeys.Contains(p.ProviderId.ToLowerInvariant() + ":" + p.ProviderValue.ToLowerInvariant())));
     }
 
     /// <summary>

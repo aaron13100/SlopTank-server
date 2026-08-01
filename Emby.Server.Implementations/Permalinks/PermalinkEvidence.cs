@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -17,6 +18,36 @@ namespace Emby.Server.Implementations.Permalinks;
 /// </summary>
 public sealed class PermalinkEvidence
 {
+    /// <summary>
+    /// Caches the full-content SHA-256 for a path, valid as long as its macOS
+    /// change token (device, inode, status change time, length -- see
+    /// <see cref="MacPermalinkContentIdentity"/>) has not changed. Hashing
+    /// scales with file size (a multi-GB movie costs tens of seconds), so a
+    /// repeat call for an unchanged file must cost a stat, not another full
+    /// read. Size and modification time alone are not a valid cache key
+    /// (permalink-url-design.md): both survive a content-preserving
+    /// same-second replacement, since modification time can be reset by the
+    /// very call that replaced the bytes. A path whose change token cannot be
+    /// read (non-macOS host, or the stat call fails) is never cached and is
+    /// hashed on every call, per the same design rule.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, ContentDigestCacheEntry> _contentDigestCache = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Discards the cached digest for a path whose bytes were just replaced in
+    /// place. The change token already invalidates a stale entry on its own
+    /// (a same-path content swap changes status change time even when
+    /// modification time is explicitly reset), so this is defense in depth,
+    /// not the correctness mechanism: every caller that overwrites a stable
+    /// item path still calls this before the next evidence computation so a
+    /// lookup never depends on stat timing precision.
+    /// </summary>
+    /// <param name="path">The path whose on-disk content just changed.</param>
+    public void InvalidateContentDigest(string path)
+    {
+        _contentDigestCache.TryRemove(path, out _);
+    }
+
     /// <summary>
     /// Computes canonical evidence with an operation-owned replacement main file.
     /// </summary>
@@ -194,7 +225,7 @@ public sealed class PermalinkEvidence
         return Build(leaves);
     }
 
-    private static async Task<PermalinkEvidenceResult> ComputeOpticalAsync(
+    private async Task<PermalinkEvidenceResult> ComputeOpticalAsync(
         BaseItem item,
         CancellationToken cancellationToken)
     {
@@ -250,30 +281,55 @@ public sealed class PermalinkEvidence
         return Build(leaves);
     }
 
-    private static async Task<PermalinkLeaf> HashFileAsync(
+    private async Task<PermalinkLeaf> HashFileAsync(
         string kind,
         string role,
         string? relativePath,
         string path,
         CancellationToken cancellationToken)
     {
-        await using var stream = new FileStream(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            1024 * 1024,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
-        var digest = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
-        var fullDigest = "sha256:" + Convert.ToHexStringLower(digest);
+        var token = MacPermalinkContentIdentity.TryRead(path);
+        string digest;
+        long length;
+
+        if (token is { } current
+            && _contentDigestCache.TryGetValue(path, out var cached)
+            && cached.MatchesToken(current))
+        {
+            digest = cached.Digest;
+            length = current.Length;
+        }
+        else
+        {
+            await using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                1024 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            var hash = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
+            length = stream.Length;
+            digest = "sha256:" + Convert.ToHexStringLower(hash);
+
+            if (token is { } fresh)
+            {
+                _contentDigestCache[path] = new ContentDigestCacheEntry(fresh, digest);
+            }
+            else
+            {
+                _contentDigestCache.TryRemove(path, out _);
+            }
+        }
+
         var leafBytes = Encoding.UTF8.GetBytes(
-            $"{kind}\0{role}\0{relativePath}\0{stream.Length}\0{fullDigest}");
+            $"{kind}\0{role}\0{relativePath}\0{length}\0{digest}");
         return new PermalinkLeaf(
             kind,
             role,
             relativePath,
             "sha256:" + Convert.ToHexStringLower(SHA256.HashData(leafBytes)),
-            stream.Length,
+            length,
             1);
     }
 
@@ -309,5 +365,11 @@ public sealed class PermalinkEvidence
             "content-unreachable",
             $"Permalink content is unreachable at '{path}' ({exception.Message}).",
             exception);
+    }
+
+    /// <summary>One cached full-content digest, valid while the captured change token still matches.</summary>
+    private sealed record ContentDigestCacheEntry(MacPermalinkContentIdentityToken Token, string Digest)
+    {
+        public bool MatchesToken(MacPermalinkContentIdentityToken current) => Token == current;
     }
 }

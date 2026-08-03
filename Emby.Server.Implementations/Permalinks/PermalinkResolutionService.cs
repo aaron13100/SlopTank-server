@@ -360,7 +360,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         }
 
         var separator = permalinkId.LastIndexOf('-');
-        return permalinkId.StartsWith("tm-", StringComparison.Ordinal)
+        return (permalinkId.StartsWith("tm-", StringComparison.Ordinal)
+                || permalinkId.StartsWith("tv-", StringComparison.Ordinal))
             && separator > 3
             && separator < permalinkId.Length - 1
             && permalinkId.AsSpan(separator + 1).IndexOfAnyExceptInRange('0', '9') < 0;
@@ -381,6 +382,16 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
                 : item is Season ? "se"
                 : "co";
             yield return $"tm-{qualifier}-{tmdb}";
+        }
+
+        if (item.ProviderIds.TryGetValue("Tvdb", out var tvdb))
+        {
+            var qualifier = item is MediaBrowser.Controller.Entities.Movies.Movie ? "mv"
+                : item is Series ? "tv"
+                : item is MediaBrowser.Controller.Entities.TV.Episode ? "ep"
+                : item is Season ? "se"
+                : "co";
+            yield return $"tv-{qualifier}-{tvdb}";
         }
     }
 

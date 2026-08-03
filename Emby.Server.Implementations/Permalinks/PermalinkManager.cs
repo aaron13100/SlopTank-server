@@ -247,14 +247,6 @@ public sealed class PermalinkManager : IPermalinkManager
             return imdb;
         }
 
-        if (!item.ProviderIds.TryGetValue("Tmdb", out var tmdb)
-            || tmdb.Length == 0
-            || tmdb[0] == '0'
-            || tmdb.AsSpan().IndexOfAnyExceptInRange('0', '9') >= 0)
-        {
-            return null;
-        }
-
         var qualifier = item switch
         {
             Movie => "mv",
@@ -264,7 +256,34 @@ public sealed class PermalinkManager : IPermalinkManager
             BoxSet => "co",
             _ => null
         };
-        return qualifier is null ? null : $"tm-{qualifier}-{tmdb}";
+        if (qualifier is null)
+        {
+            return null;
+        }
+
+        if (TryGetNumericProviderId(item, "Tmdb", out var tmdb))
+        {
+            return $"tm-{qualifier}-{tmdb}";
+        }
+
+        return TryGetNumericProviderId(item, "Tvdb", out var tvdb)
+            ? $"tv-{qualifier}-{tvdb}"
+            : null;
+    }
+
+    private static bool TryGetNumericProviderId(BaseItem item, string provider, out string value)
+    {
+        if (item.ProviderIds.TryGetValue(provider, out var candidate)
+            && candidate.Length > 0
+            && candidate[0] != '0'
+            && candidate.AsSpan().IndexOfAnyExceptInRange('0', '9') < 0)
+        {
+            value = candidate;
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
     }
 
     private static PermalinkException Ineligible(BaseItem item, string reason)

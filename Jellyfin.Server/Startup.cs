@@ -209,6 +209,8 @@ namespace Jellyfin.Server
                         FileProvider = new PhysicalFileProvider(_serverConfigurationManager.ApplicationPaths.WebPath),
                         RequestPath = "/web"
                     });
+                    mainApp.UseMiddleware<HostedWebClientIndexMiddleware>(
+                        _serverConfigurationManager.ApplicationPaths.WebPath);
                     mainApp.UseStaticFiles(new StaticFileOptions
                     {
                         FileProvider = new PhysicalFileProvider(_serverConfigurationManager.ApplicationPaths.WebPath),
@@ -220,10 +222,15 @@ namespace Jellyfin.Server
                             {
                                 context.Context.Response.Headers.CacheControl = new StringValues("no-cache");
                             }
+
+                            if (Path.GetFileName(context.File.Name).Equals("serviceworker.js", StringComparison.Ordinal))
+                            {
+                                context.Context.Response.Headers["Service-Worker-Allowed"] =
+                                    string.Concat(context.Context.Request.PathBase.Value?.TrimEnd('/'), "/");
+                            }
                         }
                     });
 
-                    mainApp.UsePermalinkRedirection();
                     mainApp.UseRobotsRedirection();
                 }
 
@@ -254,6 +261,12 @@ namespace Jellyfin.Server
 
                     endpoints.MapHealthChecks("/health");
                 });
+
+                if (appConfig.HostWebClient())
+                {
+                    mainApp.UseMiddleware<HostedWebClientFallbackMiddleware>(
+                        _serverConfigurationManager.ApplicationPaths.WebPath);
+                }
             });
         }
     }

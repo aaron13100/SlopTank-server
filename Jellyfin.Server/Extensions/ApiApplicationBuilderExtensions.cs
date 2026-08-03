@@ -119,14 +119,5 @@ namespace Jellyfin.Server.Extensions
             return appBuilder.UseMiddleware<RobotsRedirectionMiddleware>();
         }
 
-        /// <summary>
-        /// Adds pretty permalink redirection to the hosted web client pipeline.
-        /// </summary>
-        /// <param name="appBuilder">The application builder.</param>
-        /// <returns>The updated application builder.</returns>
-        public static IApplicationBuilder UsePermalinkRedirection(this IApplicationBuilder appBuilder)
-        {
-            return appBuilder.UseMiddleware<PermalinkRedirectionMiddleware>();
-        }
     }
 }

@@ -118,6 +118,5 @@ namespace Jellyfin.Server.Extensions
         {
             return appBuilder.UseMiddleware<RobotsRedirectionMiddleware>();
         }
-
     }
 }

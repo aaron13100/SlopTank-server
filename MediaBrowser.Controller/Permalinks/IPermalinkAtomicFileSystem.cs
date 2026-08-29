@@ -44,6 +44,12 @@ public interface IPermalinkAtomicFileSystem
     void ProbeDirectoryWriteAccess(string path);
 
     /// <summary>
+    /// Removes interrupted immutable publications while preserving live publishers.
+    /// </summary>
+    /// <param name="directory">The publication directory.</param>
+    void CleanupAbandonedPublications(string directory);
+
+    /// <summary>
     /// Flushes a completed file and its parent directory to stable storage.
     /// </summary>
     /// <param name="path">The completed file path.</param>

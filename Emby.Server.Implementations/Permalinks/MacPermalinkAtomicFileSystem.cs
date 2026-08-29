@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -23,6 +25,7 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
     private const int RenameExclusive = 0x00000004;
     private const int XattrCreate = 0x0002;
     private readonly MacPermalinkMountPolicy _mountPolicy;
+    private readonly string _publicationOwner;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MacPermalinkAtomicFileSystem"/> class.
@@ -31,6 +34,10 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
     public MacPermalinkAtomicFileSystem(MacPermalinkMountPolicy mountPolicy)
     {
         _mountPolicy = mountPolicy;
+        using var process = Process.GetCurrentProcess();
+        _publicationOwner = Environment.ProcessId.ToString(CultureInfo.InvariantCulture)
+            + ":"
+            + process.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture);
     }
 
     /// <inheritdoc />
@@ -202,6 +209,36 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
     }
 
     /// <inheritdoc />
+    public void CleanupAbandonedPublications(string directory)
+    {
+        _mountPolicy.EnsureAdmitted(directory);
+        foreach (var temporary in Directory.EnumerateFiles(directory, ".caller-temp-*"))
+        {
+            var publicationId = Path.GetFileName(temporary)[".caller-temp-".Length..];
+            var owner = Path.Combine(directory, ".caller-live-" + publicationId);
+            if (IsPublicationOwnerActive(owner))
+            {
+                continue;
+            }
+
+            File.Delete(temporary);
+            File.Delete(owner);
+        }
+
+        foreach (var owner in Directory.EnumerateFiles(directory, ".caller-live-*"))
+        {
+            var publicationId = Path.GetFileName(owner)[".caller-live-".Length..];
+            var temporary = Path.Combine(directory, ".caller-temp-" + publicationId);
+            if (File.Exists(temporary) || IsPublicationOwnerActive(owner))
+            {
+                continue;
+            }
+
+            File.Delete(owner);
+        }
+    }
+
+    /// <inheritdoc />
     public void SyncFile(string path)
     {
         _mountPolicy.EnsureAdmitted(path);
@@ -221,12 +258,17 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
         CancellationToken cancellationToken)
     {
         _mountPolicy.EnsureAdmitted(destination);
-        CreateDirectoryDurable(Path.GetDirectoryName(destination)!);
-        var temporary = Path.Combine(
-            Path.GetDirectoryName(destination)!,
-            ".caller-temp-" + Guid.NewGuid().ToString("N"));
+        var directory = Path.GetDirectoryName(destination)!;
+        CreateDirectoryDurable(directory);
+        var publicationId = Guid.NewGuid().ToString("N");
+        var temporary = Path.Combine(directory, ".caller-temp-" + publicationId);
+        var owner = Path.Combine(directory, ".caller-live-" + publicationId);
         try
         {
+            await File.WriteAllTextAsync(
+                owner,
+                _publicationOwner,
+                cancellationToken).ConfigureAwait(false);
             await using (var stream = new FileStream(
                              temporary,
                              FileMode.CreateNew,
@@ -249,6 +291,8 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
             {
                 File.Delete(temporary);
             }
+
+            File.Delete(owner);
         }
     }
 
@@ -289,6 +333,54 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
         else
         {
             File.Move(source, destination);
+        }
+    }
+
+    private bool IsPublicationOwnerActive(string owner)
+    {
+        if (!File.Exists(owner))
+        {
+            return false;
+        }
+
+        var ownerValue = File.ReadAllText(owner);
+        var ownerParts = ownerValue.Split(':', 2, StringSplitOptions.None);
+        if (ownerParts.Length != 2
+            || !int.TryParse(
+                ownerParts[0],
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var processId)
+            || !long.TryParse(
+                ownerParts[1],
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var processStartedAt))
+        {
+            return false;
+        }
+
+        if (processId == Environment.ProcessId)
+        {
+            return string.Equals(
+                ownerValue,
+                _publicationOwner,
+                StringComparison.Ordinal);
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return !process.HasExited
+                && process.StartTime.ToUniversalTime().Ticks == processStartedAt;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
         }
     }
 

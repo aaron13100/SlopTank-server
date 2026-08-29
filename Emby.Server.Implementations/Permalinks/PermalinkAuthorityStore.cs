@@ -238,7 +238,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     {
         if (_provisioned)
         {
-            ProbeAuthorityWriteAccess();
+            ValidateProvisionedAuthority();
             return;
         }
 
@@ -247,12 +247,12 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         {
             if (_provisioned)
             {
-                ProbeAuthorityWriteAccess();
+                ValidateProvisionedAuthority();
                 return;
             }
 
             _fileSystem.CreateDirectoryDurable(IssuedRoot);
-            DeleteCallerTemps(IssuedRoot);
+            _fileSystem.CleanupAbandonedPublications(IssuedRoot);
             var authorityPath = Path.Combine(AuthorityRoot, "authority.json");
             if (!File.Exists(authorityPath))
             {
@@ -294,11 +294,12 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         }
     }
 
-    private void ProbeAuthorityWriteAccess()
+    private void ValidateProvisionedAuthority()
     {
         try
         {
             _fileSystem.ProbeDirectoryWriteAccess(Root);
+            _fileSystem.CleanupAbandonedPublications(IssuedRoot);
         }
         catch (PermalinkException)
         {
@@ -428,13 +429,5 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         Span<byte> bytes = stackalloc byte[16];
         RandomNumberGenerator.Fill(bytes);
         return new Guid(bytes);
-    }
-
-    private static void DeleteCallerTemps(string directory)
-    {
-        foreach (var path in Directory.EnumerateFiles(directory, ".caller-temp-*"))
-        {
-            File.Delete(path);
-        }
     }
 }

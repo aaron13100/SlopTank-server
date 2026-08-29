@@ -198,7 +198,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
         {
             if (!subtitleStream.IsExternal || subtitleStream.Path.EndsWith(".mks", StringComparison.OrdinalIgnoreCase))
             {
-                await ExtractAllExtractableSubtitles(mediaSource, cancellationToken).ConfigureAwait(false);
+                await ExtractExtractableSubtitles(mediaSource, [subtitleStream], cancellationToken).ConfigureAwait(false);
 
                 var outputFileExtension = GetExtractableSubtitleFileExtension(subtitleStream);
                 var outputFormat = GetExtractableSubtitleFormat(subtitleStream);
@@ -503,14 +503,20 @@ namespace MediaBrowser.MediaEncoding.Subtitles
         }
 
         /// <inheritdoc />
-        public async Task ExtractAllExtractableSubtitles(MediaSourceInfo mediaSource, CancellationToken cancellationToken)
+        public Task ExtractAllExtractableSubtitles(MediaSourceInfo mediaSource, CancellationToken cancellationToken)
+            => ExtractExtractableSubtitles(mediaSource, mediaSource.MediaStreams, cancellationToken);
+
+        private async Task ExtractExtractableSubtitles(
+            MediaSourceInfo mediaSource,
+            IEnumerable<MediaStream> candidateStreams,
+            CancellationToken cancellationToken)
         {
             var locks = new List<IDisposable>();
             var extractableStreams = new List<MediaStream>();
 
             try
             {
-                var subtitleStreams = mediaSource.MediaStreams
+                var subtitleStreams = candidateStreams
                     .Where(stream => stream is { IsExtractableSubtitleStream: true, SupportsExternalStream: true });
 
                 foreach (var subtitleStream in subtitleStreams)

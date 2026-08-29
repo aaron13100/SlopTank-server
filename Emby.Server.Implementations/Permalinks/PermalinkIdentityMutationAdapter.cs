@@ -170,7 +170,16 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
                     await _pending.RestoreAndCancelAsync(
                         preparedItem.Item,
                         preparedItem.OperationId,
-                        cancellationToken).ConfigureAwait(false);
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                foreach (var preparedItem in preparedItems)
+                {
+                    await _coordinator.AbortAsync(
+                        preparedItem.OperationId,
+                        CancellationToken.None).ConfigureAwait(false);
                 }
             }
 

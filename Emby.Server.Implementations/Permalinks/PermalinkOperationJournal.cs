@@ -14,6 +14,15 @@ namespace Emby.Server.Implementations.Permalinks;
 /// </summary>
 internal sealed class PermalinkOperationJournal
 {
+    private static readonly string[] _terminalPhases =
+    [
+        "committed",
+        "aborted",
+        "cancelled",
+        "detached",
+        "assignment_unknown"
+    ];
+
     private readonly PermalinkAuthorityStore _authority;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
 
@@ -99,6 +108,14 @@ internal sealed class PermalinkOperationJournal
         return File.Exists(Path.Combine(GetOperationPath(operationId), phase + ".json"));
     }
 
+    /// <summary>Returns the durable terminal phase, or null while work remains pending.</summary>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <returns>The terminal phase name when one exists.</returns>
+    public string? GetTerminalPhase(Guid operationId)
+    {
+        return _terminalPhases.FirstOrDefault(phase => HasPhase(operationId, phase));
+    }
+
     /// <summary>Reads and validates one deterministic phase when it exists.</summary>
     /// <param name="operationId">The durable operation identifier.</param>
     /// <param name="phase">The phase.</param>
@@ -156,10 +173,7 @@ internal sealed class PermalinkOperationJournal
             cancellationToken.ThrowIfCancellationRequested();
             var operationIdText = Path.GetFileName(directory);
             if (!Guid.TryParse(operationIdText, out var operationId)
-                || HasPhase(operationId, "committed")
-                || HasPhase(operationId, "cancelled")
-                || HasPhase(operationId, "detached")
-                || HasPhase(operationId, "assignment_unknown"))
+                || GetTerminalPhase(operationId) is not null)
             {
                 continue;
             }

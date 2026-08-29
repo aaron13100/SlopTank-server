@@ -111,6 +111,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Prometheus.DotNetRuntime;
 using static MediaBrowser.Controller.Extensions.ConfigurationExtensions;
@@ -570,6 +571,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IPermalinkStore, PermalinkStore>();
             serviceCollection.AddSingleton<IPermalinkManager, PermalinkManager>();
             serviceCollection.AddSingleton<PermalinkOperationJournal>();
+            serviceCollection.AddSingleton<IHostedService, PermalinkOperationReconciler>();
             serviceCollection.AddSingleton<PermalinkPendingIdentityMutation>();
             serviceCollection.AddSingleton<PermalinkMutationBundleFactory>();
             serviceCollection.AddSingleton<PermalinkMutationClaimStore>();

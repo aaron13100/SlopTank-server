@@ -238,6 +238,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     {
         if (_provisioned)
         {
+            ProbeAuthorityWriteAccess();
             return;
         }
 
@@ -246,6 +247,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         {
             if (_provisioned)
             {
+                ProbeAuthorityWriteAccess();
                 return;
             }
 
@@ -284,16 +286,39 @@ internal sealed class PermalinkAuthorityStore : IDisposable
                 or UnauthorizedAccessException
                 or SqliteException)
         {
-            throw new PermalinkException(
-                PermalinkErrorKind.Unavailable,
-                "authority-unavailable",
-                $"Permalink issuance authority '{Root}' is unavailable ({exception.Message}).",
-                exception);
+            throw AuthorityUnavailable(exception);
         }
         finally
         {
             _provisionLock.Release();
         }
+    }
+
+    private void ProbeAuthorityWriteAccess()
+    {
+        try
+        {
+            _fileSystem.ProbeDirectoryWriteAccess(Root);
+        }
+        catch (PermalinkException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException)
+        {
+            throw AuthorityUnavailable(exception);
+        }
+    }
+
+    private PermalinkException AuthorityUnavailable(Exception exception)
+    {
+        return new PermalinkException(
+            PermalinkErrorKind.Unavailable,
+            "authority-unavailable",
+            $"Permalink issuance authority '{Root}' is unavailable ({exception.Message}).",
+            exception);
     }
 
     internal async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken)

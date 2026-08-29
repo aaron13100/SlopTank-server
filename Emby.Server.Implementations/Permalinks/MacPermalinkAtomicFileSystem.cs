@@ -184,6 +184,24 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
     }
 
     /// <inheritdoc />
+    public void ProbeDirectoryWriteAccess(string path)
+    {
+        _mountPolicy.EnsureAdmitted(path);
+        var probePath = Path.Combine(
+            Path.GetFullPath(path),
+            ".sloptank-write-probe-" + Guid.NewGuid().ToString("N"));
+        using var stream = new FileStream(
+            probePath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            bufferSize: 1,
+            FileOptions.WriteThrough | FileOptions.DeleteOnClose);
+        stream.WriteByte(0);
+        stream.Flush(flushToDisk: true);
+    }
+
+    /// <inheritdoc />
     public void SyncFile(string path)
     {
         _mountPolicy.EnsureAdmitted(path);

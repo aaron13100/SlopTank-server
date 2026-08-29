@@ -38,6 +38,12 @@ public interface IPermalinkAtomicFileSystem
     void CreateDirectoryDurable(string path);
 
     /// <summary>
+    /// Probes whether a directory can accept and durably flush a new file.
+    /// </summary>
+    /// <param name="path">The existing directory path.</param>
+    void ProbeDirectoryWriteAccess(string path);
+
+    /// <summary>
     /// Flushes a completed file and its parent directory to stable storage.
     /// </summary>
     /// <param name="path">The completed file path.</param>

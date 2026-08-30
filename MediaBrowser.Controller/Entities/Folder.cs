@@ -50,6 +50,12 @@ namespace MediaBrowser.Controller.Entities
             LinkedChildren = Array.Empty<LinkedChild>();
         }
 
+        private enum PermalinkChildMutationOutcome
+        {
+            Completed,
+            SkippedConflict
+        }
+
         public static IUserViewManager UserViewManager { get; set; }
 
         public static ILimitedConcurrencyLibraryScheduler LimitedConcurrencyLibraryScheduler { get; set; }
@@ -928,12 +934,6 @@ namespace MediaBrowser.Controller.Entities
                     exception.Code);
                 return PermalinkChildMutationOutcome.SkippedConflict;
             }
-        }
-
-        private enum PermalinkChildMutationOutcome
-        {
-            Completed,
-            SkippedConflict
         }
 
         /// <summary>

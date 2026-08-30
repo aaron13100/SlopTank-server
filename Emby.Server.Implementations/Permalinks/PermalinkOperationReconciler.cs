@@ -11,13 +11,15 @@ using Microsoft.Extensions.Logging;
 namespace Emby.Server.Implementations.Permalinks;
 
 // allow-no-test-found: covered by private sloptank-tests PermalinkOperationReconcilerTests.cs
+
 /// <summary>
-/// Terminates abandoned unpublished permalink operations when the server starts.
+/// Recovers abandoned permalink operations when the server starts.
 /// </summary>
 internal sealed class PermalinkOperationReconciler : IHostedService
 {
     private readonly PermalinkAuthorityStore _authority;
     private readonly PermalinkOperationJournal _journal;
+    private readonly IPermalinkMutationCoordinator _coordinator;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<PermalinkOperationReconciler> _logger;
     private readonly TimeSpan _abandonmentGracePeriod;
@@ -25,12 +27,14 @@ internal sealed class PermalinkOperationReconciler : IHostedService
     public PermalinkOperationReconciler(
         PermalinkAuthorityStore authority,
         PermalinkOperationJournal journal,
+        IPermalinkMutationCoordinator coordinator,
         IConfiguration configuration,
         TimeProvider timeProvider,
         ILogger<PermalinkOperationReconciler> logger)
     {
         _authority = authority;
         _journal = journal;
+        _coordinator = coordinator;
         _timeProvider = timeProvider;
         _logger = logger;
         _abandonmentGracePeriod = configuration.GetValue(
@@ -86,16 +90,6 @@ internal sealed class PermalinkOperationReconciler : IHostedService
     {
         try
         {
-            // Published work may have changed authoritative bytes and therefore remains fenced
-            // until the existing recovery or administrator-resolution workflow closes it.
-            if (_journal.HasPhase(operationId, "published"))
-            {
-                _logger.LogWarning(
-                    "Published permalink operation {OperationId} remains fenced for explicit recovery.",
-                    operationId);
-                return;
-            }
-
             var operation = await _journal.ReadAsync(operationId, cancellationToken).ConfigureAwait(false);
             if (operation is null
                 || !DateTimeOffset.TryParse(
@@ -115,24 +109,17 @@ internal sealed class PermalinkOperationReconciler : IHostedService
                 return;
             }
 
-            if (_journal.GetTerminalPhase(operationId) is not null
-                || _journal.HasPhase(operationId, "published"))
+            if (_journal.GetTerminalPhase(operationId) is not null)
             {
                 return;
             }
 
-            await _journal.WritePhaseAsync(
-                operationId,
-                "aborted",
-                new PermalinkOperationPhase(
-                    operationId,
-                    "aborted",
-                    operation.OldContentRoot,
-                    now.ToString("O", CultureInfo.InvariantCulture)),
-                cancellationToken).ConfigureAwait(false);
+            var result = await _coordinator.RecoverAsync(operationId, cancellationToken)
+                .ConfigureAwait(false);
             _logger.LogInformation(
-                "Aborted unpublished permalink operation {OperationId} after {Age}.",
+                "Recovered permalink operation {OperationId} as {State} after {Age}.",
                 operationId,
+                result.State,
                 now - createdAt);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)

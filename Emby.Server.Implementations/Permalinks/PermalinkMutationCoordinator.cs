@@ -50,6 +50,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     private readonly PermalinkMediaMutation _mediaMutation;
     private readonly PermalinkMediaRecovery _mediaRecovery;
     private readonly PermalinkPathMutation _pathMutation;
+    private readonly PermalinkItemStateMutation _itemStateMutation;
     private readonly TimeProvider _timeProvider;
 
     /// <summary>
@@ -66,6 +67,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     /// <param name="mediaMutation">The media mutation.</param>
     /// <param name="mediaRecovery">The media recovery.</param>
     /// <param name="pathMutation">The path mutation.</param>
+    /// <param name="itemStateMutation">The journal-only item-state mutation service.</param>
     /// <param name="timeProvider">The time provider.</param>
     public PermalinkMutationCoordinator(
         ILibraryManager libraryManager,
@@ -79,6 +81,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         PermalinkMediaMutation mediaMutation,
         PermalinkMediaRecovery mediaRecovery,
         PermalinkPathMutation pathMutation,
+        PermalinkItemStateMutation itemStateMutation,
         TimeProvider timeProvider)
     {
         _libraryManager = libraryManager;
@@ -92,6 +95,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         _mediaMutation = mediaMutation;
         _mediaRecovery = mediaRecovery;
         _pathMutation = pathMutation;
+        _itemStateMutation = itemStateMutation;
         _timeProvider = timeProvider;
     }
 
@@ -145,14 +149,18 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             throw Conflict("operation-id-reused", $"Operation '{request.OperationId}' has different input.");
         }
 
+        operation = existing ?? operation;
         await _journal.WriteOperationAsync(operation, cancellationToken).ConfigureAwait(false);
         try
         {
-            await _journal.WritePhaseAsync(
-                request.OperationId,
-                "prepared",
-                Phase(request.OperationId, "prepared", oldContentRoot),
-                cancellationToken).ConfigureAwait(false);
+            if (!_journal.HasPhase(request.OperationId, "prepared"))
+            {
+                await _journal.WritePhaseAsync(
+                    request.OperationId,
+                    "prepared",
+                    Phase(operation, "prepared", oldContentRoot),
+                    cancellationToken).ConfigureAwait(false);
+            }
         }
         catch
         {
@@ -161,7 +169,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
                 await _journal.WritePhaseAsync(
                     request.OperationId,
                     "aborted",
-                    Phase(request.OperationId, "aborted", oldContentRoot),
+                    Phase(operation, "aborted", oldContentRoot),
                     CancellationToken.None).ConfigureAwait(false);
             }
 
@@ -185,7 +193,8 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
 
         if (operation.Kind is "deletion" or "promotion" or "kind-reclassification")
         {
-            return await CommitStateOnlyAsync(operation, cancellationToken).ConfigureAwait(false);
+            return await _itemStateMutation.CommitStateOnlyAsync(operation, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         var item = RequireItem(operation.ItemId);
@@ -201,10 +210,11 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             "path" or "cross-root" or "tree" or "multipart"
                 => await _pathMutation.CommitAsync(operation, item, cancellationToken)
                 .ConfigureAwait(false),
-            "logical" or "identify" or "manual-metadata" or "automatic-refresh" or "nfo-refresh"
-                => await CommitLogicalAsync(operation, item, request, cancellationToken)
+            var kind when PermalinkItemStateMutation.IsIdentityKind(kind)
+                => await _itemStateMutation.CommitIdentityAsync(operation, item, request, cancellationToken)
                 .ConfigureAwait(false),
-            _ => await CommitStateOnlyAsync(operation, cancellationToken).ConfigureAwait(false)
+            _ => await _itemStateMutation.CommitStateOnlyAsync(operation, cancellationToken)
+                .ConfigureAwait(false)
         };
     }
 
@@ -217,6 +227,27 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         if (_journal.GetTerminalPhase(operationId) is { } terminalPhase)
         {
             return new PermalinkMutationResult(operationId, terminalPhase);
+        }
+
+        if (PermalinkItemStateMutation.IsIdentityKind(operation.Kind))
+        {
+            return await _itemStateMutation.RecoverIdentityAsync(
+                operation,
+                RequireItem(operation.ItemId),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (operation.Kind is "deletion" or "promotion" or "kind-reclassification"
+            or "aggregate" or "alias-import" or "grouping")
+        {
+            return await _itemStateMutation.RecoverStateOnlyAsync(operation, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (!_journal.HasPhase(operationId, "ready")
+            && !_journal.HasPhase(operationId, "published"))
+        {
+            return await AbortAsync(operationId, cancellationToken).ConfigureAwait(false);
         }
 
         var item = RequireItem(operation.ItemId);
@@ -278,23 +309,10 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
                 $"Operation '{operationId}' is already terminal as '{terminalPhase}'.");
         }
 
-        var item = RequireItem(operation.ItemId);
-        var oldIdentity = operation.OldIdentity;
-        if (oldIdentity is not null
-            ? !oldIdentity.Matches(item)
-            : !ProviderIdsEqual(item.ProviderIds, operation.OldProviderIds))
-        {
-            throw Conflict(
-                "prepared-old-mismatch",
-                "Live identity does not equal the complete prepared-old assignment.");
-        }
-
-        await _journal.WritePhaseAsync(
-            operation.OperationId,
-            "cancelled",
-            Phase(operation.OperationId, "cancelled", operation.OldContentRoot),
+        return await _itemStateMutation.CancelAsync(
+            operation,
+            RequireItem(operation.ItemId),
             cancellationToken).ConfigureAwait(false);
-        return new PermalinkMutationResult(operationId, "cancelled");
     }
 
     /// <inheritdoc />
@@ -316,57 +334,9 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         await _journal.WritePhaseAsync(
             operationId,
             "aborted",
-            Phase(operationId, "aborted", operation.OldContentRoot),
+            Phase(operation, "aborted", operation.OldContentRoot),
             cancellationToken).ConfigureAwait(false);
         return new PermalinkMutationResult(operationId, "aborted");
-    }
-
-    private async Task<PermalinkMutationResult> CommitLogicalAsync(
-        PermalinkOperationDocument operation,
-        BaseItem item,
-        PermalinkMutationCommitRequest request,
-        CancellationToken cancellationToken)
-    {
-        var desired = request.DesiredProviderIds ?? operation.DesiredProviderIds;
-        if (!ProviderIdsEqual(item.ProviderIds, desired))
-        {
-            throw Conflict("desired-assignment-mismatch", "Live provider assignment does not match desired state.");
-        }
-
-        await WritePublishedAndCommittedAsync(operation, operation.OldContentRoot, cancellationToken)
-            .ConfigureAwait(false);
-        return new PermalinkMutationResult(operation.OperationId, "committed");
-    }
-
-    private async Task<PermalinkMutationResult> CommitStateOnlyAsync(
-        PermalinkOperationDocument operation,
-        CancellationToken cancellationToken)
-    {
-        await WritePublishedAndCommittedAsync(operation, operation.OldContentRoot, cancellationToken)
-            .ConfigureAwait(false);
-        return new PermalinkMutationResult(operation.OperationId, "committed");
-    }
-
-    private async Task WritePublishedAndCommittedAsync(
-        PermalinkOperationDocument operation,
-        string contentRoot,
-        CancellationToken cancellationToken)
-    {
-        await _journal.WritePhaseAsync(
-            operation.OperationId,
-            "ready",
-            Phase(operation.OperationId, "ready", contentRoot),
-            cancellationToken).ConfigureAwait(false);
-        await _journal.WritePhaseAsync(
-            operation.OperationId,
-            "published",
-            Phase(operation.OperationId, "published", contentRoot),
-            cancellationToken).ConfigureAwait(false);
-        await _journal.WritePhaseAsync(
-            operation.OperationId,
-            "committed",
-            Phase(operation.OperationId, "committed", contentRoot),
-            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<PermalinkOperationDocument> RequireOperationAsync(
@@ -383,23 +353,21 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             ?? throw Conflict("item-missing", $"Prepared item '{itemId}' no longer exists.");
     }
 
-    private PermalinkOperationPhase Phase(Guid operationId, string state, string? contentRoot)
+    private static PermalinkOperationPhase Phase(
+        PermalinkOperationDocument operation,
+        string state,
+        string? contentRoot)
     {
-        return new PermalinkOperationPhase(operationId, state, contentRoot, UtcNow());
+        return new PermalinkOperationPhase(
+            operation.OperationId,
+            state,
+            contentRoot,
+            operation.CreatedAt);
     }
 
     private string UtcNow()
     {
         return _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture);
-    }
-
-    private static bool ProviderIdsEqual(
-        IReadOnlyDictionary<string, string> current,
-        IReadOnlyDictionary<string, string> desired)
-    {
-        return current.Count == desired.Count
-            && current.All(pair => desired.TryGetValue(pair.Key, out var value)
-                && string.Equals(pair.Value, value, StringComparison.Ordinal));
     }
 
     private static PermalinkException Conflict(string code, string message)

@@ -4,7 +4,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
-using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
 
 namespace Emby.Server.Implementations.Permalinks;
@@ -16,13 +15,16 @@ internal sealed class PermalinkPendingIdentityMutation
 {
     private readonly IPermalinkMutationCoordinator _coordinator;
     private readonly PermalinkOperationJournal _journal;
+    private readonly PermalinkItemStateMutation _itemStateMutation;
 
     public PermalinkPendingIdentityMutation(
         IPermalinkMutationCoordinator coordinator,
-        PermalinkOperationJournal journal)
+        PermalinkOperationJournal journal,
+        PermalinkItemStateMutation itemStateMutation)
     {
         _coordinator = coordinator;
         _journal = journal;
+        _itemStateMutation = itemStateMutation;
     }
 
     public Task<PermalinkOperationDocument?> FindPendingAsync(
@@ -48,7 +50,8 @@ internal sealed class PermalinkPendingIdentityMutation
                 $"Item '{item.Id}' has pending '{operation.Kind}' work, not a logical reassignment.");
         }
 
-        await RestorePreparedOldAsync(item, operation, cancellationToken).ConfigureAwait(false);
+        await _itemStateMutation.RestorePreparedOldAsync(item, operation, cancellationToken)
+            .ConfigureAwait(false);
         return await _coordinator.CancelAsync(operation.OperationId, cancellationToken)
             .ConfigureAwait(false);
     }
@@ -93,29 +96,9 @@ internal sealed class PermalinkPendingIdentityMutation
             return;
         }
 
-        await RestorePreparedOldAsync(item, operation, cancellationToken).ConfigureAwait(false);
+        await _itemStateMutation.RestorePreparedOldAsync(item, operation, cancellationToken)
+            .ConfigureAwait(false);
         await _coordinator.CancelAsync(operationId, cancellationToken).ConfigureAwait(false);
-    }
-
-    private static async Task RestorePreparedOldAsync(
-        BaseItem item,
-        PermalinkOperationDocument operation,
-        CancellationToken cancellationToken)
-    {
-        if (operation.OldIdentity is { } snapshot)
-        {
-            snapshot.Restore(item);
-        }
-        else
-        {
-            item.ProviderIds = new Dictionary<string, string>(
-                operation.OldProviderIds,
-                StringComparer.OrdinalIgnoreCase);
-        }
-
-        await item.UpdateToRepositoryAsync(
-            ItemUpdateType.MetadataEdit,
-            cancellationToken).ConfigureAwait(false);
     }
 
     private static bool ProviderIdsEqual(

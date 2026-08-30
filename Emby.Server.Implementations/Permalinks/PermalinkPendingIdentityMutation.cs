@@ -25,9 +25,11 @@ internal sealed class PermalinkPendingIdentityMutation
         _journal = journal;
     }
 
-    public Task<bool> HasPendingAsync(Guid itemId, CancellationToken cancellationToken)
+    public Task<PermalinkOperationDocument?> FindPendingAsync(
+        Guid itemId,
+        CancellationToken cancellationToken)
     {
-        return _journal.HasPendingAsync(itemId, cancellationToken);
+        return _journal.FindLatestPendingAsync(itemId, cancellationToken);
     }
 
     public async Task<PermalinkMutationResult> CancelAsync(

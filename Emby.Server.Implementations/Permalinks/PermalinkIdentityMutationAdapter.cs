@@ -126,11 +126,16 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
             }
 
             RejectProtectedKindChange(item, items[0], request);
-            if (await _pending.HasPendingAsync(item.Id, cancellationToken).ConfigureAwait(false))
+            var pendingOperation = await _pending.FindPendingAsync(item.Id, cancellationToken)
+                .ConfigureAwait(false);
+            if (pendingOperation is not null)
             {
-                throw Conflict(
+                throw new PermalinkException(
+                    PermalinkErrorKind.Conflict,
                     "identity-mutation-pending",
-                    $"Item '{item.Id}' already has an unfinished durable mutation.");
+                    $"Item '{item.Id}' is fenced by unfinished durable operation '{pendingOperation.OperationId}'.",
+                    operationId: pendingOperation.OperationId,
+                    itemId: item.Id);
             }
 
             var operationId = Guid.NewGuid();

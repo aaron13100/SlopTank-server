@@ -389,6 +389,7 @@ namespace MediaBrowser.Controller.Entities
             var validChildren = new List<BaseItem>();
             var accessibleChildren = new List<BaseItem>();
             var validChildrenNeedGeneration = false;
+            var permalinkConflictsSkipped = 0;
 
             if (IsFileProtocol)
             {
@@ -454,28 +455,37 @@ namespace MediaBrowser.Controller.Entities
                     if (currentChildren.TryGetValue(child.Id, out BaseItem currentChild))
                     {
                         validChildren.Add(currentChild);
-                        accessibleChildren.Add(currentChild);
 
-                        await PermalinkIdentityMutationAdapter.ExecuteAsync(
-                            [currentChild],
-                            new PermalinkIdentityMutationRequest(
-                                "scan-replacement",
-                                child.ProviderIds,
-                                child.GetBaseItemKind().ToString()),
-                            async (_, ambientCancellationToken) =>
-                            {
-                                if (currentChild.UpdateFromResolvedItem(child) > ItemUpdateType.None)
+                        var childUpdated = await TryExecutePermalinkChildMutationAsync(
+                            currentChild,
+                            () => PermalinkIdentityMutationAdapter.ExecuteAsync(
+                                [currentChild],
+                                new PermalinkIdentityMutationRequest(
+                                    "scan-replacement",
+                                    child.ProviderIds,
+                                    child.GetBaseItemKind().ToString()),
+                                async (_, ambientCancellationToken) =>
                                 {
-                                    await currentChild.UpdateToRepositoryAsync(
-                                        ItemUpdateType.MetadataImport,
-                                        ambientCancellationToken).ConfigureAwait(false);
-                                }
-                                else
-                                {
-                                    await LibraryManager.UpdateImagesAsync(currentChild).ConfigureAwait(false);
-                                }
-                            },
-                            cancellationToken).ConfigureAwait(false);
+                                    if (currentChild.UpdateFromResolvedItem(child) > ItemUpdateType.None)
+                                    {
+                                        await currentChild.UpdateToRepositoryAsync(
+                                            ItemUpdateType.MetadataImport,
+                                            ambientCancellationToken).ConfigureAwait(false);
+                                    }
+                                    else
+                                    {
+                                        await LibraryManager.UpdateImagesAsync(currentChild).ConfigureAwait(false);
+                                    }
+                                },
+                                cancellationToken)).ConfigureAwait(false);
+                        if (childUpdated == PermalinkChildMutationOutcome.SkippedConflict)
+                        {
+                            permalinkConflictsSkipped++;
+                        }
+                        else
+                        {
+                            accessibleChildren.Add(currentChild);
+                        }
 
                         continue;
                     }
@@ -491,24 +501,32 @@ namespace MediaBrowser.Controller.Entities
                             staleItem.GetType().Name,
                             child.GetType().Name);
 
-                        await PermalinkIdentityMutationAdapter.ExecuteAsync(
-                            [staleItem],
-                            new PermalinkIdentityMutationRequest(
-                                "kind-reclassification",
-                                DesiredItemKind: child.GetBaseItemKind().ToString()),
-                            (_, _) =>
-                            {
-                                currentChildren.Remove(staleItem.Id);
-                                currentChildrenByPath.Remove(child.Path);
-                                staleItem.SetParent(null);
-                                LibraryManager.DeleteItem(
-                                    staleItem,
-                                    new DeleteOptions { DeleteFileLocation = false },
-                                    this,
-                                    false);
-                                return Task.CompletedTask;
-                            },
-                            cancellationToken).ConfigureAwait(false);
+                        var staleItemReclassified = await TryExecutePermalinkChildMutationAsync(
+                            staleItem,
+                            () => PermalinkIdentityMutationAdapter.ExecuteAsync(
+                                [staleItem],
+                                new PermalinkIdentityMutationRequest(
+                                    "kind-reclassification",
+                                    DesiredItemKind: child.GetBaseItemKind().ToString()),
+                                (_, _) =>
+                                {
+                                    currentChildren.Remove(staleItem.Id);
+                                    currentChildrenByPath.Remove(child.Path);
+                                    staleItem.SetParent(null);
+                                    LibraryManager.DeleteItem(
+                                        staleItem,
+                                        new DeleteOptions { DeleteFileLocation = false },
+                                        this,
+                                        false);
+                                    return Task.CompletedTask;
+                                },
+                                cancellationToken)).ConfigureAwait(false);
+                        if (staleItemReclassified == PermalinkChildMutationOutcome.SkippedConflict)
+                        {
+                            permalinkConflictsSkipped++;
+                            continue;
+                        }
+
                         actuallyRemoved.Add(staleItem);
                     }
 
@@ -598,49 +616,55 @@ namespace MediaBrowser.Controller.Entities
                 // This avoids the premature promotion that would occur if DeleteItem ran before CreateItems.
                 foreach (var (oldPrimary, newPrimary) in replacedPrimaries)
                 {
-                    await PermalinkIdentityMutationAdapter.ExecuteAsync(
-                        [oldPrimary, newPrimary],
-                        new PermalinkIdentityMutationRequest("promotion"),
-                        async (_, ambientCancellationToken) =>
-                        {
-                            Logger.LogInformation(
-                                "Processing deferred deletion of replaced primary {OldName} ({OldId}), new primary {NewName} ({NewId})",
-                                oldPrimary.Name,
-                                oldPrimary.Id,
-                                newPrimary.Name,
-                                newPrimary.Id);
-                            await LibraryManager.RerouteLinkedChildReferencesAsync(
-                                oldPrimary.Id,
-                                newPrimary.Id).ConfigureAwait(false);
-                            var localAlternateIds = LibraryManager.GetLocalAlternateVersionIds(oldPrimary).ToHashSet();
-                            var allAlternateIds = localAlternateIds
-                                .Concat(LibraryManager.GetLinkedAlternateVersions(oldPrimary).Select(v => v.Id))
-                                .Distinct()
-                                .ToList();
-                            foreach (var altId in allAlternateIds)
+                    var primaryPromoted = await TryExecutePermalinkChildMutationAsync(
+                        oldPrimary,
+                        () => PermalinkIdentityMutationAdapter.ExecuteAsync(
+                            [oldPrimary, newPrimary],
+                            new PermalinkIdentityMutationRequest("promotion"),
+                            async (_, ambientCancellationToken) =>
                             {
-                                if (LibraryManager.GetItemById(altId) is Video altVideo
-                                    && !altVideo.Id.Equals(newPrimary.Id))
+                                Logger.LogInformation(
+                                    "Processing deferred deletion of replaced primary {OldName} ({OldId}), new primary {NewName} ({NewId})",
+                                    oldPrimary.Name,
+                                    oldPrimary.Id,
+                                    newPrimary.Name,
+                                    newPrimary.Id);
+                                await LibraryManager.RerouteLinkedChildReferencesAsync(
+                                    oldPrimary.Id,
+                                    newPrimary.Id).ConfigureAwait(false);
+                                var localAlternateIds = LibraryManager.GetLocalAlternateVersionIds(oldPrimary).ToHashSet();
+                                var allAlternateIds = localAlternateIds
+                                    .Concat(LibraryManager.GetLinkedAlternateVersions(oldPrimary).Select(v => v.Id))
+                                    .Distinct()
+                                    .ToList();
+                                foreach (var altId in allAlternateIds)
                                 {
-                                    altVideo.SetPrimaryVersionId(newPrimary.Id);
-                                    altVideo.OwnerId = localAlternateIds.Contains(altVideo.Id)
-                                        ? newPrimary.Id
-                                        : Guid.Empty;
-                                    await altVideo.UpdateToRepositoryAsync(
-                                        ItemUpdateType.MetadataEdit,
-                                        ambientCancellationToken).ConfigureAwait(false);
+                                    if (LibraryManager.GetItemById(altId) is Video altVideo
+                                        && !altVideo.Id.Equals(newPrimary.Id))
+                                    {
+                                        altVideo.SetPrimaryVersionId(newPrimary.Id);
+                                        altVideo.OwnerId = localAlternateIds.Contains(altVideo.Id)
+                                            ? newPrimary.Id
+                                            : Guid.Empty;
+                                        await altVideo.UpdateToRepositoryAsync(
+                                            ItemUpdateType.MetadataEdit,
+                                            ambientCancellationToken).ConfigureAwait(false);
+                                    }
                                 }
-                            }
 
-                            oldPrimary.LocalAlternateVersions = [];
-                            oldPrimary.LinkedAlternateVersions = [];
-                            LibraryManager.DeleteItem(
-                                oldPrimary,
-                                new DeleteOptions { DeleteFileLocation = false },
-                                this,
-                                false);
-                        },
-                        cancellationToken).ConfigureAwait(false);
+                                oldPrimary.LocalAlternateVersions = [];
+                                oldPrimary.LinkedAlternateVersions = [];
+                                LibraryManager.DeleteItem(
+                                    oldPrimary,
+                                    new DeleteOptions { DeleteFileLocation = false },
+                                    this,
+                                    false);
+                            },
+                            cancellationToken)).ConfigureAwait(false);
+                    if (primaryPromoted == PermalinkChildMutationOutcome.SkippedConflict)
+                    {
+                        permalinkConflictsSkipped++;
+                    }
                 }
 
                 // Demote old primaries that are now alternate versions of newly created primaries.
@@ -668,46 +692,52 @@ namespace MediaBrowser.Controller.Entities
 
                 foreach (var (oldPrimary, newPrimary) in oldPrimariesToDemote)
                 {
-                    await PermalinkIdentityMutationAdapter.ExecuteAsync(
-                        [oldPrimary, newPrimary],
-                        new PermalinkIdentityMutationRequest("grouping"),
-                        async (_, ambientCancellationToken) =>
-                        {
-                            Logger.LogInformation(
-                                "Demoting old primary {OldName} ({OldId}) to alternate of new primary {NewName} ({NewId})",
-                                oldPrimary.Name,
-                                oldPrimary.Id,
-                                newPrimary.Name,
-                                newPrimary.Id);
-                            var oldAlternateIds = LibraryManager.GetLocalAlternateVersionIds(oldPrimary)
-                                .Concat(LibraryManager.GetLinkedAlternateVersions(oldPrimary).Select(v => v.Id))
-                                .Distinct()
-                                .ToList();
-                            foreach (var altId in oldAlternateIds)
+                    var primaryDemoted = await TryExecutePermalinkChildMutationAsync(
+                        oldPrimary,
+                        () => PermalinkIdentityMutationAdapter.ExecuteAsync(
+                            [oldPrimary, newPrimary],
+                            new PermalinkIdentityMutationRequest("grouping"),
+                            async (_, ambientCancellationToken) =>
                             {
-                                if (LibraryManager.GetItemById(altId) is Video altVideo
-                                    && !altVideo.Id.Equals(newPrimary.Id))
+                                Logger.LogInformation(
+                                    "Demoting old primary {OldName} ({OldId}) to alternate of new primary {NewName} ({NewId})",
+                                    oldPrimary.Name,
+                                    oldPrimary.Id,
+                                    newPrimary.Name,
+                                    newPrimary.Id);
+                                var oldAlternateIds = LibraryManager.GetLocalAlternateVersionIds(oldPrimary)
+                                    .Concat(LibraryManager.GetLinkedAlternateVersions(oldPrimary).Select(v => v.Id))
+                                    .Distinct()
+                                    .ToList();
+                                foreach (var altId in oldAlternateIds)
                                 {
-                                    altVideo.SetPrimaryVersionId(newPrimary.Id);
-                                    altVideo.OwnerId = newPrimary.Id;
-                                    await altVideo.UpdateToRepositoryAsync(
-                                        ItemUpdateType.MetadataEdit,
-                                        ambientCancellationToken).ConfigureAwait(false);
+                                    if (LibraryManager.GetItemById(altId) is Video altVideo
+                                        && !altVideo.Id.Equals(newPrimary.Id))
+                                    {
+                                        altVideo.SetPrimaryVersionId(newPrimary.Id);
+                                        altVideo.OwnerId = newPrimary.Id;
+                                        await altVideo.UpdateToRepositoryAsync(
+                                            ItemUpdateType.MetadataEdit,
+                                            ambientCancellationToken).ConfigureAwait(false);
+                                    }
                                 }
-                            }
 
-                            oldPrimary.LocalAlternateVersions = [];
-                            oldPrimary.LinkedAlternateVersions = [];
-                            oldPrimary.SetPrimaryVersionId(newPrimary.Id);
-                            oldPrimary.OwnerId = newPrimary.Id;
-                            await oldPrimary.UpdateToRepositoryAsync(
-                                ItemUpdateType.MetadataEdit,
-                                ambientCancellationToken).ConfigureAwait(false);
-                            await LibraryManager.RerouteLinkedChildReferencesAsync(
-                                oldPrimary.Id,
-                                newPrimary.Id).ConfigureAwait(false);
-                        },
-                        cancellationToken).ConfigureAwait(false);
+                                oldPrimary.LocalAlternateVersions = [];
+                                oldPrimary.LinkedAlternateVersions = [];
+                                oldPrimary.SetPrimaryVersionId(newPrimary.Id);
+                                oldPrimary.OwnerId = newPrimary.Id;
+                                await oldPrimary.UpdateToRepositoryAsync(
+                                    ItemUpdateType.MetadataEdit,
+                                    ambientCancellationToken).ConfigureAwait(false);
+                                await LibraryManager.RerouteLinkedChildReferencesAsync(
+                                    oldPrimary.Id,
+                                    newPrimary.Id).ConfigureAwait(false);
+                            },
+                            cancellationToken)).ConfigureAwait(false);
+                    if (primaryDemoted == PermalinkChildMutationOutcome.SkippedConflict)
+                    {
+                        permalinkConflictsSkipped++;
+                    }
                 }
 
                 // After removing items, reattach any detached user data to remaining children
@@ -795,18 +825,44 @@ namespace MediaBrowser.Controller.Entities
                         validChildren = Children.ToList();
                     }
 
-                    await RefreshMetadataRecursive(accessibleChildren, refreshOptions, recursive, innerProgress, cancellationToken).ConfigureAwait(false);
+                    permalinkConflictsSkipped += await RefreshMetadataRecursive(
+                        accessibleChildren,
+                        refreshOptions,
+                        recursive,
+                        innerProgress,
+                        cancellationToken).ConfigureAwait(false);
                 }
+            }
+
+            if (permalinkConflictsSkipped > 0)
+            {
+                Logger.LogWarning(
+                    "Library scan for folder {FolderId} ({FolderName}) at {FolderPath} completed with {SkippedCount} children skipped due to permalink conflicts",
+                    Id,
+                    Name,
+                    Path,
+                    permalinkConflictsSkipped);
             }
         }
 
-        private async Task RefreshMetadataRecursive(IList<BaseItem> children, MetadataRefreshOptions refreshOptions, bool recursive, IProgress<double> progress, CancellationToken cancellationToken)
+        private async Task<int> RefreshMetadataRecursive(IList<BaseItem> children, MetadataRefreshOptions refreshOptions, bool recursive, IProgress<double> progress, CancellationToken cancellationToken)
         {
+            var skippedChildren = 0;
             await RunTasks(
-                (baseItem, innerProgress) => RefreshChildMetadata(baseItem, refreshOptions, recursive && baseItem.IsFolder, innerProgress, cancellationToken),
+                async (baseItem, innerProgress) =>
+                {
+                    var childSkipped = await RefreshChildMetadata(
+                        baseItem,
+                        refreshOptions,
+                        recursive && baseItem.IsFolder,
+                        innerProgress,
+                        cancellationToken).ConfigureAwait(false);
+                    Interlocked.Add(ref skippedChildren, childSkipped);
+                },
                 children,
                 progress,
                 cancellationToken).ConfigureAwait(false);
+            return skippedChildren;
         }
 
         private async Task RefreshAllMetadataForContainer(IMetadataContainer container, MetadataRefreshOptions refreshOptions, IProgress<double> progress, CancellationToken cancellationToken)
@@ -819,25 +875,65 @@ namespace MediaBrowser.Controller.Entities
             await container.RefreshAllMetadata(refreshOptions, progress, cancellationToken).ConfigureAwait(false);
         }
 
-        private async Task RefreshChildMetadata(BaseItem child, MetadataRefreshOptions refreshOptions, bool recursive, IProgress<double> progress, CancellationToken cancellationToken)
+        private async Task<int> RefreshChildMetadata(BaseItem child, MetadataRefreshOptions refreshOptions, bool recursive, IProgress<double> progress, CancellationToken cancellationToken)
         {
-            if (child is IMetadataContainer container)
-            {
-                await RefreshAllMetadataForContainer(container, refreshOptions, progress, cancellationToken).ConfigureAwait(false);
-            }
-            else
-            {
-                if (refreshOptions.RefreshItem(child))
+            var nestedSkipped = 0;
+            var outcome = await TryExecutePermalinkChildMutationAsync(
+                child,
+                async () =>
                 {
-                    await child.RefreshMetadata(refreshOptions, cancellationToken).ConfigureAwait(false);
-                }
+                    if (child is IMetadataContainer container)
+                    {
+                        await RefreshAllMetadataForContainer(container, refreshOptions, progress, cancellationToken).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        if (refreshOptions.RefreshItem(child))
+                        {
+                            await child.RefreshMetadata(refreshOptions, cancellationToken).ConfigureAwait(false);
+                        }
 
-                if (recursive && child is Folder folder)
-                {
-                    folder.Children = null; // invalidate cached children.
-                    await folder.RefreshMetadataRecursive(folder.Children.Except([this, child]).ToList(), refreshOptions, true, progress, cancellationToken).ConfigureAwait(false);
-                }
+                        if (recursive && child is Folder folder)
+                        {
+                            folder.Children = null; // invalidate cached children.
+                            nestedSkipped = await folder.RefreshMetadataRecursive(folder.Children.Except([this, child]).ToList(), refreshOptions, true, progress, cancellationToken).ConfigureAwait(false);
+                        }
+                    }
+                }).ConfigureAwait(false);
+            return outcome == PermalinkChildMutationOutcome.SkippedConflict
+                ? 1
+                : nestedSkipped;
+        }
+
+        private async Task<PermalinkChildMutationOutcome> TryExecutePermalinkChildMutationAsync(BaseItem child, Func<Task> mutation)
+        {
+            try
+            {
+                await mutation().ConfigureAwait(false);
+                return PermalinkChildMutationOutcome.Completed;
             }
+            catch (PermalinkException exception) when (
+                exception.Kind == PermalinkErrorKind.Conflict
+                && exception.OperationId.HasValue
+                && exception.ItemId.HasValue)
+            {
+                var fencedItem = LibraryManager.GetItemById(exception.ItemId.Value) ?? child;
+                Logger.LogWarning(
+                    exception,
+                    "Skipping library scan child {ItemId} ({ItemName}) at {ItemPath} because permalink operation {OperationId} fenced it with {PermalinkCode}",
+                    fencedItem.Id,
+                    fencedItem.Name,
+                    fencedItem.Path,
+                    exception.OperationId.Value,
+                    exception.Code);
+                return PermalinkChildMutationOutcome.SkippedConflict;
+            }
+        }
+
+        private enum PermalinkChildMutationOutcome
+        {
+            Completed,
+            SkippedConflict
         }
 
         /// <summary>

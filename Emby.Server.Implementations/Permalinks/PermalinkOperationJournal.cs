@@ -12,7 +12,7 @@ namespace Emby.Server.Implementations.Permalinks;
 /// <summary>
 /// Persists deterministic immutable phases for protected permalink mutations.
 /// </summary>
-internal sealed class PermalinkOperationJournal
+internal sealed class PermalinkOperationJournal : IDisposable
 {
     private static readonly string[] _terminalPhases =
     [
@@ -25,6 +25,8 @@ internal sealed class PermalinkOperationJournal
 
     private readonly PermalinkAuthorityStore _authority;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
+    private readonly SemaphoreSlim _pendingIndexLock = new(1, 1);
+    private Dictionary<Guid, PermalinkOperationDocument>? _pendingOperations;
 
     public PermalinkOperationJournal(
         PermalinkAuthorityStore authority,
@@ -89,18 +91,51 @@ internal sealed class PermalinkOperationJournal
             Path.Combine(root, "operation.json"),
             CanonicalJson.Serialize(operation),
             cancellationToken).ConfigureAwait(false);
+        await _pendingIndexLock.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            if (_pendingOperations is not null)
+            {
+                if (GetTerminalPhase(operation.OperationId) is null)
+                {
+                    _pendingOperations[operation.OperationId] = operation;
+                }
+                else
+                {
+                    _pendingOperations.Remove(operation.OperationId);
+                }
+            }
+        }
+        finally
+        {
+            _pendingIndexLock.Release();
+        }
     }
 
-    public Task WritePhaseAsync(
+    public async Task WritePhaseAsync(
         Guid operationId,
         string phase,
         PermalinkOperationPhase document,
         CancellationToken cancellationToken)
     {
-        return PublishExactAsync(
+        await PublishExactAsync(
             Path.Combine(GetOperationPath(operationId), phase + ".json"),
             CanonicalJson.Serialize(document),
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
+        if (!_terminalPhases.Contains(phase, StringComparer.Ordinal))
+        {
+            return;
+        }
+
+        await _pendingIndexLock.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            _pendingOperations?.Remove(operationId);
+        }
+        finally
+        {
+            _pendingIndexLock.Release();
+        }
     }
 
     public bool HasPhase(Guid operationId, string phase)
@@ -161,13 +196,30 @@ internal sealed class PermalinkOperationJournal
         Guid itemId,
         CancellationToken cancellationToken)
     {
+        await _pendingIndexLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _pendingOperations ??= await LoadPendingOperationsAsync(cancellationToken).ConfigureAwait(false);
+            return _pendingOperations.Values
+                .Where(candidate => candidate.ItemId.Equals(itemId))
+                .MaxBy(candidate => candidate.CreatedAt, StringComparer.Ordinal);
+        }
+        finally
+        {
+            _pendingIndexLock.Release();
+        }
+    }
+
+    private async Task<Dictionary<Guid, PermalinkOperationDocument>> LoadPendingOperationsAsync(
+        CancellationToken cancellationToken)
+    {
         var root = Path.Combine(_authority.Root, ".sloptank", "permalinks", "operations");
         if (!Directory.Exists(root))
         {
-            return null;
+            return [];
         }
 
-        PermalinkOperationDocument? latest = null;
+        var pending = new Dictionary<Guid, PermalinkOperationDocument>();
         foreach (var directory in Directory.EnumerateDirectories(root))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -179,16 +231,13 @@ internal sealed class PermalinkOperationJournal
             }
 
             var candidate = await ReadAsync(operationId, cancellationToken).ConfigureAwait(false);
-            if (candidate is not null
-                && candidate.ItemId.Equals(itemId)
-                && (latest is null
-                    || string.CompareOrdinal(candidate.CreatedAt, latest.CreatedAt) > 0))
+            if (candidate is not null)
             {
-                latest = candidate;
+                pending[operationId] = candidate;
             }
         }
 
-        return latest;
+        return pending;
     }
 
     /// <summary>Returns whether any non-terminal durable operation fences an item.</summary>
@@ -200,6 +249,12 @@ internal sealed class PermalinkOperationJournal
         CancellationToken cancellationToken)
     {
         return await FindLatestPendingAsync(itemId, cancellationToken).ConfigureAwait(false) is not null;
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        _pendingIndexLock.Dispose();
     }
 
     private async Task PublishExactAsync(

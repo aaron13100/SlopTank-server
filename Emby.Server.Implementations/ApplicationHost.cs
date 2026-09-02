@@ -568,7 +568,21 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkDocumentFactory>();
             serviceCollection.AddSingleton<PermalinkTransitionPublisher>();
             serviceCollection.AddSingleton<PermalinkContentReadMeter>();
-            serviceCollection.AddSingleton<PermalinkEvidence>();
+
+            // Both are built by hand rather than by convention: the digest
+            // cache needs the authority root, which only the authority store
+            // resolves, and an unconfigured authority has to disable
+            // persistence instead of throwing on the way up.
+            serviceCollection.AddSingleton(provider =>
+            {
+                var authority = provider.GetRequiredService<PermalinkAuthorityStore>();
+                return new PermalinkContentDigestCache(
+                    authority.IsConfigured ? authority.Root : null,
+                    provider.GetRequiredService<ILogger<PermalinkContentDigestCache>>());
+            });
+            serviceCollection.AddSingleton(provider => new PermalinkEvidence(
+                provider.GetRequiredService<PermalinkContentReadMeter>(),
+                provider.GetRequiredService<PermalinkContentDigestCache>()));
             serviceCollection.AddSingleton<IPermalinkStore, PermalinkStore>();
             serviceCollection.AddSingleton<IPermalinkManager, PermalinkManager>();
             serviceCollection.AddSingleton<PermalinkOperationJournal>();

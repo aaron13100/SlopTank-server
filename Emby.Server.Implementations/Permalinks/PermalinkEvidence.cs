@@ -35,13 +35,23 @@ public sealed class PermalinkEvidence
 
     private readonly PermalinkContentReadMeter _contentReads;
 
+    private readonly PermalinkContentDigestCache _digestCache;
+
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkEvidence"/> class.
+    ///
+    /// Internal because <see cref="PermalinkContentDigestCache"/> is, and every
+    /// consumer of this type lives in this assembly. Registered through an
+    /// explicit factory in ApplicationHost rather than by convention.
     /// </summary>
     /// <param name="contentReads">Records each full media read this class performs.</param>
-    public PermalinkEvidence(PermalinkContentReadMeter contentReads)
+    /// <param name="digestCache">Remembers digests across process lifetimes.</param>
+    internal PermalinkEvidence(
+        PermalinkContentReadMeter contentReads,
+        PermalinkContentDigestCache digestCache)
     {
         _contentReads = contentReads;
+        _digestCache = digestCache;
     }
 
     /// <summary>
@@ -57,6 +67,7 @@ public sealed class PermalinkEvidence
     public void InvalidateContentDigest(string path)
     {
         _contentDigestCache.TryRemove(path, out _);
+        _digestCache.Invalidate(path);
     }
 
     /// <summary>
@@ -310,6 +321,18 @@ public sealed class PermalinkEvidence
             digest = cached.Digest;
             length = current.Length;
         }
+        else if (token is { } durable
+            && _digestCache.TryRead(path, durable, out var recorded))
+        {
+            // The durable tier is what survives a restart. Without it the first
+            // play of every item after every restart pays the full read again,
+            // which on a multi-GB film is minutes of saturated disk before
+            // anyone can watch anything. Promote the answer back into the
+            // in-process tier so repeats within this process cost a stat.
+            digest = recorded;
+            length = durable.Length;
+            _contentDigestCache[path] = new ContentDigestCacheEntry(durable, digest);
+        }
         else
         {
             _contentReads.RecordFullContentRead();
@@ -327,10 +350,14 @@ public sealed class PermalinkEvidence
             if (token is { } fresh)
             {
                 _contentDigestCache[path] = new ContentDigestCacheEntry(fresh, digest);
+                _digestCache.Write(path, fresh, digest);
             }
             else
             {
+                // No readable change token means nothing authorizes reuse, so
+                // neither tier may keep an answer for this path.
                 _contentDigestCache.TryRemove(path, out _);
+                _digestCache.Invalidate(path);
             }
         }
 

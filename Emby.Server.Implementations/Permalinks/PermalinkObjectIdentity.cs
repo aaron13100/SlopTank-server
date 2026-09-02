@@ -12,7 +12,7 @@ namespace Emby.Server.Implementations.Permalinks;
 /// <remarks>
 /// Playback verification is on the request path for every shared link, so it
 /// must stay O(1) in the size of the media. A replacement always produces a new
-/// filesystem object, so creation time, length and last-write time together
+/// filesystem object, so device, inode, status change time and length together
 /// identify the exact generation a lease was issued against without reading a
 /// single content byte. This is the single source of truth for that fingerprint:
 /// lease evidence and frozen playback plans must not drift apart on how a
@@ -30,6 +30,30 @@ internal static class PermalinkObjectIdentity
     /// </returns>
     public static string? Read(string path)
     {
+        // Prefer the filesystem change token: device and inode identify which
+        // object this is, and status change time plus length prove it has not
+        // been altered since capture. Creation time, length and modification
+        // time are NOT a sound substitute: permalink-url-design.md records that
+        // both survive a content-preserving same-second replacement, because
+        // modification time can be reset by the very call that replaced the
+        // bytes. That is also why PermalinkEvidence keys its digest cache on
+        // this token, and the two must agree on what "the same object" means.
+        if (MacPermalinkContentIdentity.TryRead(path) is { } token)
+        {
+            return string.Join(
+                ":",
+                "object",
+                token.Device,
+                token.Inode,
+                token.ChangeTimeSeconds,
+                token.ChangeTimeNanoseconds,
+                token.Length);
+        }
+
+        // The token is macOS-only. Off that platform, fall back to the weaker
+        // stat fingerprint rather than failing closed, which preserves the
+        // pre-existing lease-evidence behaviour on hosts the server does not
+        // ship to.
         if (File.Exists(path))
         {
             var info = new FileInfo(path);

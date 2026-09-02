@@ -567,6 +567,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkCapsuleStore>();
             serviceCollection.AddSingleton<PermalinkDocumentFactory>();
             serviceCollection.AddSingleton<PermalinkTransitionPublisher>();
+            serviceCollection.AddSingleton<PermalinkContentReadMeter>();
             serviceCollection.AddSingleton<PermalinkEvidence>();
             serviceCollection.AddSingleton<IPermalinkStore, PermalinkStore>();
             serviceCollection.AddSingleton<IPermalinkManager, PermalinkManager>();

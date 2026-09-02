@@ -33,6 +33,17 @@ public sealed class PermalinkEvidence
     /// </summary>
     private readonly ConcurrentDictionary<string, ContentDigestCacheEntry> _contentDigestCache = new(StringComparer.Ordinal);
 
+    private readonly PermalinkContentReadMeter _contentReads;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="PermalinkEvidence"/> class.
+    /// </summary>
+    /// <param name="contentReads">Records each full media read this class performs.</param>
+    public PermalinkEvidence(PermalinkContentReadMeter contentReads)
+    {
+        _contentReads = contentReads;
+    }
+
     /// <summary>
     /// Discards the cached digest for a path whose bytes were just replaced in
     /// place. The change token already invalidates a stale entry on its own
@@ -301,6 +312,7 @@ public sealed class PermalinkEvidence
         }
         else
         {
+            _contentReads.RecordFullContentRead();
             await using var stream = new FileStream(
                 path,
                 FileMode.Open,

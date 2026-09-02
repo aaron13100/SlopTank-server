@@ -169,7 +169,7 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
             document.ItemId,
             cancellationToken).ConfigureAwait(false);
         var item = (await VerifyAsync(binding, document, cancellationToken).ConfigureAwait(false)).Item;
-        var entries = await BuildPlaybackPlanAsync(item, cancellationToken).ConfigureAwait(false);
+        var entries = BuildPlaybackPlan(item);
         var snapshot = await _playback.AdmitAsync(
             handle,
             playbackSessionId,
@@ -261,9 +261,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         return new VerifiedCandidate(item, evidence);
     }
 
-    private async Task<IReadOnlyList<PermalinkPlaybackPlanStore.PlaybackPlanEntry>> BuildPlaybackPlanAsync(
-        BaseItem item,
-        CancellationToken cancellationToken)
+    private static IReadOnlyList<PermalinkPlaybackPlanStore.PlaybackPlanEntry> BuildPlaybackPlan(
+        BaseItem item)
     {
         var selected = item switch
         {
@@ -276,7 +275,7 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         var entries = new List<PermalinkPlaybackPlanStore.PlaybackPlanEntry>();
         foreach (var selectedItem in selected)
         {
-            var sources = await BuildSourcesAsync(selectedItem, cancellationToken).ConfigureAwait(false);
+            var sources = BuildSources(selectedItem);
             if (sources.Count > 0)
             {
                 entries.Add(new PermalinkPlaybackPlanStore.PlaybackPlanEntry(selectedItem.Id, sources));
@@ -291,9 +290,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         return entries;
     }
 
-    private static async Task<IReadOnlyList<PermalinkPlaybackPlanStore.PlaybackSource>> BuildSourcesAsync(
-        BaseItem item,
-        CancellationToken cancellationToken)
+    private static IReadOnlyList<PermalinkPlaybackPlanStore.PlaybackSource> BuildSources(
+        BaseItem item)
     {
         var paths = new List<(string Path, string RelativePath)>();
         if (item is Video { VideoType: VideoType.Dvd or VideoType.BluRay })
@@ -321,8 +319,10 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
             sources.Add(new PermalinkPlaybackPlanStore.PlaybackSource(
                 path,
                 relativePath,
-                await PermalinkPlaybackPlanStore.DigestFileAsync(path, cancellationToken)
-                    .ConfigureAwait(false)));
+                PermalinkObjectIdentity.Read(path)
+                    ?? throw Conflict(
+                        "playback-source-replaced",
+                        $"Playback source '{path}' is missing.")));
         }
 
         return sources;
@@ -330,24 +330,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
 
     private static string ObjectIdentity(string path)
     {
-        if (File.Exists(path))
-        {
-            var info = new FileInfo(path);
-            return string.Join(
-                ":",
-                "file",
-                info.CreationTimeUtc.Ticks,
-                info.Length,
-                info.LastWriteTimeUtc.Ticks);
-        }
-
-        if (Directory.Exists(path))
-        {
-            var info = new DirectoryInfo(path);
-            return string.Join(":", "directory", info.CreationTimeUtc.Ticks, info.LastWriteTimeUtc.Ticks);
-        }
-
-        throw Conflict("binding-item-missing", $"Bound path '{path}' is missing.");
+        return PermalinkObjectIdentity.Read(path)
+            ?? throw Conflict("binding-item-missing", $"Bound path '{path}' is missing.");
     }
 
     private static bool IsExternalAlias(string permalinkId)

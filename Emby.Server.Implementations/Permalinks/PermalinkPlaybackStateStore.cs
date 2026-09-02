@@ -155,7 +155,7 @@ internal sealed class PermalinkPlaybackStateStore
             playbackSessionId,
             userId,
             serverId);
-        var ready = await _plans.MaterializeOrdinalAsync(
+        var ready = await _plans.VerifyOrdinalAsync(
             root,
             plan,
             queueOrdinal,
@@ -189,7 +189,7 @@ internal sealed class PermalinkPlaybackStateStore
                 "The first playback redemption must consume queue ordinal 0.");
         }
 
-        var ready = await _plans.MaterializeOrdinalAsync(
+        var ready = await _plans.VerifyOrdinalAsync(
             root,
             plan,
             queueOrdinal,
@@ -277,10 +277,10 @@ internal sealed class PermalinkPlaybackStateStore
     {
         return new PermalinkPlaybackSnapshot(
             ready.ItemId,
-            ready.SnapshotPaths[0],
+            ready.VerifiedPaths[0],
             queueCount,
             playbackSessionId,
-            ready.SnapshotPaths);
+            ready.VerifiedPaths);
     }
 
     private string Root(string handle)

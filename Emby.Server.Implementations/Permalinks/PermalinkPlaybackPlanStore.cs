@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
-using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Permalinks;
@@ -12,21 +11,18 @@ namespace Emby.Server.Implementations.Permalinks;
 // allow-no-test-found: covered by private HTTP suite sloptank-tests/server/tests/Jellyfin.Server.Integration.Tests/Controllers/PermalinkResolutionControllerTests.cs
 
 /// <summary>
-/// Persists frozen playback queues and materializes each immutable entry snapshot.
+/// Persists frozen playback queues and verifies each entry's media in place.
 /// </summary>
 internal sealed class PermalinkPlaybackPlanStore
 {
     private readonly PermalinkPlaybackDocumentStore _documents;
-    private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly TimeProvider _timeProvider;
 
     public PermalinkPlaybackPlanStore(
         PermalinkPlaybackDocumentStore documents,
-        IPermalinkAtomicFileSystem fileSystem,
         TimeProvider timeProvider)
     {
         _documents = documents;
-        _fileSystem = fileSystem;
         _timeProvider = timeProvider;
     }
 
@@ -68,7 +64,7 @@ internal sealed class PermalinkPlaybackPlanStore
         return plan;
     }
 
-    public async Task<PlaybackReadyDocument> MaterializeOrdinalAsync(
+    public async Task<PlaybackReadyDocument> VerifyOrdinalAsync(
         string root,
         FrozenPlaybackPlan plan,
         int ordinal,
@@ -97,110 +93,81 @@ internal sealed class PermalinkPlaybackPlanStore
             var existing = await PermalinkPlaybackDocumentStore.ReadAsync<PlaybackReadyDocument>(
                 path,
                 cancellationToken).ConfigureAwait(false);
-            await ValidateReadyAsync(existing, entry, ordinal, cancellationToken)
-                .ConfigureAwait(false);
+            ValidateReady(existing, entry, ordinal);
             return existing;
         }
 
-        var paths = await MaterializeEntryAsync(
-            root,
-            entry,
-            ordinal,
-            cancellationToken).ConfigureAwait(false);
         var ready = new PlaybackReadyDocument(
             ordinal,
             entry.ItemId,
-            paths,
+            VerifyEntry(entry),
             _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture));
         await _documents.PublishAsync(path, ready, cancellationToken).ConfigureAwait(false);
         return ready;
     }
 
-    private async Task<IReadOnlyList<string>> MaterializeEntryAsync(
-        string root,
-        PlaybackPlanEntry entry,
-        int ordinal,
-        CancellationToken cancellationToken)
+    /// <summary>
+    /// Confirms every planned source is still the exact filesystem object the
+    /// plan froze, and returns those verified source paths.
+    /// </summary>
+    /// <param name="entry">The frozen queue entry being readied.</param>
+    /// <returns>The verified source paths, in frozen order.</returns>
+    /// <remarks>
+    /// This deliberately performs no content read. Playback previously copied
+    /// every source into the lease root and hashed it twice, which cost three
+    /// full passes over the media on the request path and delivered nothing:
+    /// streaming reads the library file, never the copy. Identity comparison
+    /// detects the replacement this conflict exists for at constant cost.
+    /// </remarks>
+    private static IReadOnlyList<string> VerifyEntry(PlaybackPlanEntry entry)
     {
-        var snapshotRoot = Path.Combine(
-            root,
-            "entries",
-            ordinal.ToString(CultureInfo.InvariantCulture),
-            "snapshots");
-        _fileSystem.CreateDirectoryDurable(snapshotRoot);
-        var snapshots = new List<string>(entry.Sources.Count);
+        var verified = new List<string>(entry.Sources.Count);
         foreach (var source in entry.Sources)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var destination = Path.Combine(
-                snapshotRoot,
-                source.RelativePath.Replace('/', Path.DirectorySeparatorChar));
-            _fileSystem.CreateDirectoryDurable(Path.GetDirectoryName(destination)!);
-            if (!File.Exists(destination))
+            if (!string.Equals(
+                    PermalinkObjectIdentity.Read(source.Path),
+                    source.Identity,
+                    StringComparison.Ordinal))
             {
-                File.Copy(source.Path, destination);
-            }
-
-            var digest = await DigestFileAsync(destination, cancellationToken)
-                .ConfigureAwait(false);
-            if (!string.Equals(digest, source.Digest, StringComparison.Ordinal))
-            {
-                Directory.Delete(snapshotRoot, recursive: true);
                 throw Conflict(
                     "playback-source-replaced",
-                    $"Playback source '{source.Path}' changed while its immutable snapshot was created.");
+                    $"Playback source '{source.Path}' changed after its playback plan was frozen.");
             }
 
-            snapshots.Add(destination);
+            verified.Add(source.Path);
         }
 
-        return snapshots;
+        return verified;
     }
 
-    private static async Task ValidateReadyAsync(
+    private static void ValidateReady(
         PlaybackReadyDocument ready,
         PlaybackPlanEntry entry,
-        int ordinal,
-        CancellationToken cancellationToken)
+        int ordinal)
     {
         if (ready.Ordinal != ordinal
             || !ready.ItemId.Equals(entry.ItemId)
-            || ready.SnapshotPaths.Count != entry.Sources.Count)
+            || ready.VerifiedPaths.Count != entry.Sources.Count)
         {
             throw Conflict(
                 "playback-ready-mismatch",
                 $"Ready state for queue ordinal {ordinal} does not match the frozen plan.");
         }
 
-        for (var index = 0; index < ready.SnapshotPaths.Count; index++)
+        for (var index = 0; index < ready.VerifiedPaths.Count; index++)
         {
-            var path = ready.SnapshotPaths[index];
-            if (!File.Exists(path)
+            var path = ready.VerifiedPaths[index];
+            if (!string.Equals(path, entry.Sources[index].Path, StringComparison.Ordinal)
                 || !string.Equals(
-                    await DigestFileAsync(path, cancellationToken).ConfigureAwait(false),
-                    entry.Sources[index].Digest,
+                    PermalinkObjectIdentity.Read(path),
+                    entry.Sources[index].Identity,
                     StringComparison.Ordinal))
             {
                 throw Conflict(
                     "playback-snapshot-missing",
-                    $"Ready snapshot '{path}' is missing or no longer matches its frozen digest.");
+                    $"Verified source '{path}' is missing or no longer matches its frozen identity.");
             }
         }
-    }
-
-    internal static async Task<string> DigestFileAsync(
-        string path,
-        CancellationToken cancellationToken)
-    {
-        await using var stream = new FileStream(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            81920,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
-        return "sha256:" + Convert.ToHexStringLower(
-            await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false));
     }
 
     private static PermalinkException Conflict(string code, string message)
@@ -211,7 +178,7 @@ internal sealed class PermalinkPlaybackPlanStore
     internal sealed record PlaybackSource(
         string Path,
         string RelativePath,
-        string Digest);
+        string Identity);
 
     internal sealed record PlaybackPlanEntry(
         Guid ItemId,
@@ -227,6 +194,6 @@ internal sealed class PermalinkPlaybackPlanStore
     internal sealed record PlaybackReadyDocument(
         int Ordinal,
         Guid ItemId,
-        IReadOnlyList<string> SnapshotPaths,
+        IReadOnlyList<string> VerifiedPaths,
         string CreatedAt);
 }

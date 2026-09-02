@@ -16,11 +16,27 @@ namespace Emby.Server.Implementations.Permalinks;
 /// </summary>
 internal sealed class PermalinkAuthorityStore : IDisposable
 {
+    /// <summary>How long a successful writability proof is trusted for.</summary>
+    private static readonly long ValidationIntervalTicks = TimeSpan.FromSeconds(5).Ticks;
+
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _provisionLock = new(1, 1);
     private readonly string? _configuredRoot;
     private bool _provisioned;
+
+    /// <summary>
+    /// When the authority volume was last proven writable, as UTC ticks.
+    ///
+    /// The liveness probe below is real I/O on the media volume, and it used to
+    /// run on EVERY call. Measured in-process on 2026-09-03, that step cost
+    /// 111-919 ms of a 525-1704 ms ensure, and a single watch link performs
+    /// three ensures: six write probes and three directory sweeps to open one
+    /// video. Re-proving the same volume writable several times a second buys
+    /// nothing, because any operation that actually needs the volume fails on
+    /// its own I/O anyway.
+    /// </summary>
+    private long _lastValidatedTicks;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkAuthorityStore"/> class.
@@ -238,7 +254,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     {
         if (_provisioned)
         {
-            ValidateProvisionedAuthority();
+            ValidateProvisionedAuthorityIfDue();
             return;
         }
 
@@ -247,7 +263,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         {
             if (_provisioned)
             {
-                ValidateProvisionedAuthority();
+                ValidateProvisionedAuthorityIfDue();
                 return;
             }
 
@@ -292,6 +308,32 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         {
             _provisionLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Proves the authority volume still writable, at most once per interval.
+    ///
+    /// The check exists to fail fast and clearly when the media volume goes
+    /// away, rather than surfacing as a confusing error deeper in a mutation.
+    /// An interval preserves that: a detached volume is still detected within
+    /// a second, and every operation that touches it continues to fail on its
+    /// own I/O in the meantime. What it stops is charging a user's click for a
+    /// liveness probe that a previous click already paid for.
+    ///
+    /// A failed probe does NOT refresh the stamp, so once the volume is
+    /// unhealthy every subsequent call re-probes and keeps throwing.
+    /// </summary>
+    private void ValidateProvisionedAuthorityIfDue()
+    {
+        var now = _timeProvider.GetUtcNow().UtcTicks;
+        var last = Interlocked.Read(ref _lastValidatedTicks);
+        if (last != 0 && now - last < ValidationIntervalTicks)
+        {
+            return;
+        }
+
+        ValidateProvisionedAuthority();
+        Interlocked.Exchange(ref _lastValidatedTicks, now);
     }
 
     private void ValidateProvisionedAuthority()

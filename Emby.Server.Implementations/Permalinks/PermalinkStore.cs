@@ -1,10 +1,12 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Permalinks;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.Permalinks;
 
@@ -20,6 +22,7 @@ internal sealed class PermalinkStore : IPermalinkStore
     private readonly PermalinkDocumentFactory _documents;
     private readonly PermalinkTransitionPublisher _publisher;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
+    private readonly ILogger<PermalinkStore> _logger;
     private readonly string[] _contentRoots;
 
     /// <summary>
@@ -32,6 +35,7 @@ internal sealed class PermalinkStore : IPermalinkStore
     /// <param name="documents">The documents.</param>
     /// <param name="publisher">The publisher.</param>
     /// <param name="fileSystem">The durable permalink filesystem.</param>
+    /// <param name="logger">The logger, used for the per-step ensure timing.</param>
     /// <param name="configuration">The server configuration.</param>
     public PermalinkStore(
         PermalinkAuthorityStore authority,
@@ -41,6 +45,7 @@ internal sealed class PermalinkStore : IPermalinkStore
         PermalinkDocumentFactory documents,
         PermalinkTransitionPublisher publisher,
         IPermalinkAtomicFileSystem fileSystem,
+        ILogger<PermalinkStore> logger,
         IConfiguration configuration)
     {
         _authority = authority;
@@ -50,6 +55,7 @@ internal sealed class PermalinkStore : IPermalinkStore
         _documents = documents;
         _publisher = publisher;
         _fileSystem = fileSystem;
+        _logger = logger;
         _contentRoots = configuration.GetSection("Permalinks:ContentRoots")
             .GetChildren()
             .Select(section => section.Value)
@@ -64,12 +70,25 @@ internal sealed class PermalinkStore : IPermalinkStore
         PermalinkStoreRequest request,
         CancellationToken cancellationToken)
     {
+        // Temporary per-step timing. Seven hypotheses about where an ensure spends
+        // its 1.4s were each measured from outside the process and disproven: every
+        // primitive it touches is under 2ms, yet three ensures per watch-link open
+        // are most of a 13.4s wait. This reads the answer instead of guessing an
+        // eighth time. Remove once the hot step is known and fixed.
+        var stepWatch = Stopwatch.StartNew();
+        var totalWatch = Stopwatch.StartNew();
+        long tAvailable, tAnchor, tSamePath, tReservation, tCapsule, tRead, tReconcile, tAliases, tBind;
+
         await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        tAvailable = stepWatch.ElapsedMilliseconds;
+        stepWatch.Restart();
         EnsureReachableOrVirtualSeason(request);
         var root = ResolveRoot(request.Path);
         var anchorToken = await _fileSystem.GetOrCreateAnchorTokenAsync(
             request.Path,
             cancellationToken).ConfigureAwait(false);
+        tAnchor = stepWatch.ElapsedMilliseconds;
+        stepWatch.Restart();
 
         var samePath = await _authority.FindByCurrentPathAsync(
             request.Path,
@@ -81,6 +100,10 @@ internal sealed class PermalinkStore : IPermalinkStore
                 "anchor-replacement",
                 $"Path '{request.Path}' replaced its stable anchor and cannot remint.");
         }
+
+        tSamePath = stepWatch.ElapsedMilliseconds;
+
+        stepWatch.Restart();
 
         var reservation = await _authority.FindByAnchorAsync(
             anchorToken,
@@ -98,28 +121,43 @@ internal sealed class PermalinkStore : IPermalinkStore
             ValidateAdoptionCandidate(reservation, request);
         }
 
+        tReservation = stepWatch.ElapsedMilliseconds;
+
+        stepWatch.Restart();
+
         var capsulePath = await _capsules.PublishGenesisAsync(
             reservation,
             root,
             request.Path,
             cancellationToken).ConfigureAwait(false);
+        tCapsule = stepWatch.ElapsedMilliseconds;
+        stepWatch.Restart();
         var snapshot = await _capsules.ReadValidatedAsync(
             capsulePath,
             reservation.CapsuleId,
             reservation.ItemKind,
             cancellationToken).ConfigureAwait(false);
+        tRead = stepWatch.ElapsedMilliseconds;
+        stepWatch.Restart();
         snapshot = await _publisher.ReconcileContentAsync(
             request,
             capsulePath,
             snapshot,
             cancellationToken).ConfigureAwait(false);
 
+        tReconcile = stepWatch.ElapsedMilliseconds;
+
+        stepWatch.Restart();
         var aliases = await _publisher.GetOrPublishAliasesAsync(
             request,
             reservation,
             capsulePath,
             snapshot,
             cancellationToken).ConfigureAwait(false);
+
+        tAliases = stepWatch.ElapsedMilliseconds;
+
+        stepWatch.Restart();
 
         foreach (var alias in aliases)
         {
@@ -134,6 +172,22 @@ internal sealed class PermalinkStore : IPermalinkStore
             anchorToken,
             request.Path,
             cancellationToken).ConfigureAwait(false);
+        tBind = stepWatch.ElapsedMilliseconds;
+        _logger.LogInformation(
+            "permalink ensure timing item={ItemId} total={Total}ms available={Available} anchor={Anchor} samePath={SamePath} reservation={Reservation} capsule={Capsule} readCapsule={ReadCapsule} reconcile={Reconcile} aliases={Aliases} bind={Bind} aliasCount={AliasCount}",
+            request.ItemId,
+            totalWatch.ElapsedMilliseconds,
+            tAvailable,
+            tAnchor,
+            tSamePath,
+            tReservation,
+            tCapsule,
+            tRead,
+            tReconcile,
+            tAliases,
+            tBind,
+            aliases.Count);
+
         return new PermalinkStoredState(
             reservation.CapsuleId,
             snapshot.ContentHead.ContentRoot,

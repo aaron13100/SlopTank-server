@@ -123,7 +123,7 @@ internal sealed class PermalinkMediaMutation
 
         var existingReady = await _journal.ReadPhaseAsync(
             operation.OperationId,
-            "ready",
+            PermalinkPhase.Ready,
             cancellationToken).ConfigureAwait(false);
         if (existingReady is not null)
         {
@@ -142,10 +142,10 @@ internal sealed class PermalinkMediaMutation
 
         await _journal.WritePhaseAsync(
             operation.OperationId,
-            "ready",
+            PermalinkPhase.Ready,
             new PermalinkOperationPhase(
                 operation.OperationId,
-                "ready",
+                PermalinkPhase.Ready.Name,
                 desired.ContentRoot,
                 operation.CreatedAt,
                 desired.Leaves),
@@ -198,7 +198,7 @@ internal sealed class PermalinkMediaMutation
             .ConfigureAwait(false);
         var ready = await _journal.ReadPhaseAsync(
             operation.OperationId,
-            "ready",
+            PermalinkPhase.Ready,
             cancellationToken).ConfigureAwait(false)
             ?? throw Conflict("ready-missing", "Operation-owned desired evidence is missing.");
         if (!string.Equals(ready.ContentRoot, desired.ContentRoot, StringComparison.Ordinal))
@@ -210,10 +210,10 @@ internal sealed class PermalinkMediaMutation
 
         await _journal.WritePhaseAsync(
             operation.OperationId,
-            "published",
+            PermalinkPhase.Published,
             new PermalinkOperationPhase(
                 operation.OperationId,
-                "published",
+                PermalinkPhase.Published.Name,
                 desired.ContentRoot,
                 operation.CreatedAt),
             cancellationToken).ConfigureAwait(false);
@@ -229,14 +229,14 @@ internal sealed class PermalinkMediaMutation
             cancellationToken).ConfigureAwait(false);
         await _journal.WritePhaseAsync(
             operation.OperationId,
-            "committed",
+            PermalinkPhase.Committed,
             new PermalinkOperationPhase(
                 operation.OperationId,
-                "committed",
+                PermalinkPhase.Committed.Name,
                 desired.ContentRoot,
                 operation.CreatedAt),
             cancellationToken).ConfigureAwait(false);
-        return new PermalinkMutationResult(operation.OperationId, "committed");
+        return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
     }
 
     private async Task VerifyPreparedOldAsync(
@@ -253,10 +253,10 @@ internal sealed class PermalinkMediaMutation
             {
                 await _journal.WritePhaseAsync(
                     operation.OperationId,
-                    "claimed_pending",
+                    PermalinkPhase.ClaimedPending,
                     new PermalinkOperationPhase(
                         operation.OperationId,
-                        "claimed_pending",
+                        PermalinkPhase.ClaimedPending.Name,
                         current.ContentRoot,
                         operation.CreatedAt,
                         current.Leaves),

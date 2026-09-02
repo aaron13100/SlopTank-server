@@ -96,8 +96,7 @@ internal sealed class PermalinkCrossRootMutation
                 .ConfigureAwait(false);
             await WritePartPhaseAsync(
                 operation,
-                index,
-                "published",
+                PermalinkPhase.PartPublished(index),
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -121,8 +120,7 @@ internal sealed class PermalinkCrossRootMutation
 
             await WritePartPhaseAsync(
                 operation,
-                index,
-                "quarantined",
+                PermalinkPhase.PartQuarantined(index),
                 cancellationToken).ConfigureAwait(false);
         }
     }
@@ -213,7 +211,7 @@ internal sealed class PermalinkCrossRootMutation
                 Path.Combine(referenceRoot, relative),
                 part.DestinationPath!,
                 cancellationToken).ConfigureAwait(false);
-            await WritePartPhaseAsync(operation, index, "published", cancellationToken)
+            await WritePartPhaseAsync(operation, PermalinkPhase.PartPublished(index), cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -232,24 +230,22 @@ internal sealed class PermalinkCrossRootMutation
 
         for (var index = 0; index < bundle.Parts.Count; index++)
         {
-            await WritePartPhaseAsync(operation, index, "quarantined", cancellationToken)
+            await WritePartPhaseAsync(operation, PermalinkPhase.PartQuarantined(index), cancellationToken)
                 .ConfigureAwait(false);
         }
     }
 
     private Task WritePartPhaseAsync(
         PermalinkOperationDocument operation,
-        int index,
-        string state,
+        PermalinkPhase phase,
         CancellationToken cancellationToken)
     {
-        var phase = $"part-{index}-{state}";
         return _journal.WritePhaseAsync(
             operation.OperationId,
             phase,
             new PermalinkOperationPhase(
                 operation.OperationId,
-                phase,
+                phase.Name,
                 operation.OldContentRoot,
                 operation.CreatedAt),
             cancellationToken);

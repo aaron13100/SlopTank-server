@@ -68,7 +68,7 @@ internal sealed class PermalinkOperationReconciler : IHostedService
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!Guid.TryParse(Path.GetFileName(directory), out var operationId)
-                || _journal.GetTerminalPhase(operationId) is not null)
+                || _journal.GetSettledPhase(operationId) is not null)
             {
                 continue;
             }
@@ -109,7 +109,7 @@ internal sealed class PermalinkOperationReconciler : IHostedService
                 return;
             }
 
-            if (_journal.GetTerminalPhase(operationId) is not null)
+            if (_journal.GetSettledPhase(operationId) is not null)
             {
                 return;
             }

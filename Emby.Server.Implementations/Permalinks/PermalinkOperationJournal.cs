@@ -14,15 +14,6 @@ namespace Emby.Server.Implementations.Permalinks;
 /// </summary>
 internal sealed class PermalinkOperationJournal : IDisposable
 {
-    private static readonly string[] _terminalPhases =
-    [
-        "committed",
-        "aborted",
-        "cancelled",
-        "detached",
-        "assignment_unknown"
-    ];
-
     private readonly PermalinkAuthorityStore _authority;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly SemaphoreSlim _pendingIndexLock = new(1, 1);
@@ -96,7 +87,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
         {
             if (_pendingOperations is not null)
             {
-                if (GetTerminalPhase(operation.OperationId) is null)
+                if (GetSettledPhase(operation.OperationId) is null)
                 {
                     _pendingOperations[operation.OperationId] = operation;
                 }
@@ -114,15 +105,15 @@ internal sealed class PermalinkOperationJournal : IDisposable
 
     public async Task WritePhaseAsync(
         Guid operationId,
-        string phase,
+        PermalinkPhase phase,
         PermalinkOperationPhase document,
         CancellationToken cancellationToken)
     {
         await PublishExactAsync(
-            Path.Combine(GetOperationPath(operationId), phase + ".json"),
+            Path.Combine(GetOperationPath(operationId), phase.Name + ".json"),
             CanonicalJson.Serialize(document),
             cancellationToken).ConfigureAwait(false);
-        if (!_terminalPhases.Contains(phase, StringComparer.Ordinal))
+        if (phase.FencesItem)
         {
             return;
         }
@@ -138,17 +129,36 @@ internal sealed class PermalinkOperationJournal : IDisposable
         }
     }
 
-    public bool HasPhase(Guid operationId, string phase)
+    public bool HasPhase(Guid operationId, PermalinkPhase phase)
     {
-        return File.Exists(Path.Combine(GetOperationPath(operationId), phase + ".json"));
+        return File.Exists(Path.Combine(GetOperationPath(operationId), phase.Name + ".json"));
     }
 
-    /// <summary>Returns the durable terminal phase, or null while work remains pending.</summary>
+    /// <summary>
+    /// Returns the durable phase that stopped this operation, or null while work remains pending.
+    /// </summary>
+    /// <remarks>
+    /// This is the one predicate behind both the item fence and the automatic-progress gate. It
+    /// answers "may anything still advance this operation on its own", which a reverted operation
+    /// answers no to just as a terminal one does, even though a reverted operation is still
+    /// finishable by an administrator.
+    /// </remarks>
     /// <param name="operationId">The durable operation identifier.</param>
-    /// <returns>The terminal phase name when one exists.</returns>
-    public string? GetTerminalPhase(Guid operationId)
+    /// <returns>The settled phase when one exists.</returns>
+    public PermalinkPhase? GetSettledPhase(Guid operationId)
     {
-        return _terminalPhases.FirstOrDefault(phase => HasPhase(operationId, phase));
+        return PermalinkPhase.Declared.FirstOrDefault(
+            phase => !phase.FencesItem && HasPhase(operationId, phase));
+    }
+
+    /// <summary>Returns the durable terminal phase, or null while the operation can still finish.</summary>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <returns>The terminal phase when one exists.</returns>
+    public PermalinkPhase? GetTerminalPhase(Guid operationId)
+    {
+        return PermalinkPhase.Declared.FirstOrDefault(
+            phase => phase.Disposition == PermalinkPhaseDisposition.Terminal
+                && HasPhase(operationId, phase));
     }
 
     /// <summary>Reads and validates one deterministic phase when it exists.</summary>
@@ -158,10 +168,10 @@ internal sealed class PermalinkOperationJournal : IDisposable
     /// <returns>A task representing the asynchronous operation.</returns>
     public async Task<PermalinkOperationPhase?> ReadPhaseAsync(
         Guid operationId,
-        string phase,
+        PermalinkPhase phase,
         CancellationToken cancellationToken)
     {
-        var path = Path.Combine(GetOperationPath(operationId), phase + ".json");
+        var path = Path.Combine(GetOperationPath(operationId), phase.Name + ".json");
         if (!File.Exists(path))
         {
             return null;
@@ -225,7 +235,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
             cancellationToken.ThrowIfCancellationRequested();
             var operationIdText = Path.GetFileName(directory);
             if (!Guid.TryParse(operationIdText, out var operationId)
-                || GetTerminalPhase(operationId) is not null)
+                || GetSettledPhase(operationId) is not null)
             {
                 continue;
             }

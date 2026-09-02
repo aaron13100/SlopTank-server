@@ -55,10 +55,10 @@ internal sealed class PermalinkPathMutation
         await VerifyOldAsync(operation, item, cancellationToken).ConfigureAwait(false);
         await _journal.WritePhaseAsync(
             operation.OperationId,
-            "ready",
+            PermalinkPhase.Ready,
             new PermalinkOperationPhase(
                 operation.OperationId,
-                "ready",
+                PermalinkPhase.Ready.Name,
                 operation.OldContentRoot,
                 operation.CreatedAt),
             cancellationToken).ConfigureAwait(false);
@@ -173,7 +173,7 @@ internal sealed class PermalinkPathMutation
             "moved",
             cancellationToken).ConfigureAwait(false);
         await WriteTerminalPhasesAsync(operation, cancellationToken).ConfigureAwait(false);
-        return new PermalinkMutationResult(operation.OperationId, "committed");
+        return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
     }
 
     private static void PublishSameRoot(PermalinkMutationBundle bundle)
@@ -248,10 +248,10 @@ internal sealed class PermalinkPathMutation
     {
         return _journal.WritePhaseAsync(
             operation.OperationId,
-            "manual_intervention",
+            PermalinkPhase.ManualIntervention,
             new PermalinkOperationPhase(
                 operation.OperationId,
-                "manual_intervention",
+                PermalinkPhase.ManualIntervention.Name,
                 null,
                 operation.CreatedAt),
             cancellationToken);
@@ -288,14 +288,14 @@ internal sealed class PermalinkPathMutation
         PermalinkOperationDocument operation,
         CancellationToken cancellationToken)
     {
-        foreach (var phase in new[] { "published", "committed" })
+        foreach (var phase in new[] { PermalinkPhase.Published, PermalinkPhase.Committed })
         {
             await _journal.WritePhaseAsync(
                 operation.OperationId,
                 phase,
                 new PermalinkOperationPhase(
                     operation.OperationId,
-                    phase,
+                    phase.Name,
                     operation.OldContentRoot,
                     operation.CreatedAt),
                 cancellationToken).ConfigureAwait(false);

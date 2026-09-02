@@ -153,12 +153,12 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         await _journal.WriteOperationAsync(operation, cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!_journal.HasPhase(request.OperationId, "prepared"))
+            if (!_journal.HasPhase(request.OperationId, PermalinkPhase.Prepared))
             {
                 await _journal.WritePhaseAsync(
                     request.OperationId,
-                    "prepared",
-                    Phase(operation, "prepared", oldContentRoot),
+                    PermalinkPhase.Prepared,
+                    Phase(operation, PermalinkPhase.Prepared, oldContentRoot),
                     cancellationToken).ConfigureAwait(false);
             }
         }
@@ -168,15 +168,15 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             {
                 await _journal.WritePhaseAsync(
                     request.OperationId,
-                    "aborted",
-                    Phase(operation, "aborted", oldContentRoot),
+                    PermalinkPhase.Aborted,
+                    Phase(operation, PermalinkPhase.Aborted, oldContentRoot),
                     CancellationToken.None).ConfigureAwait(false);
             }
 
             throw;
         }
 
-        return new PermalinkMutationResult(request.OperationId, "prepared");
+        return new PermalinkMutationResult(request.OperationId, PermalinkPhase.Prepared.Name);
     }
 
     /// <inheritdoc />
@@ -186,9 +186,9 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         CancellationToken cancellationToken)
     {
         var operation = await RequireOperationAsync(operationId, cancellationToken).ConfigureAwait(false);
-        if (_journal.GetTerminalPhase(operationId) is { } terminalPhase)
+        if (_journal.GetSettledPhase(operationId) is { } settledPhase)
         {
-            return new PermalinkMutationResult(operationId, terminalPhase);
+            return new PermalinkMutationResult(operationId, settledPhase.Name);
         }
 
         if (operation.Kind is "deletion" or "promotion" or "kind-reclassification")
@@ -224,9 +224,9 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         CancellationToken cancellationToken)
     {
         var operation = await RequireOperationAsync(operationId, cancellationToken).ConfigureAwait(false);
-        if (_journal.GetTerminalPhase(operationId) is { } terminalPhase)
+        if (_journal.GetSettledPhase(operationId) is { } settledPhase)
         {
-            return new PermalinkMutationResult(operationId, terminalPhase);
+            return new PermalinkMutationResult(operationId, settledPhase.Name);
         }
 
         if (PermalinkItemStateMutation.IsIdentityKind(operation.Kind))
@@ -244,8 +244,8 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
                 .ConfigureAwait(false);
         }
 
-        if (!_journal.HasPhase(operationId, "ready")
-            && !_journal.HasPhase(operationId, "published"))
+        if (!_journal.HasPhase(operationId, PermalinkPhase.Ready)
+            && !_journal.HasPhase(operationId, PermalinkPhase.Published))
         {
             return await AbortAsync(operationId, cancellationToken).ConfigureAwait(false);
         }
@@ -276,9 +276,12 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     {
         var operation = await RequireOperationAsync(operationId, cancellationToken)
             .ConfigureAwait(false);
+        // Resolve is the administrator entry point. A reverted operation still holds its
+        // reserved transition claim, so a guarded restage must be able to finish this same
+        // operation; only a terminal phase closes it here.
         if (_journal.GetTerminalPhase(operationId) is { } terminalPhase)
         {
-            return new PermalinkMutationResult(operationId, terminalPhase);
+            return new PermalinkMutationResult(operationId, terminalPhase.Name);
         }
 
         var item = RequireItem(operation.ItemId);
@@ -296,17 +299,17 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         CancellationToken cancellationToken)
     {
         var operation = await RequireOperationAsync(operationId, cancellationToken).ConfigureAwait(false);
-        var terminalPhase = _journal.GetTerminalPhase(operationId);
-        if (terminalPhase == "cancelled")
+        var settledPhase = _journal.GetSettledPhase(operationId);
+        if (settledPhase == PermalinkPhase.Cancelled)
         {
-            return new PermalinkMutationResult(operationId, "cancelled");
+            return new PermalinkMutationResult(operationId, PermalinkPhase.Cancelled.Name);
         }
 
-        if (terminalPhase is not null)
+        if (settledPhase is not null)
         {
             throw Conflict(
                 "operation-terminal",
-                $"Operation '{operationId}' is already terminal as '{terminalPhase}'.");
+                $"Operation '{operationId}' is already settled as '{settledPhase.Name}'.");
         }
 
         return await _itemStateMutation.CancelAsync(
@@ -321,22 +324,22 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         CancellationToken cancellationToken)
     {
         var operation = await RequireOperationAsync(operationId, cancellationToken).ConfigureAwait(false);
-        if (_journal.GetTerminalPhase(operationId) is { } terminalPhase)
+        if (_journal.GetSettledPhase(operationId) is { } settledPhase)
         {
-            return new PermalinkMutationResult(operationId, terminalPhase);
+            return new PermalinkMutationResult(operationId, settledPhase.Name);
         }
 
-        if (_journal.HasPhase(operationId, "published"))
+        if (_journal.HasPhase(operationId, PermalinkPhase.Published))
         {
-            return new PermalinkMutationResult(operationId, "published");
+            return new PermalinkMutationResult(operationId, PermalinkPhase.Published.Name);
         }
 
         await _journal.WritePhaseAsync(
             operationId,
-            "aborted",
-            Phase(operation, "aborted", operation.OldContentRoot),
+            PermalinkPhase.Aborted,
+            Phase(operation, PermalinkPhase.Aborted, operation.OldContentRoot),
             cancellationToken).ConfigureAwait(false);
-        return new PermalinkMutationResult(operationId, "aborted");
+        return new PermalinkMutationResult(operationId, PermalinkPhase.Aborted.Name);
     }
 
     private async Task<PermalinkOperationDocument> RequireOperationAsync(
@@ -355,12 +358,12 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
 
     private static PermalinkOperationPhase Phase(
         PermalinkOperationDocument operation,
-        string state,
+        PermalinkPhase phase,
         string? contentRoot)
     {
         return new PermalinkOperationPhase(
             operation.OperationId,
-            state,
+            phase.Name,
             contentRoot,
             operation.CreatedAt);
     }

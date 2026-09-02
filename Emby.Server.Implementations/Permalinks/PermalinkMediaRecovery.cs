@@ -48,7 +48,7 @@ internal sealed class PermalinkMediaRecovery
     {
         var ready = await _journal.ReadPhaseAsync(
             operation.OperationId,
-            "ready",
+            PermalinkPhase.Ready,
             cancellationToken).ConfigureAwait(false);
         if (ready?.ContentRoot is null)
         {
@@ -115,7 +115,7 @@ internal sealed class PermalinkMediaRecovery
 
         var ready = await _journal.ReadPhaseAsync(
             operation.OperationId,
-            "ready",
+            PermalinkPhase.Ready,
             cancellationToken).ConfigureAwait(false);
         var desiredRoot = ready?.ContentRoot;
         var evidence = await ObserveAsync(operation, item, desiredRoot, cancellationToken)
@@ -171,10 +171,10 @@ internal sealed class PermalinkMediaRecovery
             _evidence.InvalidateContentDigest(item.Path);
             await _journal.WritePhaseAsync(
                 operation.OperationId,
-                "restored",
-                Phase(operation, "restored", operation.OldContentRoot),
+                PermalinkPhase.Restored,
+                Phase(operation, PermalinkPhase.Restored, operation.OldContentRoot),
                 cancellationToken).ConfigureAwait(false);
-            result = new PermalinkMutationResult(operation.OperationId, "restored");
+            result = new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Restored.Name);
         }
         else
         {
@@ -198,10 +198,12 @@ internal sealed class PermalinkMediaRecovery
                 .ConfigureAwait(false);
             await _journal.WritePhaseAsync(
                 operation.OperationId,
-                "detached",
-                Phase(operation, "detached", contentRoot: null),
+                PermalinkPhase.Detached,
+                Phase(operation, PermalinkPhase.Detached, contentRoot: null),
                 cancellationToken).ConfigureAwait(false);
-            result = new PermalinkMutationResult(operation.OperationId, "detached");
+            result = new PermalinkMutationResult(
+                operation.OperationId,
+                PermalinkPhase.Detached.Name);
         }
 
         await _journal.WriteResolutionAsync(
@@ -278,19 +280,19 @@ internal sealed class PermalinkMediaRecovery
     {
         return _journal.WritePhaseAsync(
             operation.OperationId,
-            "manual_intervention",
-            Phase(operation, "manual_intervention", contentRoot: null),
+            PermalinkPhase.ManualIntervention,
+            Phase(operation, PermalinkPhase.ManualIntervention, contentRoot: null),
             cancellationToken);
     }
 
     private static PermalinkOperationPhase Phase(
         PermalinkOperationDocument operation,
-        string state,
+        PermalinkPhase phase,
         string? contentRoot)
     {
         return new PermalinkOperationPhase(
             operation.OperationId,
-            state,
+            phase.Name,
             contentRoot,
             operation.CreatedAt);
     }

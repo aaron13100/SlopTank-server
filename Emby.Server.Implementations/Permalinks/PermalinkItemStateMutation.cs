@@ -64,7 +64,7 @@ internal sealed class PermalinkItemStateMutation
 
         await CompleteAsync(operation, operation.OldContentRoot, cancellationToken)
             .ConfigureAwait(false);
-        return new PermalinkMutationResult(operation.OperationId, "committed");
+        return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
     }
 
     /// <summary>
@@ -79,7 +79,7 @@ internal sealed class PermalinkItemStateMutation
     {
         await CompleteAsync(operation, operation.OldContentRoot, cancellationToken)
             .ConfigureAwait(false);
-        return new PermalinkMutationResult(operation.OperationId, "committed");
+        return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
     }
 
     /// <summary>
@@ -96,20 +96,19 @@ internal sealed class PermalinkItemStateMutation
     {
         var ready = await _journal.ReadPhaseAsync(
             operation.OperationId,
-            "ready",
+            PermalinkPhase.Ready,
             cancellationToken).ConfigureAwait(false);
         if (ready is not null)
         {
             await CompleteAsync(operation, ready.ContentRoot, cancellationToken)
                 .ConfigureAwait(false);
-            return new PermalinkMutationResult(operation.OperationId, "committed");
+            return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
         }
 
-        if (_journal.HasPhase(operation.OperationId, "published"))
+        if (_journal.HasPhase(operation.OperationId, PermalinkPhase.Published))
         {
-            throw Conflict(
-                "manual-intervention",
-                $"Operation '{operation.OperationId}' has published evidence without its ready boundary.");
+            return await CloseAssignmentUnknownAsync(operation, item, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         await RestorePreparedOldAsync(item, operation, cancellationToken).ConfigureAwait(false);
@@ -128,28 +127,27 @@ internal sealed class PermalinkItemStateMutation
     {
         var ready = await _journal.ReadPhaseAsync(
             operation.OperationId,
-            "ready",
+            PermalinkPhase.Ready,
             cancellationToken).ConfigureAwait(false);
         if (ready is not null)
         {
             await CompleteAsync(operation, ready.ContentRoot, cancellationToken)
                 .ConfigureAwait(false);
-            return new PermalinkMutationResult(operation.OperationId, "committed");
+            return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
         }
 
-        if (_journal.HasPhase(operation.OperationId, "published"))
+        if (_journal.HasPhase(operation.OperationId, PermalinkPhase.Published))
         {
-            throw Conflict(
-                "manual-intervention",
-                $"Operation '{operation.OperationId}' has published evidence without its ready boundary.");
+            return await CloseAssignmentUnknownAsync(operation, item: null, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         await WritePhaseIfMissingAsync(
             operation,
-            "aborted",
+            PermalinkPhase.Aborted,
             operation.OldContentRoot,
             cancellationToken).ConfigureAwait(false);
-        return new PermalinkMutationResult(operation.OperationId, "aborted");
+        return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Aborted.Name);
     }
 
     /// <summary>
@@ -176,10 +174,10 @@ internal sealed class PermalinkItemStateMutation
 
         await WritePhaseIfMissingAsync(
             operation,
-            "cancelled",
+            PermalinkPhase.Cancelled,
             operation.OldContentRoot,
             cancellationToken).ConfigureAwait(false);
-        return new PermalinkMutationResult(operation.OperationId, "cancelled");
+        return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Cancelled.Name);
     }
 
     /// <summary>
@@ -215,31 +213,98 @@ internal sealed class PermalinkItemStateMutation
         string? contentRoot,
         CancellationToken cancellationToken)
     {
-        await WritePhaseIfMissingAsync(operation, "ready", contentRoot, cancellationToken)
+        await WritePhaseIfMissingAsync(operation, PermalinkPhase.Ready, contentRoot, cancellationToken)
             .ConfigureAwait(false);
-        await WritePhaseIfMissingAsync(operation, "published", contentRoot, cancellationToken)
+        await WritePhaseIfMissingAsync(operation, PermalinkPhase.Published, contentRoot, cancellationToken)
             .ConfigureAwait(false);
-        await WritePhaseIfMissingAsync(operation, "committed", contentRoot, cancellationToken)
+        await WritePhaseIfMissingAsync(operation, PermalinkPhase.Committed, contentRoot, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Closes an operation whose durable evidence is partial: it published something, but its ready
+    /// boundary is absent, so neither the exact prepared-old nor the exact desired assignment can be
+    /// reconstructed. The record snapshots what was observed and asserts nothing about it: it claims
+    /// no content, detaches nothing, removes no binding and permits no remint. Throwing here instead
+    /// left the operation non-terminal, which fenced the item out of playback and out of every later
+    /// scan indefinitely.
+    /// </summary>
+    /// <param name="operation">The immutable prepared operation.</param>
+    /// <param name="item">The live item when one is in scope, otherwise null.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The terminal mutation result.</returns>
+    private async Task<PermalinkMutationResult> CloseAssignmentUnknownAsync(
+        PermalinkOperationDocument operation,
+        BaseItem? item,
+        CancellationToken cancellationToken)
+    {
+        // The snapshot is observed rather than derived from the immutable operation, so re-writing
+        // it later could produce different bytes and fail the create-exclusive byte comparison as
+        // operation-id-reused, re-fencing the item this phase just released. Write it once.
+        if (!_journal.HasPhase(operation.OperationId, PermalinkPhase.AssignmentUnknown))
+        {
+            await _journal.WritePhaseAsync(
+                operation.OperationId,
+                PermalinkPhase.AssignmentUnknown,
+                new PermalinkOperationPhase(
+                    operation.OperationId,
+                    PermalinkPhase.AssignmentUnknown.Name,
+                    operation.OldContentRoot,
+                    operation.CreatedAt)
+                {
+                    ObservedState = DescribeObservedState(operation, item)
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return new PermalinkMutationResult(
+            operation.OperationId,
+            PermalinkPhase.AssignmentUnknown.Name);
+    }
+
+    private static string DescribeObservedState(
+        PermalinkOperationDocument operation,
+        BaseItem? item)
+    {
+        return "ready=missing;published=present"
+            + $";live={DescribeAssignment(item?.ProviderIds)}"
+            + $";old={DescribeAssignment(operation.OldProviderIds)}"
+            + $";desired={DescribeAssignment(operation.DesiredProviderIds)}";
+    }
+
+    private static string DescribeAssignment(IReadOnlyDictionary<string, string>? providerIds)
+    {
+        if (providerIds is null)
+        {
+            return "unavailable";
+        }
+
+        return providerIds.Count == 0
+            ? "none"
+            : string.Join(
+                ',',
+                providerIds
+                    .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                    .Select(pair => $"{pair.Key}={pair.Value}"));
     }
 
     private async Task WritePhaseIfMissingAsync(
         PermalinkOperationDocument operation,
-        string state,
+        PermalinkPhase phase,
         string? contentRoot,
         CancellationToken cancellationToken)
     {
-        if (_journal.HasPhase(operation.OperationId, state))
+        if (_journal.HasPhase(operation.OperationId, phase))
         {
             return;
         }
 
         await _journal.WritePhaseAsync(
             operation.OperationId,
-            state,
+            phase,
             new PermalinkOperationPhase(
                 operation.OperationId,
-                state,
+                phase.Name,
                 contentRoot,
                 operation.CreatedAt),
             cancellationToken).ConfigureAwait(false);

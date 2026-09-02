@@ -55,6 +55,14 @@ public sealed class PermalinkEvidence
     }
 
     /// <summary>
+    /// Gets a value indicating whether digests survive a restart.
+    ///
+    /// False when permalink authority is unconfigured, in which case there is
+    /// nothing for a precompute pass to fill and it should not read the library.
+    /// </summary>
+    public bool PersistsContentDigests => _digestCache.IsEnabled;
+
+    /// <summary>
     /// Discards the cached digest for a path whose bytes were just replaced in
     /// place. The change token already invalidates a stale entry on its own
     /// (a same-path content swap changes status change time even when
@@ -68,6 +76,31 @@ public sealed class PermalinkEvidence
     {
         _contentDigestCache.TryRemove(path, out _);
         _digestCache.Invalidate(path);
+    }
+
+    /// <summary>
+    /// Returns whether this path's digest is already known, without reading a
+    /// single media byte.
+    ///
+    /// Exists so a precompute pass can skip what is already done at the cost of
+    /// a stat. Callers get an answer about the work rather than a handle on the
+    /// cache, which stays an implementation detail of this class.
+    /// </summary>
+    /// <param name="path">The media path.</param>
+    /// <returns>True when evidence for this path would cost no full read.</returns>
+    public bool IsContentDigestKnown(string path)
+    {
+        if (MacPermalinkContentIdentity.TryRead(path) is not { } token)
+        {
+            return false;
+        }
+
+        if (_contentDigestCache.TryGetValue(path, out var cached) && cached.MatchesToken(token))
+        {
+            return true;
+        }
+
+        return _digestCache.TryRead(path, token, out _);
     }
 
     /// <summary>

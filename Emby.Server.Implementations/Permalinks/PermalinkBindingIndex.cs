@@ -49,10 +49,14 @@ internal sealed class PermalinkBindingIndex
     {
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
             .ConfigureAwait(false);
-        await using var transaction = (SqliteTransaction)await connection
-            .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.Transaction = transaction;
+        // No explicit transaction. This runs on every alias of every ensure,
+        // and wrapping it took the permalink browser gate from 4.3 to 13.4
+        // minutes with a Copy Link click timing out after 10 minutes: an
+        // extra write lock held across statements, on a two-core host whose
+        // SQLite is already the contended resource. The two statements do not
+        // need to be atomic with each other -- a bind interrupted between them
+        // is repaired by the next ensure, which rewrites both.
         command.CommandText = """
             INSERT INTO PermalinkBindings
                 (PermalinkId, ItemId, ContentRoot, VerifiedToken, VerifiedAt, CreatedAt)
@@ -114,7 +118,6 @@ internal sealed class PermalinkBindingIndex
         // permalink browser gate (13 tests to 12) on 2026-09-03; the promotion
         // rolled itself back. Writing an override we own is additive and cannot
         // remove behaviour that already worked; removing someone else's is not.
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

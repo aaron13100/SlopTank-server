@@ -71,6 +71,13 @@ internal static class PermalinkAuthoritySchema
                 PRIMARY KEY(PermalinkId, ItemId));
             CREATE INDEX IF NOT EXISTS IX_PermalinkBindings_ItemId
                 ON PermalinkBindings(ItemId);
+            -- FirstAliasClaims is keyed by capsule_id, so every lookup BY ALIAS
+            -- was a full scan: the resolver's own binding join does one, and so
+            -- does the competing-claims test in BindAsync, which runs for every
+            -- alias of every ensure. Without this the repeat-ensure caching test
+            -- fails outright on this host.
+            CREATE INDEX IF NOT EXISTS IX_FirstAliasClaims_PermalinkId
+                ON FirstAliasClaims(permalink_id);
             """;
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }

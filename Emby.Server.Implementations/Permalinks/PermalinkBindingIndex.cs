@@ -104,15 +104,16 @@ internal sealed class PermalinkBindingIndex
             """;
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
-        // If the competition is gone, so is the reason to override; leaving a
-        // stale one would pin the binding to a capsule nothing else points at.
-        command.CommandText = """
-            DELETE FROM PermalinkBindingCapsuleOverrides
-             WHERE PermalinkId = $id AND ItemId = $item
-               AND (SELECT COUNT(*) FROM FirstAliasClaims
-                     WHERE permalink_id = $id) <= 1
-            """;
-        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        // Deliberately no cleanup pass. An earlier version deleted the override
+        // whenever the alias was down to a single claim, on the theory that the
+        // tiebreak was no longer needed. But this is not the only writer:
+        // PromoteItemBindingsAsync records an override to move an alias onto a
+        // promoted item, and that alias can legitimately have one claim. The
+        // cleanup deleted those on the next unrelated bind, which broke
+        // resolving an sk- alias for an item with no provider id and failed the
+        // permalink browser gate (13 tests to 12) on 2026-09-03; the promotion
+        // rolled itself back. Writing an override we own is additive and cannot
+        // remove behaviour that already worked; removing someone else's is not.
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 

@@ -165,6 +165,7 @@ internal sealed class PermalinkStore : IPermalinkStore
                 alias,
                 request.ItemId,
                 snapshot.ContentHead.ContentRoot,
+                reservation.CapsuleId,
                 cancellationToken).ConfigureAwait(false);
         }
 

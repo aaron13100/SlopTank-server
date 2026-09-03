@@ -37,17 +37,22 @@ internal sealed class PermalinkBindingIndex
     /// <param name="permalinkId">The permalink id.</param>
     /// <param name="itemId">The Jellyfin item identifier.</param>
     /// <param name="contentRoot">The verified content root.</param>
+    /// <param name="capsuleId">The anchor capsule this binding currently resolves through.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task representing the asynchronous operation.</returns>
     public async Task BindAsync(
         string permalinkId,
         Guid itemId,
         string contentRoot,
+        Guid capsuleId,
         CancellationToken cancellationToken)
     {
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
             .ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection
+            .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO PermalinkBindings
                 (PermalinkId, ItemId, ContentRoot, VerifiedToken, VerifiedAt, CreatedAt)
@@ -65,6 +70,43 @@ internal sealed class PermalinkBindingIndex
         command.Parameters.AddWithValue("$verified", now);
         command.Parameters.AddWithValue("$created", now);
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+        // An alias resolves through its FIRST claim's capsule unless an override
+        // says otherwise. Rewriting a file mints a new anchor capsule, so
+        // without this the resolver keeps comparing the item's live anchor
+        // against the superseded capsule's and answers 409 binding-replaced --
+        // permanently, because the old bytes are gone. That is every watch link
+        // to anything the conversion pipeline touches.
+        //
+        // The first claim is deliberately left alone: it is the immutable record
+        // of who minted the alias. The override is the supported way to say
+        // "this binding now resolves through a different capsule", and is what
+        // PromoteItemBindingsAsync already writes for the promotion path. This
+        // generalizes it to ordinary re-binding.
+        command.Parameters.AddWithValue("$capsule", capsuleId.ToString("D"));
+        command.CommandText = """
+            INSERT INTO PermalinkBindingCapsuleOverrides
+                (PermalinkId, ItemId, capsule_id, created_at)
+            SELECT $id, $item, $capsule, $created
+             WHERE EXISTS (
+                   SELECT 1 FROM FirstAliasClaims
+                    WHERE permalink_id = $id AND capsule_id <> $capsule)
+            ON CONFLICT(PermalinkId, ItemId) DO UPDATE SET
+                capsule_id = excluded.capsule_id
+            """;
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+        // Once the live capsule IS the first claim again, the override would
+        // shadow it with a stale value, so it is dropped rather than left behind.
+        command.CommandText = """
+            DELETE FROM PermalinkBindingCapsuleOverrides
+             WHERE PermalinkId = $id AND ItemId = $item
+               AND EXISTS (
+                   SELECT 1 FROM FirstAliasClaims
+                    WHERE permalink_id = $id AND capsule_id = $capsule)
+            """;
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

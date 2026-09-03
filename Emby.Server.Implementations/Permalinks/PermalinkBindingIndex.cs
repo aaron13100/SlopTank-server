@@ -71,39 +71,46 @@ internal sealed class PermalinkBindingIndex
         command.Parameters.AddWithValue("$created", now);
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
-        // An alias resolves through its FIRST claim's capsule unless an override
-        // says otherwise. Rewriting a file mints a new anchor capsule, so
-        // without this the resolver keeps comparing the item's live anchor
-        // against the superseded capsule's and answers 409 binding-replaced --
-        // permanently, because the old bytes are gone. That is every watch link
-        // to anything the conversion pipeline touches.
+        // FirstAliasClaims is keyed by capsule, so more than one capsule can
+        // claim the same alias -- which is exactly what happens when a file is
+        // rewritten: the old capsule and the new one both claim it. The
+        // resolver joins the alias to its claims with no tiebreak, so which
+        // capsule a link resolves through becomes arbitrary, and picking the
+        // superseded one means comparing the item's live anchor against an
+        // anchor whose file no longer exists: 409 binding-replaced, forever.
+        // Measured on production 2026-09-03 after converting an episode.
         //
-        // The first claim is deliberately left alone: it is the immutable record
-        // of who minted the alias. The override is the supported way to say
-        // "this binding now resolves through a different capsule", and is what
-        // PromoteItemBindingsAsync already writes for the promotion path. This
-        // generalizes it to ordinary re-binding.
+        // The override names which capsule THIS binding resolves through, so
+        // writing it whenever the alias has competing claims makes the choice
+        // deterministic and current. It is what PromoteItemBindingsAsync
+        // already writes for the promotion path, generalized to ordinary
+        // re-binding. FirstAliasClaims itself is untouched: it stays the
+        // immutable record of which capsule minted the alias.
+        //
+        // Scoped to the competing-claims case on purpose. An alias with a
+        // single claim needs no tiebreak, and writing an override for it would
+        // set IsCapsuleOverride on every binding in the system, which the
+        // resolver reads as licence to skip its "is this alias still active for
+        // this item" check.
         command.Parameters.AddWithValue("$capsule", capsuleId.ToString("D"));
         command.CommandText = """
             INSERT INTO PermalinkBindingCapsuleOverrides
                 (PermalinkId, ItemId, capsule_id, created_at)
             SELECT $id, $item, $capsule, $created
-             WHERE EXISTS (
-                   SELECT 1 FROM FirstAliasClaims
-                    WHERE permalink_id = $id AND capsule_id <> $capsule)
+             WHERE (SELECT COUNT(*) FROM FirstAliasClaims
+                     WHERE permalink_id = $id) > 1
             ON CONFLICT(PermalinkId, ItemId) DO UPDATE SET
                 capsule_id = excluded.capsule_id
             """;
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
-        // Once the live capsule IS the first claim again, the override would
-        // shadow it with a stale value, so it is dropped rather than left behind.
+        // If the competition is gone, so is the reason to override; leaving a
+        // stale one would pin the binding to a capsule nothing else points at.
         command.CommandText = """
             DELETE FROM PermalinkBindingCapsuleOverrides
              WHERE PermalinkId = $id AND ItemId = $item
-               AND EXISTS (
-                   SELECT 1 FROM FirstAliasClaims
-                    WHERE permalink_id = $id AND capsule_id = $capsule)
+               AND (SELECT COUNT(*) FROM FirstAliasClaims
+                     WHERE permalink_id = $id) <= 1
             """;
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);

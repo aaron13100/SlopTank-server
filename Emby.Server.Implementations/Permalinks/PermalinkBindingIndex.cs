@@ -348,6 +348,61 @@ internal sealed class PermalinkBindingIndex
         return result;
     }
 
+    /// <summary>
+    /// Returns every binding held for one item, without consulting its content.
+    /// </summary>
+    /// <remarks>
+    /// The usual route to a binding is to compute the item's identity from its
+    /// bytes and look the resulting alias up. That is impossible for an item
+    /// whose file has already gone, which is exactly the state of an item the
+    /// library is deleting because its file disappeared. This lookup answers
+    /// from what the authority already recorded, so a deletion never has to
+    /// hash content that no longer exists.
+    /// </remarks>
+    /// <param name="itemId">The Jellyfin item identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The item's bindings, ordered by alias; empty when unbound.</returns>
+    public async Task<IReadOnlyList<PermalinkResolutionBinding>> FindItemBindingsAsync(
+        Guid itemId,
+        CancellationToken cancellationToken)
+    {
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT b.PermalinkId, b.ItemId, a.capsule_id, b.ContentRoot,
+                   a.anchor_token, a.binding_id, a.current_path,
+                   o.capsule_id IS NOT NULL
+              FROM PermalinkBindings b
+              JOIN FirstAliasClaims f ON f.permalink_id = b.PermalinkId
+              LEFT JOIN PermalinkBindingCapsuleOverrides o
+                ON o.PermalinkId = b.PermalinkId
+               AND o.ItemId = b.ItemId
+              JOIN AnchorTokenCapsules a
+                ON a.capsule_id = COALESCE(o.capsule_id, f.capsule_id)
+             WHERE b.ItemId = $item
+             ORDER BY b.PermalinkId
+            """;
+        command.Parameters.AddWithValue("$item", itemId.ToString("D"));
+        var result = new List<PermalinkResolutionBinding>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            result.Add(new PermalinkResolutionBinding(
+                reader.GetString(0),
+                Guid.Parse(reader.GetString(1)),
+                Guid.Parse(reader.GetString(2)),
+                reader.GetString(3),
+                reader.GetString(4),
+                Guid.Parse(reader.GetString(5)),
+                reader.GetString(6),
+                reader.GetBoolean(7)));
+        }
+
+        return result;
+    }
+
     /// <summary>Returns one exact derived alias/item binding.</summary>
     /// <param name="permalinkId">The permalink id.</param>
     /// <param name="itemId">The Jellyfin item identifier.</param>

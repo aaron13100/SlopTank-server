@@ -114,16 +114,38 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
 
         var existing = await _journal.ReadAsync(request.OperationId, cancellationToken)
             .ConfigureAwait(false);
-        var ensured = await _manager.EnsurePermalinkIdsAsync(item, cancellationToken)
-            .ConfigureAwait(false);
-        var binding = await _bindings.FindResolutionBindingAsync(
-            ensured.CanonicalId,
-            item.Id,
-            cancellationToken).ConfigureAwait(false);
-        var oldContentRoot = item is Series or Season or BoxSet
-            ? binding.ContentRoot
-            : (await _evidence.ComputeContentItemAsync(item, cancellationToken)
-                .ConfigureAwait(false)).ContentRoot;
+        PermalinkResolutionBinding binding;
+        string oldContentRoot;
+        if (IsDeletionOfVanishedContent(request.Kind, item))
+        {
+            // Identity must come from what the authority already recorded, not
+            // from the item's bytes: this operation exists precisely because
+            // those bytes are gone. Recomputing evidence here threw
+            // FileNotFoundException out of ValidateChildrenInternal2 and
+            // aborted the entire folder scan, so neither the vanished item was
+            // removed nor any new sibling added -- one converted file could
+            // freeze ingestion for a whole library folder while the scan still
+            // reported "Completed" (production, 2026-09-03).
+            binding = ResolveVanishedContentBinding(
+                item,
+                await _bindings.FindItemBindingsAsync(item.Id, cancellationToken)
+                    .ConfigureAwait(false));
+            oldContentRoot = binding.ContentRoot;
+        }
+        else
+        {
+            var ensured = await _manager.EnsurePermalinkIdsAsync(item, cancellationToken)
+                .ConfigureAwait(false);
+            binding = await _bindings.FindResolutionBindingAsync(
+                ensured.CanonicalId,
+                item.Id,
+                cancellationToken).ConfigureAwait(false);
+            oldContentRoot = item is Series or Season or BoxSet
+                ? binding.ContentRoot
+                : (await _evidence.ComputeContentItemAsync(item, cancellationToken)
+                    .ConfigureAwait(false)).ContentRoot;
+        }
+
         var capsuleId = binding.CapsuleId;
         var bundle = await _bundleFactory.CreateAsync(item, request, cancellationToken)
             .ConfigureAwait(false);
@@ -371,6 +393,61 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     private string UtcNow()
     {
         return _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Whether this is a deletion of an item whose content is already gone.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately narrow. Only a deletion may proceed without content
+    /// evidence: every other mutation kind is asserting something about the
+    /// item's content and must still be made to prove it. An unreachable file
+    /// under any other kind stays an error.
+    /// </remarks>
+    private static bool IsDeletionOfVanishedContent(string kind, BaseItem item)
+    {
+        if (!string.Equals(kind, "deletion", StringComparison.Ordinal)
+            || string.IsNullOrEmpty(item.Path))
+        {
+            return false;
+        }
+
+        // Directory check included because Series/Season/BoxSet paths are
+        // folders; a present path of either shape means content is reachable
+        // and the normal evidence route applies.
+        return !File.Exists(item.Path) && !Directory.Exists(item.Path);
+    }
+
+    /// <summary>
+    /// Picks the binding to journal a vanished-content deletion against.
+    /// </summary>
+    /// <remarks>
+    /// An item can hold several aliases. They must agree on the capsule for
+    /// this to be unambiguous; when they do not, that is a real inconsistency
+    /// in the authority and is reported as one rather than resolved by picking
+    /// arbitrarily, which would record the deletion against the wrong capsule.
+    /// </remarks>
+    private static PermalinkResolutionBinding ResolveVanishedContentBinding(
+        BaseItem item,
+        IReadOnlyList<PermalinkResolutionBinding> bindings)
+    {
+        if (bindings.Count == 0)
+        {
+            throw Conflict(
+                "binding-missing",
+                $"Item '{item.Id}' has no durable binding to delete against.");
+        }
+
+        var capsules = bindings.Select(value => value.CapsuleId).Distinct().Count();
+        if (capsules > 1)
+        {
+            throw Conflict(
+                "binding-capsule-ambiguous",
+                $"Item '{item.Id}' has {capsules} capsules across its aliases; "
+                + "a vanished-content deletion cannot choose between them.");
+        }
+
+        return bindings[0];
     }
 
     private static PermalinkException Conflict(string code, string message)

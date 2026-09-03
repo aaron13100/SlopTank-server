@@ -163,6 +163,27 @@ internal sealed class PermalinkMutationBundleFactory
             return null;
         }
 
+        // The anchor lives in the file, so a file that is gone cannot supply
+        // one -- but the authority already recorded which reservation held
+        // that path, and looking it up there needs no content at all. This is
+        // the state of an item the library is deleting BECAUSE its file
+        // vanished (the conversion pipeline rewrites .mkv to .mp4), and
+        // reading the anchor instead raised ENOENT out of the whole prepare,
+        // aborting the folder scan and wedging ingestion for every sibling.
+        //
+        // Falling back to the recorded path keeps the durable predecessor
+        // intact, so the deletion is still journalled against the real capsule
+        // rather than being waved through with no claim.
+        //
+        // Existence is tested rather than catching the read failure so that a
+        // file which IS present but unreadable still fails loudly: "gone" and
+        // "broken" must not collapse into one silent answer.
+        if (!File.Exists(item.Path) && !Directory.Exists(item.Path))
+        {
+            return await _authority.FindByCurrentPathAsync(item.Path, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         var anchor = _fileSystem.ReadAnchorToken(item.Path);
         return anchor is null
             ? null

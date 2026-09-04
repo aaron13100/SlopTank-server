@@ -918,19 +918,26 @@ namespace MediaBrowser.Controller.Entities
                 await mutation().ConfigureAwait(false);
                 return PermalinkChildMutationOutcome.Completed;
             }
-            catch (PermalinkException exception) when (
-                exception.Kind == PermalinkErrorKind.Conflict
-                && exception.OperationId.HasValue
-                && exception.ItemId.HasValue)
+            catch (PermalinkException exception) when (exception.IsItemScoped)
             {
-                var fencedItem = LibraryManager.GetItemById(exception.ItemId.Value) ?? child;
+                // Scope, not severity, and not the optional diagnostic ids.
+                // This filter used to demand an OperationId and an ItemId that
+                // PermalinkStore.Conflict never sets, so it never fired: one
+                // damaged file threw out of the foreach that adds new files and
+                // removes dead ones, and the rest of that library stayed
+                // invisible across every later scan. An authority-scoped
+                // failure still propagates, because it would fail identically
+                // for every sibling.
+                var fencedItem = exception.ItemId.HasValue
+                    ? LibraryManager.GetItemById(exception.ItemId.Value) ?? child
+                    : child;
                 Logger.LogWarning(
                     exception,
                     "Skipping library scan child {ItemId} ({ItemName}) at {ItemPath} because permalink operation {OperationId} fenced it with {PermalinkCode}",
                     fencedItem.Id,
                     fencedItem.Name,
                     fencedItem.Path,
-                    exception.OperationId.Value,
+                    exception.OperationId,
                     exception.Code);
                 return PermalinkChildMutationOutcome.SkippedConflict;
             }

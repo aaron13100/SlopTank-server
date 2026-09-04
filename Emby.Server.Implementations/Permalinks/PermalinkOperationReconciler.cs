@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Threading;
@@ -68,14 +69,30 @@ internal sealed class PermalinkOperationReconciler : IHostedService
         // Reconciliation wants exactly the operations this returns, because the
         // pending set and the set this loop used to keep are the same set: both
         // are the directories whose GetSettledPhase is null.
-        var pending = await _journal.PrimePendingIndexAsync(cancellationToken).ConfigureAwait(false);
+        var startedAt = Stopwatch.GetTimestamp();
+        var priming = await _journal.PrimePendingIndexAsync(cancellationToken).ConfigureAwait(false);
+        var primedAt = Stopwatch.GetElapsedTime(startedAt);
 
         var now = _timeProvider.GetUtcNow();
-        foreach (var operationId in pending)
+        foreach (var operationId in priming.Pending)
         {
             cancellationToken.ThrowIfCancellationRequested();
             await ReconcileAsync(operationId, now, cancellationToken).ConfigureAwait(false);
         }
+
+        // The generic host awaits this method before the server accepts a
+        // request, so whatever it costs is added to every restart, and the walk
+        // it contains is the only part that grows with the journal. Log the two
+        // apart from each other: reconciling N abandoned operations and
+        // enumerating M directories to find them are different costs with
+        // different fixes.
+        _logger.LogInformation(
+            "Permalink reconciler start: {ElapsedMs:F1} ms total, {PrimeMs:F1} ms enumerating "
+            + "{Directories} operation directories, {Pending} pending operations reconciled.",
+            Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds,
+            primedAt.TotalMilliseconds,
+            priming.Walk?.Directories ?? -1,
+            priming.Pending.Count);
     }
 
     /// <inheritdoc />

@@ -1,11 +1,14 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Permalinks;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.Permalinks;
 
@@ -14,17 +17,60 @@ namespace Emby.Server.Implementations.Permalinks;
 /// </summary>
 internal sealed class PermalinkOperationJournal : IDisposable
 {
+    /// <summary>
+    /// The configuration key that turns the in-memory pending index off.
+    ///
+    /// It is a measurement control. The negative-control arm of the pending-check
+    /// cost measurement needs the same binary to take the walk path on every
+    /// lookup, because a timing from a build that never walks only shows that the
+    /// current code is fast, not that the index is what made it fast.
+    /// </summary>
+    public const string DisablePendingIndexKey = "Permalinks:Diagnostics:DisablePendingIndex";
+
+    /// <summary>
+    /// How long the pending-check meter waits before it calls a run of lookups
+    /// finished and logs its totals.
+    ///
+    /// The lookups a library scan makes arrive in a dense run, and the gaps
+    /// between scans are minutes long, so one flush per run is one line per
+    /// scan without the meter having to know what a scan is.
+    /// </summary>
+    private static readonly TimeSpan _lookupRunGap = TimeSpan.FromSeconds(60);
+
     private readonly PermalinkAuthorityStore _authority;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
+    private readonly ILogger<PermalinkOperationJournal> _logger;
+    private readonly TimeProvider _timeProvider;
+    private readonly bool _pendingIndexEnabled;
     private readonly SemaphoreSlim _pendingIndexLock = new(1, 1);
     private Dictionary<Guid, PermalinkOperationDocument>? _pendingOperations;
+    private int _runLookups;
+    private int _runWalks;
+    private TimeSpan _runLookupTime;
+    private DateTimeOffset _runStartedAt;
+    private DateTimeOffset _runLastLookupAt;
+    private PermalinkJournalWalk? _lastWalk;
 
     public PermalinkOperationJournal(
         PermalinkAuthorityStore authority,
-        IPermalinkAtomicFileSystem fileSystem)
+        IPermalinkAtomicFileSystem fileSystem,
+        IConfiguration configuration,
+        TimeProvider timeProvider,
+        ILogger<PermalinkOperationJournal> logger)
     {
         _authority = authority;
         _fileSystem = fileSystem;
+        _timeProvider = timeProvider;
+        _logger = logger;
+        _pendingIndexEnabled = !configuration.GetValue(DisablePendingIndexKey, false);
+        if (!_pendingIndexEnabled)
+        {
+            _logger.LogWarning(
+                "Permalink pending index is DISABLED by {Key}. Every pending check now walks the "
+                + "whole operation journal, which costs a full directory enumeration per call. "
+                + "This exists to measure what the index is worth and is not a production setting.",
+                DisablePendingIndexKey);
+        }
     }
 
     public string GetOperationPath(Guid operationId)
@@ -206,11 +252,20 @@ internal sealed class PermalinkOperationJournal : IDisposable
         Guid itemId,
         CancellationToken cancellationToken)
     {
+        var startedAt = Stopwatch.GetTimestamp();
         await _pendingIndexLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            _pendingOperations ??= await LoadPendingOperationsAsync(cancellationToken).ConfigureAwait(false);
-            return _pendingOperations.Values
+            var walked = _pendingOperations is null;
+            var pending = _pendingOperations
+                ?? await LoadPendingOperationsAsync(cancellationToken).ConfigureAwait(false);
+            if (_pendingIndexEnabled)
+            {
+                _pendingOperations = pending;
+            }
+
+            RecordLookup(Stopwatch.GetElapsedTime(startedAt), walked);
+            return pending.Values
                 .Where(candidate => candidate.ItemId.Equals(itemId))
                 .MaxBy(candidate => candidate.CreatedAt, StringComparer.Ordinal);
         }
@@ -218,6 +273,56 @@ internal sealed class PermalinkOperationJournal : IDisposable
         {
             _pendingIndexLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Adds one completed pending check to the current run, logging the previous
+    /// run's totals once this call proves that run is over.
+    ///
+    /// The caller already holds <see cref="_pendingIndexLock"/>, which is what
+    /// makes the plain field arithmetic here safe.
+    /// </summary>
+    /// <param name="elapsed">What this one lookup cost, lock acquisition included.</param>
+    /// <param name="walked">Whether this lookup had to enumerate the journal.</param>
+    private void RecordLookup(TimeSpan elapsed, bool walked)
+    {
+        var now = _timeProvider.GetUtcNow();
+        if (_runLookups > 0 && now - _runLastLookupAt > _lookupRunGap)
+        {
+            FlushLookupRun();
+        }
+
+        if (_runLookups == 0)
+        {
+            _runStartedAt = now;
+        }
+
+        _runLookups++;
+        _runWalks += walked ? 1 : 0;
+        _runLookupTime += elapsed;
+        _runLastLookupAt = now;
+    }
+
+    /// <summary>Logs and clears the totals of one run of pending checks.</summary>
+    private void FlushLookupRun()
+    {
+        if (_runLookups == 0)
+        {
+            return;
+        }
+
+        _logger.LogInformation(
+            "Permalink pending checks: {Lookups} lookups costing {LookupMs:F1} ms in total "
+            + "({Walks} journal walks) between {RunStartedAt:O} and {RunEndedAt:O}, index {IndexState}.",
+            _runLookups,
+            _runLookupTime.TotalMilliseconds,
+            _runWalks,
+            _runStartedAt,
+            _runLastLookupAt,
+            _pendingIndexEnabled ? "enabled" : "disabled");
+        _runLookups = 0;
+        _runWalks = 0;
+        _runLookupTime = TimeSpan.Zero;
     }
 
     private async Task<Dictionary<Guid, PermalinkOperationDocument>> LoadPendingOperationsAsync(
@@ -229,10 +334,13 @@ internal sealed class PermalinkOperationJournal : IDisposable
             return [];
         }
 
+        var startedAt = Stopwatch.GetTimestamp();
+        var directories = 0;
         var pending = new Dictionary<Guid, PermalinkOperationDocument>();
         foreach (var directory in Directory.EnumerateDirectories(root))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            directories++;
             var operationIdText = Path.GetFileName(directory);
             if (!Guid.TryParse(operationIdText, out var operationId)
                 || GetSettledPhase(operationId) is not null)
@@ -247,6 +355,15 @@ internal sealed class PermalinkOperationJournal : IDisposable
             }
         }
 
+        var elapsed = Stopwatch.GetElapsedTime(startedAt);
+        _lastWalk = new PermalinkJournalWalk(directories, pending.Count, elapsed);
+        _logger.LogInformation(
+            "Permalink journal walk: {Directories} operation directories, {Pending} still pending, "
+            + "{WalkMs:F1} ms, index {IndexState}.",
+            directories,
+            pending.Count,
+            elapsed.TotalMilliseconds,
+            _pendingIndexEnabled ? "enabled" : "disabled");
         return pending;
     }
 
@@ -267,13 +384,20 @@ internal sealed class PermalinkOperationJournal : IDisposable
     /// </summary>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The operation ids that are still pending.</returns>
-    public async Task<IReadOnlyList<Guid>> PrimePendingIndexAsync(CancellationToken cancellationToken)
+    public async Task<PermalinkPendingIndexPriming> PrimePendingIndexAsync(CancellationToken cancellationToken)
     {
         await _pendingIndexLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            _pendingOperations ??= await LoadPendingOperationsAsync(cancellationToken).ConfigureAwait(false);
-            return _pendingOperations.Keys.ToArray();
+            _lastWalk = null;
+            var pending = _pendingOperations
+                ?? await LoadPendingOperationsAsync(cancellationToken).ConfigureAwait(false);
+            if (_pendingIndexEnabled)
+            {
+                _pendingOperations = pending;
+            }
+
+            return new PermalinkPendingIndexPriming(pending.Keys.ToArray(), _lastWalk);
         }
         finally
         {
@@ -295,6 +419,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
+        FlushLookupRun();
         _pendingIndexLock.Dispose();
     }
 

@@ -39,10 +39,17 @@ namespace Emby.Server.Implementations.Library
                 return null;
             }
 
-            // Sort in the following order: Default > No tag > Forced
+            // Sort in the following order: Renderable > Default > No tag > Forced.
+            // A picture (bitmap) subtitle cannot be drawn by a client, so selecting one
+            // silently commits the server to burning it into the video, and that means a
+            // full re-encode has to run before the first frame can be delivered.
+            // Renderability therefore outranks every other preference here. GetStreamScore
+            // already ranks text tracks above picture ones; this brings the default-index
+            // selection into line with it.
             var sortedStreams = streams
                 .Where(i => i.Type == MediaStreamType.Subtitle)
-                .OrderByDescending(x => x.IsExternal)
+                .OrderByDescending(x => x.IsTextSubtitleStream)
+                .ThenByDescending(x => x.IsExternal)
                 .ThenByDescending(x => x.IsDefault)
                 .ThenByDescending(x => !x.IsForced && MatchesPreferredLanguage(x.Language, preferredLanguages))
                 .ThenByDescending(x => x.IsForced && MatchesPreferredLanguage(x.Language, preferredLanguages))
@@ -54,8 +61,15 @@ namespace Emby.Server.Implementations.Library
 
             if (mode == SubtitlePlaybackMode.Default)
             {
-                // Load subtitles according to external, default and forced flags.
-                stream = sortedStreams.FirstOrDefault(x => x.IsExternal || x.IsDefault || x.IsForced);
+                // Load subtitles according to external, default and forced flags. When
+                // those flags land on a picture track, honour the intent (subtitles on)
+                // but move to a renderable one, because burning a bitmap in costs the
+                // whole video re-encoded before the first frame arrives. If nothing
+                // renderable exists, leave subtitles off rather than pay that price in a
+                // mode nobody explicitly asked for; the track stays listed and one click
+                // away.
+                var flaggedForDisplay = sortedStreams.Any(x => x.IsExternal || x.IsDefault || x.IsForced);
+                stream = flaggedForDisplay ? sortedStreams.FirstOrDefault(x => x.IsTextSubtitleStream) : null;
             }
             else if (mode == SubtitlePlaybackMode.Smart)
             {
@@ -64,7 +78,7 @@ namespace Emby.Server.Implementations.Library
                 // If the audio language is one of the user's preferred subtitle languages behave like OnlyForced.
                 if (!preferredLanguages.Contains(audioTrackLanguage, StringComparison.OrdinalIgnoreCase))
                 {
-                    stream = sortedStreams.FirstOrDefault(x => MatchesPreferredLanguage(x.Language, preferredLanguages));
+                    stream = sortedStreams.FirstOrDefault(x => x.IsTextSubtitleStream && MatchesPreferredLanguage(x.Language, preferredLanguages));
                 }
                 else
                 {

@@ -71,6 +71,17 @@ internal static class PermalinkAuthoritySchema
                 PRIMARY KEY(PermalinkId, ItemId));
             CREATE INDEX IF NOT EXISTS IX_PermalinkBindings_ItemId
                 ON PermalinkBindings(ItemId);
+            -- Durable resume state for the one-time operations/ walk that
+            -- discovers pre-existing pending operations, and the running
+            -- total this row keeps afterward. last_operation_id is the
+            -- ordinal-sorted cursor the walk has verified up to; completed_at
+            -- switches every future boot from that walk onto the O(pending)
+            -- marker-directory listing for good. See
+            -- PermalinkOperationJournal.MigratePendingSetAsync.
+            CREATE TABLE IF NOT EXISTS PermalinkPendingMigration (
+                name TEXT PRIMARY KEY, last_operation_id TEXT NULL,
+                directories_seen INTEGER NOT NULL, completed_at TEXT NULL,
+                created_at TEXT NOT NULL);
             -- FirstAliasClaims is keyed by capsule_id, so every lookup BY ALIAS
             -- was a full scan: the resolver's own binding join does one, and so
             -- does the competing-claims test in BindAsync, which runs for every

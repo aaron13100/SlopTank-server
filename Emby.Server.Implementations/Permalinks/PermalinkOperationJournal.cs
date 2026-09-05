@@ -1,12 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Permalinks;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
@@ -28,6 +30,25 @@ internal sealed class PermalinkOperationJournal : IDisposable
     public const string DisablePendingIndexKey = "Permalinks:Diagnostics:DisablePendingIndex";
 
     /// <summary>
+    /// How many operation directories the one-time pending-set migration verifies between durable
+    /// checkpoints. Every commit under <c>synchronous=FULL</c> is a real fsync, so checkpointing every
+    /// directory would turn a 36-400s walk into a multi-minute one; checkpointing only at the end
+    /// would make an interrupted migration redo the whole walk. This bounds redone work, after a
+    /// restart mid-migration, to at most one batch.
+    /// </summary>
+    public const string PendingMigrationBatchSizeKey = "Permalinks:PendingMigrationBatchSize";
+
+    /// <summary>
+    /// A migration-only fault injection point, so a restart-mid-migration can be tested without
+    /// waiting for a real crash. Once the one-time migration's directory count first reaches this
+    /// value, it throws instead of continuing. It fires at most once per migration (tracked by
+    /// comparing against the count already durable when this attempt began), so a resumed attempt
+    /// that passes the same threshold again is not re-faulted forever.
+    /// </summary>
+    public const string PendingMigrationFaultAfterDirectoriesKey =
+        "Permalinks:Diagnostics:PendingMigrationFaultAfterDirectories";
+
+    /// <summary>
     /// How long the pending-check meter waits before it calls a run of lookups
     /// finished and logs its totals.
     ///
@@ -42,6 +63,8 @@ internal sealed class PermalinkOperationJournal : IDisposable
     private readonly ILogger<PermalinkOperationJournal> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly bool _pendingIndexEnabled;
+    private readonly int _pendingMigrationBatchSize;
+    private readonly long _pendingMigrationFaultAfterDirectories;
     private readonly SemaphoreSlim _pendingIndexLock = new(1, 1);
     private Dictionary<Guid, PermalinkOperationDocument>? _pendingOperations;
     private int _runLookups;
@@ -63,6 +86,10 @@ internal sealed class PermalinkOperationJournal : IDisposable
         _timeProvider = timeProvider;
         _logger = logger;
         _pendingIndexEnabled = !configuration.GetValue(DisablePendingIndexKey, false);
+        _pendingMigrationBatchSize = configuration.GetValue(PendingMigrationBatchSizeKey, 2000);
+        _pendingMigrationFaultAfterDirectories = configuration.GetValue(
+            PendingMigrationFaultAfterDirectoriesKey,
+            0L);
         if (!_pendingIndexEnabled)
         {
             _logger.LogWarning(
@@ -70,6 +97,15 @@ internal sealed class PermalinkOperationJournal : IDisposable
                 + "whole operation journal, which costs a full directory enumeration per call. "
                 + "This exists to measure what the index is worth and is not a production setting.",
                 DisablePendingIndexKey);
+        }
+
+        if (_pendingMigrationFaultAfterDirectories > 0)
+        {
+            _logger.LogWarning(
+                "Permalink pending-set migration will fault after {Directories} directories by "
+                + "{Key}. This exists to test restart-mid-migration and is not a production setting.",
+                _pendingMigrationFaultAfterDirectories,
+                PendingMigrationFaultAfterDirectoriesKey);
         }
     }
 
@@ -81,6 +117,29 @@ internal sealed class PermalinkOperationJournal : IDisposable
             "permalinks",
             "operations",
             operationId.ToString("D"));
+    }
+
+    /// <summary>
+    /// Returns the durable marker path that makes one operation's pendingness a fact the filesystem
+    /// already knows, without enumerating <c>operations/</c> to rediscover it.
+    /// </summary>
+    /// <remarks>
+    /// The marker holds the exact same canonical bytes as <c>operation.json</c>, not a stub, so a
+    /// crash between the two publishes never loses the operation: <see cref="LoadPendingOperationsFromMarkersAsync"/>
+    /// reconstructs <c>operation.json</c> from the marker rather than guessing the marker is an
+    /// orphan and discarding it. That distinction matters because "not there yet" and "never coming"
+    /// are indistinguishable from a marker alone.
+    /// </remarks>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <returns>The marker path.</returns>
+    private string GetPendingMarkerPath(Guid operationId)
+    {
+        return Path.Combine(
+            _authority.Root,
+            ".sloptank",
+            "permalinks",
+            "pending",
+            operationId.ToString("D") + ".json");
     }
 
     /// <summary>
@@ -122,12 +181,31 @@ internal sealed class PermalinkOperationJournal : IDisposable
         PermalinkOperationDocument operation,
         CancellationToken cancellationToken)
     {
+        // The marker publishes FIRST, with the exact same bytes operation.json is about to get.
+        // operation.json's existence is what makes an operation pending (nothing has settled it
+        // yet), so the marker must never lag behind it: if this process dies before operation.json
+        // is published, the marker alone is enough for LoadPendingOperationsFromMarkersAsync to
+        // reconstruct it. The reverse order would let a real pending operation start with no durable
+        // record of itself, which is the exact bug this marker exists to prevent.
+        var bytes = CanonicalJson.Serialize(operation);
+        var markerPath = GetPendingMarkerPath(operation.OperationId);
+        _fileSystem.CreateDirectoryDurable(Path.GetDirectoryName(markerPath)!);
+        await PublishExactAsync(markerPath, bytes, cancellationToken).ConfigureAwait(false);
+
         var root = GetOperationPath(operation.OperationId);
         _fileSystem.CreateDirectoryDurable(root);
-        await PublishExactAsync(
+        var createdOperation = await PublishExactAsync(
             Path.Combine(root, "operation.json"),
-            CanonicalJson.Serialize(operation),
+            bytes,
             cancellationToken).ConfigureAwait(false);
+        if (createdOperation)
+        {
+            // Only the publish that actually created operation.json counts a new directory; a
+            // concurrent retry that lands on the exact-byte-match branch of PublishExactAsync must
+            // not double count the same operation.
+            await IncrementDirectoryCounterAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         await _pendingIndexLock.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
@@ -162,6 +240,30 @@ internal sealed class PermalinkOperationJournal : IDisposable
         if (phase.FencesItem)
         {
             return;
+        }
+
+        // Settlement is monotonic: once a durable terminal/reverted phase file exists, this
+        // operation can never become pending again, so the marker is safe to remove now. The
+        // removal itself does not need the same durability ceremony as its creation: if this
+        // delete does not survive a crash, LoadPendingOperationsFromMarkersAsync re-derives the
+        // same settled verdict from GetSettledPhase and drops the stale marker again on the next
+        // boot. A failure here must not stop the in-memory index update below, since the phase file
+        // that actually settles the operation is already durably published by this point.
+        try
+        {
+            var markerPath = GetPendingMarkerPath(operationId);
+            if (File.Exists(markerPath))
+            {
+                File.Delete(markerPath);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                exception,
+                "Could not remove the pending marker for settled operation {OperationId}; it will "
+                + "self-heal the next time the pending set is loaded.",
+                operationId);
         }
 
         await _pendingIndexLock.WaitAsync(CancellationToken.None).ConfigureAwait(false);
@@ -325,46 +427,418 @@ internal sealed class PermalinkOperationJournal : IDisposable
         _runLookupTime = TimeSpan.Zero;
     }
 
+    /// <summary>
+    /// Loads the pending set, from a directory listing bounded by the pending count once the
+    /// one-time migration has run, or by running that migration now when it has not.
+    /// </summary>
+    /// <remarks>
+    /// "Which operations are still pending" used to be re-derived, on every cold start, by
+    /// enumerating every operation directory that ever existed (62,565 of them on 2026-09-04,
+    /// growing 1,500-2,800 a day, nothing prunes) and probing up to five phase files in each.
+    /// Every sample ever taken found zero pending among them: the server paid O(total history) to
+    /// compute O(0). The <c>PermalinkPendingMigration</c> authority table is a one-row durable fact,
+    /// seeded once by <see cref="MigratePendingSetAsync"/>, that lets every later boot answer from a
+    /// directory listing of <c>pending/</c> instead.
+    /// </remarks>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The current pending operations, keyed by operation id.</returns>
     private async Task<Dictionary<Guid, PermalinkOperationDocument>> LoadPendingOperationsAsync(
         CancellationToken cancellationToken)
     {
-        var root = Path.Combine(_authority.Root, ".sloptank", "permalinks", "operations");
-        if (!Directory.Exists(root))
-        {
-            return [];
-        }
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        var state = await ReadMigrationStateAsync(cancellationToken).ConfigureAwait(false);
+        return state.Completed
+            ? await LoadPendingOperationsFromMarkersAsync(cancellationToken).ConfigureAwait(false)
+            : await MigratePendingSetAsync(state, cancellationToken).ConfigureAwait(false);
+    }
 
+    /// <summary>
+    /// Lists the durable marker area and self-heals every marker it finds against the operation it
+    /// names, rather than trusting the marker's own claim of pendingness.
+    /// </summary>
+    /// <remarks>
+    /// Two kinds of staleness are possible, both harmless if left alone until the next load and
+    /// corrected here rather than assumed away:
+    /// <list type="bullet">
+    /// <item>the marker's operation settled and <see cref="WritePhaseAsync"/>'s best-effort delete
+    /// did not survive a crash, so <see cref="GetSettledPhase"/> now disagrees with the marker;
+    /// dropping the marker is safe because settlement is monotonic and cannot un-happen;</item>
+    /// <item>this process (or a predecessor) died between publishing the marker and publishing
+    /// <c>operation.json</c>, so the marker is momentarily the only durable copy; the marker holds
+    /// the exact canonical bytes <c>operation.json</c> was about to get, so reconstructing it is
+    /// exact-byte republication, not a guess.</item>
+    /// </list>
+    /// </remarks>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The current pending operations, keyed by operation id.</returns>
+    private async Task<Dictionary<Guid, PermalinkOperationDocument>> LoadPendingOperationsFromMarkersAsync(
+        CancellationToken cancellationToken)
+    {
         var startedAt = Stopwatch.GetTimestamp();
-        var directories = 0;
-        var pending = new Dictionary<Guid, PermalinkOperationDocument>();
-        foreach (var directory in Directory.EnumerateDirectories(root))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            directories++;
-            var operationIdText = Path.GetFileName(directory);
-            if (!Guid.TryParse(operationIdText, out var operationId)
-                || GetSettledPhase(operationId) is not null)
-            {
-                continue;
-            }
-
-            var candidate = await ReadAsync(operationId, cancellationToken).ConfigureAwait(false);
-            if (candidate is not null)
-            {
-                pending[operationId] = candidate;
-            }
-        }
-
+        var pending = await ComputePendingFromMarkersAsync(cancellationToken).ConfigureAwait(false);
         var elapsed = Stopwatch.GetElapsedTime(startedAt);
-        _lastWalk = new PermalinkJournalWalk(directories, pending.Count, elapsed);
+        var totalDirectories = await ReadDirectoryCounterAsync(cancellationToken).ConfigureAwait(false);
+        _lastWalk = new PermalinkJournalWalk((int)Math.Min(totalDirectories, int.MaxValue), pending.Count, elapsed);
         _logger.LogInformation(
             "Permalink journal walk: {Directories} operation directories, {Pending} still pending, "
             + "{WalkMs:F1} ms, index {IndexState}.",
-            directories,
+            totalDirectories,
             pending.Count,
             elapsed.TotalMilliseconds,
             _pendingIndexEnabled ? "enabled" : "disabled");
         return pending;
+    }
+
+    /// <summary>
+    /// Lists <c>pending/</c> and self-heals every marker it finds against the operation it names.
+    /// </summary>
+    /// <remarks>
+    /// This is the only trustworthy source of "what is pending right now": a resumed
+    /// <see cref="MigratePendingSetAsync"/> walk only visits the directories it has not verified yet,
+    /// so an operation whose marker an EARLIER, interrupted attempt already published would be
+    /// missing from that walk's own in-memory results even though it is genuinely still pending.
+    /// Reading it back from here once the walk finishes, rather than trusting what any one attempt's
+    /// pass accumulated, is what keeps a multi-boot migration from silently losing an operation that
+    /// happened to fall before its resume cursor.
+    /// </remarks>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The current pending operations, keyed by operation id.</returns>
+    private async Task<Dictionary<Guid, PermalinkOperationDocument>> ComputePendingFromMarkersAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(_authority.Root, ".sloptank", "permalinks", "pending");
+        var pending = new Dictionary<Guid, PermalinkOperationDocument>();
+        if (!Directory.Exists(root))
+        {
+            return pending;
+        }
+
+        foreach (var marker in Directory.EnumerateFiles(root, "*.json"))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!Guid.TryParse(Path.GetFileNameWithoutExtension(marker), out var operationId))
+            {
+                _logger.LogError(
+                    "Permalink pending marker '{Marker}' has an unparseable name and was left in "
+                    + "place unread.",
+                    marker);
+                continue;
+            }
+
+            if (GetSettledPhase(operationId) is not null)
+            {
+                TryDeleteMarker(marker, operationId, "settled");
+                continue;
+            }
+
+            var operation = await ReadAsync(operationId, cancellationToken).ConfigureAwait(false);
+            if (operation is not null)
+            {
+                pending[operationId] = operation;
+                continue;
+            }
+
+            operation = await ReconstructOperationFromMarkerAsync(marker, operationId, cancellationToken)
+                .ConfigureAwait(false);
+            if (operation is not null)
+            {
+                pending[operationId] = operation;
+            }
+        }
+
+        return pending;
+    }
+
+    /// <summary>
+    /// Rebuilds <c>operation.json</c> from a marker whose operation was never found, because the
+    /// marker's bytes are already the canonical document and republishing them is exact-byte-safe
+    /// even if the original writer is still mid-flight and about to publish the same bytes itself.
+    /// </summary>
+    /// <param name="markerPath">The marker file path.</param>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The reconstructed operation, or null when the marker itself cannot be parsed.</returns>
+    private async Task<PermalinkOperationDocument?> ReconstructOperationFromMarkerAsync(
+        string markerPath,
+        Guid operationId,
+        CancellationToken cancellationToken)
+    {
+        byte[] markerBytes;
+        PermalinkOperationDocument operation;
+        try
+        {
+            markerBytes = await File.ReadAllBytesAsync(markerPath, cancellationToken).ConfigureAwait(false);
+            operation = CanonicalJson.Deserialize<PermalinkOperationDocument>(markerBytes, markerPath);
+        }
+        catch (Exception exception) when (exception is IOException or System.Text.Json.JsonException)
+        {
+            _logger.LogError(
+                exception,
+                "Permalink pending marker for operation {OperationId} could not be read and its "
+                + "operation could not be reconstructed; it remains fenced until repaired by hand.",
+                operationId);
+            return null;
+        }
+
+        var root = GetOperationPath(operationId);
+        _fileSystem.CreateDirectoryDurable(root);
+        await PublishExactAsync(Path.Combine(root, "operation.json"), markerBytes, cancellationToken)
+            .ConfigureAwait(false);
+        _logger.LogWarning(
+            "Reconstructed operation.json for {OperationId} from its durable pending marker; "
+            + "operation.json was missing, which only a crash between the two publishes explains.",
+            operationId);
+        return operation;
+    }
+
+    private void TryDeleteMarker(string markerPath, Guid operationId, string reason)
+    {
+        try
+        {
+            File.Delete(markerPath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                exception,
+                "Could not remove the {Reason} pending marker for operation {OperationId}; it will "
+                + "self-heal the next time the pending set is loaded.",
+                reason,
+                operationId);
+        }
+    }
+
+    /// <summary>
+    /// Runs the one-time walk of <c>operations/</c> that discovers every pending operation predating
+    /// the durable marker area, publishing a marker for each one it finds, then never runs again.
+    /// </summary>
+    /// <remarks>
+    /// Resumable because nothing else can create a new operation directory while this method is
+    /// running: it only ever executes from <see cref="PermalinkOperationReconciler.StartAsync"/>,
+    /// which the generic host awaits before serving a single request, so <c>operations/</c> cannot
+    /// grow underneath a resumed attempt. Directories are visited in ordinal order by name so the
+    /// resume cursor (the last name fully verified) is well-defined regardless of the order
+    /// <see cref="Directory.EnumerateDirectories(string)"/> happens to return on a given attempt.
+    /// </remarks>
+    /// <param name="state">The migration state read at the start of this attempt.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The pending operations discovered by this walk.</returns>
+    private async Task<Dictionary<Guid, PermalinkOperationDocument>> MigratePendingSetAsync(
+        PermalinkPendingMigrationState state,
+        CancellationToken cancellationToken)
+    {
+        var startedAt = Stopwatch.GetTimestamp();
+        var startingDirectoriesSeen = state.DirectoriesSeen;
+        if (startingDirectoriesSeen > 0)
+        {
+            _logger.LogInformation(
+                "Permalink pending-set migration resuming: {Directories} directories already "
+                + "verified as of cursor '{Cursor}'.",
+                startingDirectoriesSeen,
+                state.LastOperationId);
+        }
+
+        var root = Path.Combine(_authority.Root, ".sloptank", "permalinks", "operations");
+        var directoriesSeen = startingDirectoriesSeen;
+        var lastVerified = state.LastOperationId;
+        if (Directory.Exists(root))
+        {
+            var names = Directory.EnumerateDirectories(root)
+                .Select(Path.GetFileName)
+                .Where(name => !string.IsNullOrEmpty(name))
+                .Select(name => name!)
+                .OrderBy(name => name, StringComparer.Ordinal);
+            var sinceCheckpoint = 0;
+            foreach (var name in names)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (lastVerified is not null && string.CompareOrdinal(name, lastVerified) <= 0)
+                {
+                    continue;
+                }
+
+                if (Guid.TryParse(name, out var operationId) && GetSettledPhase(operationId) is null)
+                {
+                    var candidate = await ReadAsync(operationId, cancellationToken).ConfigureAwait(false);
+                    if (candidate is not null)
+                    {
+                        var markerPath = GetPendingMarkerPath(operationId);
+                        _fileSystem.CreateDirectoryDurable(Path.GetDirectoryName(markerPath)!);
+                        await PublishExactAsync(
+                            markerPath,
+                            CanonicalJson.Serialize(candidate),
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                }
+
+                lastVerified = name;
+                directoriesSeen++;
+                sinceCheckpoint++;
+                if (sinceCheckpoint >= _pendingMigrationBatchSize)
+                {
+                    await CheckpointMigrationAsync(lastVerified, directoriesSeen, cancellationToken)
+                        .ConfigureAwait(false);
+                    sinceCheckpoint = 0;
+                    FaultForTestingIfThresholdCrossed(startingDirectoriesSeen, directoriesSeen);
+                }
+            }
+
+            if (sinceCheckpoint > 0)
+            {
+                await CheckpointMigrationAsync(lastVerified, directoriesSeen, cancellationToken)
+                    .ConfigureAwait(false);
+                FaultForTestingIfThresholdCrossed(startingDirectoriesSeen, directoriesSeen);
+            }
+        }
+
+        await CompleteMigrationAsync(lastVerified, directoriesSeen, cancellationToken).ConfigureAwait(false);
+
+        // A resumed walk only visits directories after its cursor, so an operation whose marker an
+        // EARLIER, interrupted attempt already published would be missing from what this call alone
+        // just found. The marker area is the ground truth for "pending right now" regardless of how
+        // many attempts it took to finish walking; read it back rather than trusting this call's own
+        // partial tally.
+        var pending = await ComputePendingFromMarkersAsync(cancellationToken).ConfigureAwait(false);
+        var elapsed = Stopwatch.GetElapsedTime(startedAt);
+        _lastWalk = new PermalinkJournalWalk((int)Math.Min(directoriesSeen, int.MaxValue), pending.Count, elapsed);
+        _logger.LogInformation(
+            "Permalink journal walk: {Directories} operation directories, {Pending} still pending, "
+            + "{WalkMs:F1} ms, index {IndexState}.",
+            directoriesSeen,
+            pending.Count,
+            elapsed.TotalMilliseconds,
+            _pendingIndexEnabled ? "enabled" : "disabled");
+        return pending;
+    }
+
+    /// <summary>
+    /// Throws once per migration if the caller configured a directory count to fault after, so a
+    /// restart mid-migration can be exercised deterministically instead of waiting for a real crash.
+    /// </summary>
+    /// <param name="startingDirectoriesSeen">The durable count when this attempt began.</param>
+    /// <param name="directoriesSeen">The durable count just checkpointed.</param>
+    private void FaultForTestingIfThresholdCrossed(long startingDirectoriesSeen, long directoriesSeen)
+    {
+        if (_pendingMigrationFaultAfterDirectories > 0
+            && startingDirectoriesSeen < _pendingMigrationFaultAfterDirectories
+            && directoriesSeen >= _pendingMigrationFaultAfterDirectories)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "pending-migration-fault-injected",
+                $"Pending-set migration fault injected by {PendingMigrationFaultAfterDirectoriesKey} "
+                + $"after {directoriesSeen} directories.");
+        }
+    }
+
+    private async Task<PermalinkPendingMigrationState> ReadMigrationStateAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = """
+                INSERT OR IGNORE INTO PermalinkPendingMigration
+                    (name, last_operation_id, directories_seen, completed_at, created_at)
+                VALUES ('v1', NULL, 0, NULL, $created);
+                """;
+            insert.Parameters.AddWithValue("$created", UtcNow());
+            _ = await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using var select = connection.CreateCommand();
+        select.CommandText = """
+            SELECT last_operation_id, directories_seen, completed_at
+              FROM PermalinkPendingMigration
+             WHERE name = 'v1';
+            """;
+        await using var reader = await select.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return new PermalinkPendingMigrationState(null, 0, false);
+        }
+
+        return new PermalinkPendingMigrationState(
+            reader.IsDBNull(0) ? null : reader.GetString(0),
+            reader.GetInt64(1),
+            !reader.IsDBNull(2));
+    }
+
+    private async Task CheckpointMigrationAsync(
+        string? lastOperationId,
+        long directoriesSeen,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE PermalinkPendingMigration
+               SET last_operation_id = $last, directories_seen = $seen
+             WHERE name = 'v1';
+            """;
+        command.Parameters.AddWithValue("$last", (object?)lastOperationId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$seen", directoriesSeen);
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task CompleteMigrationAsync(
+        string? lastOperationId,
+        long directoriesSeen,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE PermalinkPendingMigration
+               SET last_operation_id = $last, directories_seen = $seen, completed_at = $completed
+             WHERE name = 'v1';
+            """;
+        command.Parameters.AddWithValue("$last", (object?)lastOperationId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$seen", directoriesSeen);
+        command.Parameters.AddWithValue("$completed", UtcNow());
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Increments the durable total-operations-ever-created counter, the one number a boot can still
+    /// report honestly for "how large is the journal" without enumerating it.
+    /// </summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    private async Task IncrementDirectoryCounterAsync(CancellationToken cancellationToken)
+    {
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = """
+                INSERT OR IGNORE INTO PermalinkPendingMigration
+                    (name, last_operation_id, directories_seen, completed_at, created_at)
+                VALUES ('v1', NULL, 0, NULL, $created);
+                """;
+            insert.Parameters.AddWithValue("$created", UtcNow());
+            _ = await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using var update = connection.CreateCommand();
+        update.CommandText = """
+            UPDATE PermalinkPendingMigration
+               SET directories_seen = directories_seen + 1
+             WHERE name = 'v1';
+            """;
+        _ = await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<long> ReadDirectoryCounterAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var select = connection.CreateCommand();
+        select.CommandText = "SELECT directories_seen FROM PermalinkPendingMigration WHERE name = 'v1';";
+        var value = await select.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        return value is long seen ? seen : 0;
+    }
+
+    private string UtcNow()
+    {
+        return _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture);
     }
 
     /// <summary>
@@ -423,7 +897,17 @@ internal sealed class PermalinkOperationJournal : IDisposable
         _pendingIndexLock.Dispose();
     }
 
-    private async Task PublishExactAsync(
+    /// <summary>Publishes bytes create-exclusively, tolerating an exact-byte-identical retry.</summary>
+    /// <param name="path">The destination path.</param>
+    /// <param name="bytes">The canonical bytes.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>
+    /// <see langword="true"/> when this call performed the create-exclusive publish;
+    /// <see langword="false"/> when the destination already held the exact same bytes. A caller that
+    /// counts creations (<see cref="IncrementDirectoryCounterAsync"/>) must use this to avoid
+    /// double-counting a retried publish that lands on the byte-compare branch.
+    /// </returns>
+    private async Task<bool> PublishExactAsync(
         string path,
         ReadOnlyMemory<byte> bytes,
         CancellationToken cancellationToken)
@@ -434,7 +918,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
             {
                 await _fileSystem.PublishImmutableAsync(path, bytes, cancellationToken)
                     .ConfigureAwait(false);
-                return;
+                return true;
             }
             catch (PermalinkException exception) when (exception.Code == "publish-exclusive")
             {
@@ -450,5 +934,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
                 "operation-id-reused",
                 $"Operation journal '{path}' already contains different immutable input.");
         }
+
+        return false;
     }
 }

@@ -757,10 +757,12 @@ internal sealed class PermalinkOperationJournal : IDisposable
             return new PermalinkPendingMigrationState(null, 0, false);
         }
 
+        var lastOperationIdIsNull = await reader.IsDBNullAsync(0, cancellationToken).ConfigureAwait(false);
+        var completedAtIsNull = await reader.IsDBNullAsync(2, cancellationToken).ConfigureAwait(false);
         return new PermalinkPendingMigrationState(
-            reader.IsDBNull(0) ? null : reader.GetString(0),
+            lastOperationIdIsNull ? null : reader.GetString(0),
             reader.GetInt64(1),
-            !reader.IsDBNull(2));
+            !completedAtIsNull);
     }
 
     private async Task CheckpointMigrationAsync(

@@ -218,10 +218,14 @@ namespace Jellyfin.Server
                         ContentTypeProvider = extensionProvider,
                         OnPrepareResponse = (context) =>
                         {
-                            if (Path.GetFileName(context.File.Name).Equals("index.html", StringComparison.Ordinal))
-                            {
-                                context.Context.Response.Headers.CacheControl = new StringValues("no-cache");
-                            }
+                            // Every asset gets an explicit policy. Sending no
+                            // Cache-Control at all left the 30 entry scripts
+                            // revalidating on every navigation, which on a phone
+                            // is 30 round trips before the app can start.
+                            context.Context.Response.Headers.CacheControl = new StringValues(
+                                WebClientCachePolicy.Resolve(
+                                    Path.GetFileName(context.File.Name),
+                                    context.Context.Request.QueryString.Value));
 
                             if (Path.GetFileName(context.File.Name).Equals("serviceworker.js", StringComparison.Ordinal))
                             {

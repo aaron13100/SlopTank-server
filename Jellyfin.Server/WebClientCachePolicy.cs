@@ -76,9 +76,13 @@ namespace Jellyfin.Server
         {
             // HtmlWebpackPlugin({ hash: true }) stamps the per-build compilation
             // hash as the query on every entry script and stylesheet, so those
-            // keep a stable file name but a URL that moves every build.
-            if (!string.IsNullOrEmpty(queryString)
-                && queryString.AsSpan().TrimStart('?').Length > 0)
+            // keep a stable file name but a URL that moves every build. The
+            // whole query must BE that hash, held to the same standard as a
+            // hashed file name: a query that merely exists proves nothing about
+            // the bytes behind it, and "?t=123" or "?v=2" would otherwise freeze
+            // an asset for a year under a URL that never moves again.
+            var query = queryString.AsSpan().TrimStart('?');
+            if (query.Length >= MinimumContentHashLength && IsHex(query))
             {
                 return true;
             }

@@ -66,6 +66,7 @@ namespace Emby.Server.Implementations.Session
 
         private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, string>> _activeLiveStreamSessions
             = new(StringComparer.OrdinalIgnoreCase);
+
         private readonly TranscodeProgressHealthTracker _transcodeProgressHealth = new();
 
         private Timer _idleTimer;

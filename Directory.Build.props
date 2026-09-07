@@ -3,6 +3,8 @@
 
   <PropertyGroup>
     <Nullable>enable</Nullable>
+    <!-- SlopTank does not publish its internal server assemblies as NuGet SDK packages. -->
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <PropertyGroup>

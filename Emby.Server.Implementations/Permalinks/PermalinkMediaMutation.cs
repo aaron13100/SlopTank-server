@@ -174,7 +174,7 @@ internal sealed class PermalinkMediaMutation
     /// <returns>The resulting value.</returns>
     public static PermalinkMutationBundle RequireBundle(PermalinkOperationDocument operation)
     {
-        return operation.Bundle
+        var bundle = operation.Bundle
             ?? new PermalinkMutationBundle(
                 [
                     new PermalinkMutationClaim(
@@ -187,6 +187,33 @@ internal sealed class PermalinkMediaMutation
                 [new PermalinkMutationPart("main", operation.SourcePath, operation.DestinationPath)],
                 Path.GetDirectoryName(operation.SourcePath)!,
                 null);
+
+        // Media operations with no aggregate closure have one predecessor,
+        // and the immutable prepared-old root is its authoritative value.
+        // Builds before 2026-09-07 accidentally persisted the capsule's
+        // genesis here instead. After one successful rewrite that claim is
+        // already consumed, leaving an otherwise exact Ready operation
+        // permanently pending and fencing playback. Repair only this
+        // unambiguous single-claim shape; a multi-capsule bundle does not
+        // preserve every aggregate's prepared head and must still fail closed.
+        if (operation.Kind == "media"
+            && bundle.Claims.Count == 1
+            && bundle.Claims[0] is { } claim
+            && claim.Kind == "content"
+            && claim.CapsuleId.Equals(operation.CapsuleId)
+            && claim.ItemId.Equals(operation.ItemId)
+            && !string.Equals(
+                claim.Predecessor,
+                operation.OldContentRoot,
+                StringComparison.Ordinal))
+        {
+            return bundle with
+            {
+                Claims = [claim with { Predecessor = operation.OldContentRoot }]
+            };
+        }
+
+        return bundle;
     }
 
     public async Task<PermalinkMutationResult> FinalizeAsync(

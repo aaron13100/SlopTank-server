@@ -1,0 +1,20 @@
+{
+  "schema": "org.sloptank.build-recipe/v1",
+  "artifact_kind": "server",
+  "working_directory": ".",
+  "dependency_locks": [
+    "Directory.Packages.props",
+    "global.json"
+  ],
+  "toolchain_constraints": {
+    "dotnet_sdk": "10.x",
+    "runtime": "osx-x64",
+    "self_contained": true
+  },
+  "commands": [
+    ["dotnet", "restore", "Jellyfin.sln"],
+    ["dotnet", "publish", "Jellyfin.Server/Jellyfin.Server.csproj", "--configuration", "Release", "--runtime", "osx-x64", "--self-contained", "true"]
+  ],
+  "output": "signed delivery directory containing SlopTank Server.app",
+  "license_policy": "inherited-server=version-unresolved;owner-increments=GPL-2.0-or-later;external-binary-distribution=NO-GO"
+}

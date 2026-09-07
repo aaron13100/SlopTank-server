@@ -380,6 +380,7 @@ internal sealed class PermalinkBindingIndex
               JOIN AnchorTokenCapsules a
                 ON a.capsule_id = COALESCE(o.capsule_id, f.capsule_id)
              WHERE b.PermalinkId = $id
+               AND (o.capsule_id IS NULL OR f.capsule_id = o.capsule_id)
              ORDER BY b.ItemId
             """;
         command.Parameters.AddWithValue("$id", permalinkId);
@@ -468,11 +469,26 @@ internal sealed class PermalinkBindingIndex
     {
         var matches = await FindResolutionBindingsAsync(permalinkId, cancellationToken)
             .ConfigureAwait(false);
-        return matches.SingleOrDefault(value => value.ItemId.Equals(itemId))
-            ?? throw new PermalinkException(
+        var itemMatches = matches.Where(value => value.ItemId.Equals(itemId)).ToList();
+        if (itemMatches.Count == 0)
+        {
+            throw new PermalinkException(
                 PermalinkErrorKind.Conflict,
                 "binding-missing",
-                $"Binding '{permalinkId}' for item '{itemId}' is missing.");
+                $"Binding '{permalinkId}' for item '{itemId}' is missing.",
+                itemId: itemId);
+        }
+
+        if (itemMatches.Count > 1)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "binding-ambiguous",
+                $"Binding '{permalinkId}' for item '{itemId}' resolves to more than one capsule.",
+                itemId: itemId);
+        }
+
+        return itemMatches[0];
     }
 
     private static Guid GenerateGuid()

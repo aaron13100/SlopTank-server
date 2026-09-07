@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "updated": "2026-07-23",
+  "summary": "Policy for scripts/check-product-identity.py: SlopTank is a fork of Jellyfin and must not present Jellyfin's product identity (name, logo, tagline, donation and support channels) as its own, per the upstream trademark policy at https://jellyfin.org/docs/project/branding/. Compatibility identifiers (wire protocol, plugin ABI, package names, persisted data identity) and GPL attribution are explicitly permitted and must never be flagged: removing those breaks running software or violates the licence, which is worse than the problem this guard solves.",
+  "compatibility": {
+    "matching": "identity_rules patterns are Python regexes applied case-insensitively to each line of every git-tracked text file; a rule with a paths regex only scans matching POSIX repo-relative paths. allowlist entries are tested first and win. forbidden_paths match paths, forbidden_blobs match the SHA-256 of file bytes.",
+    "forward_compat": "Additive only. New optional fields may be added at any time; readers ignore unknown fields. Removing or redefining a field requires a schema_version bump.",
+    "shipping": "This file and the checker ship byte-identically in both public product repositories (SlopTank and SlopTank-server). Rules scoped to paths that exist in only one repo are harmless in the other, so one shared policy covers both."
+  },
+  "identity_rules": [
+    {
+      "id": "PI-001",
+      "title": "Root README titled as Jellyfin",
+      "reason": "The repository front page presenting itself as Jellyfin is the clearest violation of the fork rule ('any fork ... must use a different name and logo'). A provenance line such as 'based on Jellyfin' remains welcome and unflagged.",
+      "paths": "^README\\.md$",
+      "pattern": "<h1[^>]*>[^<]*Jellyfin|^#{1,2} [^\\r\\n]*Jellyfin",
+      "must_flag": [
+        {"path": "README.md", "line": "<h1 align=\"center\">Jellyfin</h1>"},
+        {"path": "README.md", "line": "<h1 align=\"center\">Jellyfin Web</h1>"}
+      ],
+      "must_pass": [
+        {"path": "README.md", "line": "<h1 align=\"center\">SlopTank Server</h1>"},
+        {"path": "README.md", "line": "<h3 align=\"center\">A customized media server based on <a href=\"https://jellyfin.org\">Jellyfin</a></h3>"},
+        {"path": "README.md", "line": "<h3 align=\"center\">A customized web client based on <a href=\"https://jellyfin.org\">Jellyfin Web</a></h3>"},
+        {"path": "fuzz/README.md", "line": "# Jellyfin fuzzing"},
+        {"path": "CONTRIBUTORS.md", "line": "# Jellyfin Contributors"}
+      ]
+    },
+    {
+      "id": "PI-002",
+      "title": "Jellyfin brand-asset repository referenced",
+      "reason": "jellyfin-ux (and its @jellyfin/ux-web npm form) is upstream's branding asset repository; referencing it embeds the trademarked logo as this product's own. Functional packages such as @jellyfin/sdk are compatibility identifiers and stay.",
+      "pattern": "jellyfin[-_/ ]?ux\\b",
+      "must_flag": [
+        {"path": "README.md", "line": "<img alt=\"Logo Banner\" src=\"https://raw.githubusercontent.com/jellyfin/jellyfin-ux/master/branding/SVG/banner-logo-solid.svg?sanitize=true\"/>"},
+        {"path": "src/index.html", "line": "import '@jellyfin/ux-web/logo.svg';"}
+      ],
+      "must_pass": [
+        {"path": "src/lib/api.ts", "line": "import { Api } from '@jellyfin/sdk';"},
+        {"path": "package.json", "line": "\"jellyfin-apiclient\": \"^1.11.0\","}
+      ]
+    },
+    {
+      "id": "PI-003",
+      "title": "Donations directed to Jellyfin",
+      "reason": "Soliciting donations to Jellyfin, Inc. from this product's pages misdirects supporters and implies official status.",
+      "pattern": "opencollective\\.com/jellyfin",
+      "must_flag": [
+        {"path": "README.md", "line": "<a href=\"https://opencollective.com/jellyfin\">"}
+      ],
+      "must_pass": [
+        {"path": "package-lock.json", "line": "\"url\": \"https://opencollective.com/babel\""}
+      ]
+    },
+    {
+      "id": "PI-004",
+      "title": "Jellyfin project tagline used as ours",
+      "reason": "'The Free Software Media System' is Jellyfin's project tagline; shipping it as this product's description claims Jellyfin's identity.",
+      "pattern": "The Free Software Media System",
+      "must_flag": [
+        {"path": "README.md", "line": "<h3 align=\"center\">The Free Software Media System</h3>"},
+        {"path": "src/manifest.json", "line": "    \"description\": \"The Free Software Media System\","}
+      ],
+      "must_pass": [
+        {"path": "LICENSE", "line": "as published by the Free Software Foundation; either version 2"}
+      ]
+    },
+    {
+      "id": "PI-005",
+      "title": "Assembly identity claims Jellyfin",
+      "reason": "AssemblyProduct flows to /System/Info ProductName (the name every client displays) and AssemblyCompany claims the build's producer. AssemblyCopyright is mandatory GPL attribution and must stay verbatim; it is allowlisted, never flagged.",
+      "pattern": "Assembly(Product|Company)\\s*\\(\\s*\"[^\"]*Jellyfin",
+      "must_flag": [
+        {"path": "Emby.Photos/Properties/AssemblyInfo.cs", "line": "[assembly: AssemblyProduct(\"Jellyfin Server\")]"},
+        {"path": "Emby.Photos/Properties/AssemblyInfo.cs", "line": "[assembly: AssemblyCompany(\"Jellyfin Project\")]"}
+      ],
+      "must_pass": [
+        {"path": "SharedVersion.cs", "line": "[assembly: AssemblyProduct(\"SlopTank Server\")]"},
+        {"path": "Emby.Photos/Properties/AssemblyInfo.cs", "line": "[assembly: AssemblyCopyright(\"Copyright (c) 2019 Jellyfin Contributors. Code released under the GNU General Public License\")]"}
+      ]
+    },
+    {
+      "id": "PI-006",
+      "title": "API presented as the Jellyfin API",
+      "reason": "The Swagger document title and OpenAPI info title are user-visible product naming on /api-docs. Nominative references to the Jellyfin.Api namespace or prose about the API are unaffected: only the quoted display string is identity.",
+      "pattern": "\"Jellyfin API\"",
+      "must_flag": [
+        {"path": "Jellyfin.Server/Extensions/ApiApplicationBuilderExtensions.cs", "line": "                    c.DocumentTitle = \"Jellyfin API\";"},
+        {"path": "Jellyfin.Server/Extensions/ApiServiceCollectionExtensions.cs", "line": "                    Title = \"Jellyfin API\","}
+      ],
+      "must_pass": [
+        {"path": "Jellyfin.Server/Extensions/ApiServiceCollectionExtensions.cs", "line": "        /// Extension method for adding the Jellyfin API to the service collection."},
+        {"path": "Jellyfin.Server/Jellyfin.Server.csproj", "line": "    <ProjectReference Include=\"../Jellyfin.Api/Jellyfin.Api.csproj\" />"}
+      ]
+    },
+    {
+      "id": "PI-007",
+      "title": "Server localized UI copy names Jellyfin",
+      "reason": "Emby.Server.Implementations/Localization/Core strings are user-visible product copy (update notices, the startup splash). Upstream merges reintroduce 'Jellyfin Server' in dozens of locales at once. Scoped to the locale JSON files: the Localization C# code legitimately uses Jellyfin in internal identifiers and comments (class B, not user-visible identity).",
+      "paths": "^Emby\\.Server\\.Implementations/Localization/Core/[^/]+\\.json$",
+      "pattern": "Jellyfin",
+      "must_flag": [
+        {"path": "Emby.Server.Implementations/Localization/Core/en-US.json", "line": "    \"NewVersionIsAvailable\": \"A new version of Jellyfin Server is available for download.\","},
+        {"path": "Emby.Server.Implementations/Localization/Core/en-US.json", "line": "    \"StartupEmbyServerIsLoading\": \"Jellyfin Server is loading. Please try again shortly.\","}
+      ],
+      "must_pass": [
+        {"path": "Emby.Server.Implementations/Localization/Core/en-US.json", "line": "    \"HeaderFavoriteAlbums\": \"Favorite Albums\","}
+      ]
+    },
+    {
+      "id": "PI-008",
+      "title": "Web app identity names Jellyfin",
+      "reason": "src/index.html (page title, application-name) and src/manifest.json (PWA name, short_name, description) are the web client's own identity surfaces.",
+      "paths": "^src/(index\\.html|manifest\\.json)$",
+      "pattern": "Jellyfin",
+      "must_flag": [
+        {"path": "src/index.html", "line": "    <title>Jellyfin</title>"},
+        {"path": "src/index.html", "line": "    <meta name=\"application-name\" content=\"Jellyfin\">"},
+        {"path": "src/manifest.json", "line": "    \"name\": \"Jellyfin\","}
+      ],
+      "must_pass": [
+        {"path": "src/manifest.json", "line": "    \"description\": \"Your media library, streamed to any screen\","}
+      ]
+    },
+    {
+      "id": "PI-009",
+      "title": "Web localized UI strings name Jellyfin",
+      "reason": "src/strings is the web client's user-visible copy in every locale; upstream merges reintroduce Jellyfin-branded strings there.",
+      "paths": "^src/strings/",
+      "pattern": "Jellyfin",
+      "must_flag": [
+        {"path": "src/strings/en-us.json", "line": "    \"StartupMessage\": \"Jellyfin Server is loading. Please try again shortly.\","}
+      ],
+      "must_pass": [
+        {"path": "src/strings/en-us.json", "line": "    \"SettingsSaved\": \"Settings saved.\","}
+      ]
+    }
+  ],
+  "forbidden_paths": [
+    {
+      "id": "PI-100",
+      "title": "Jellyfin-named logo asset",
+      "reason": "A tracked file whose basename is jellyfin.svg/ico/png is upstream's fin logo shipping under its own name (e.g. the Swagger header logo at Jellyfin.Server/wwwroot/api-docs/jellyfin.svg). Nominative asset names for upstream's own plugins (jellyfin-plugin-*.svg) do not match.",
+      "pattern": "(^|/)jellyfin\\.(svg|ico|png)$",
+      "must_flag": ["Jellyfin.Server/wwwroot/api-docs/jellyfin.svg"],
+      "must_pass": [
+        "MediaBrowser.Providers/Plugins/Tmdb/jellyfin-plugin-tmdb.svg",
+        "src/assets/favicons/sloptank-favicon.ico",
+        "Jellyfin.Server/Jellyfin.Server.ico"
+      ]
+    }
+  ],
+  "forbidden_blobs": [
+    {
+      "id": "PI-200",
+      "title": "Upstream Jellyfin.Server.ico (trademarked fin application icon)",
+      "reason": "The upstream application icon is the trademarked fin mark itself. The filename Jellyfin.Server.ico stays (it tracks the class C project name); the bytes must stay replaced. Matched by hash so an upstream merge cannot smuggle it back under any path.",
+      "sha256": "173ccdccb7daa2e8bb908427e4c70ed0b2058eb07d9a813def4381c40ab25267"
+    },
+    {
+      "id": "PI-201",
+      "title": "Upstream api-docs jellyfin.svg (trademarked fin Swagger logo)",
+      "reason": "The fin logo formerly served to browsers as the Swagger UI header. Matched by hash so it cannot return under a renamed path.",
+      "sha256": "5a46029803e54f88acaac8f3f8f7a8b88ad32dffad395e993a1b6e4c5e183a0f"
+    }
+  ],
+  "allowlist": [
+    {
+      "id": "PIX-001",
+      "reason": "GPL-2.0 licence text is mandatory attribution and must stay verbatim (class D).",
+      "path_pattern": "^LICENSE$"
+    },
+    {
+      "id": "PIX-002",
+      "reason": "CONTRIBUTORS.md is GPL attribution of upstream authorship and must stay (class D).",
+      "path_pattern": "^CONTRIBUTORS\\.md$"
+    },
+    {
+      "id": "PIX-003",
+      "reason": "AssemblyCopyright carries the mandatory upstream GPL copyright notice; stripping it is a licence violation (class D).",
+      "line_pattern": "AssemblyCopyright"
+    },
+    {
+      "id": "PIX-004",
+      "reason": "Provenance statements ('based on Jellyfin', 'forked from Jellyfin') are accurate descriptive use the trademark policy explicitly permits, and honesty about the fork is wanted (class D).",
+      "path_pattern": "^README\\.md$",
+      "line_pattern": "based on|forked from"
+    },
+    {
+      "id": "PIX-005",
+      "reason": "This policy file necessarily contains the forbidden strings as its own patterns and samples.",
+      "path_pattern": "(^|/)product-identity-manifest\\.json$"
+    }
+  ],
+  "clean_samples": [
+    {"path": "src/utils/auth.ts", "line": "const scheme = `MediaBrowser Client=\"SlopTank\", Device=\"web\"`;", "why": "MediaBrowser auth scheme token: the server requires this literal; renaming it breaks every request (class C)."},
+    {"path": "Jellyfin.Server.Implementations/Security/AuthorizationContext.cs", "line": "var token = headers[\"X-Emby-Token\"];", "why": "Legacy client auth headers are wire protocol (class C)."},
+    {"path": "package.json", "line": "\"@jellyfin/sdk\": \"unstable\",", "why": "Third-party npm package specifier; not our branding (class C)."},
+    {"path": "package.json", "line": "\"jellyfin-apiclient\": \"^1.11.0\",", "why": "Third-party npm package specifier; not our branding (class C)."},
+    {"path": "src/components/router/appRouter.js", "line": "window.Emby.Page = appRouter;", "why": "Installed server plugins call this global at runtime (class C)."},
+    {"path": "src/Jellyfin.Networking/AutoDiscoveryHost.cs", "line": "if (text.Contains(\"who is JellyfinServer?\", StringComparison.OrdinalIgnoreCase))", "why": "UDP discovery handshake literal every third-party client sends (class C)."},
+    {"path": "Jellyfin.Server/Program.cs", "line": "config.AddEnvironmentVariables(\"JELLYFIN_\");", "why": "JELLYFIN_* environment variables are deployed configuration surface (class C)."},
+    {"path": "src/Jellyfin.Database/Jellyfin.Database.Providers.Sqlite/SqliteDatabaseProvider.cs", "line": "private const string DbFilename = \"jellyfin.db\";", "why": "Persisted data identity; renaming requires a live-data migration (class C)."},
+    {"path": "src/elements/emby-input/emby-input.scss", "line": ".emby-input { color: inherit; }", "why": "emby-* CSS classes are a styling contract with user Custom CSS (class C)."},
+    {"path": "src/apps/dashboard/routes/plugins/plugin.tsx", "line": "const TRUSTED_REPO_URL = 'https://repo.jellyfin.org/';", "why": "Must match the server's default plugin repository (class C)."},
+    {"path": "Jellyfin.Server/Migrations/Routines/20250420090000_AddDefaultPluginRepository.cs", "line": "Name = \"Jellyfin Stable\",", "why": "Names Jellyfin's real plugin repository, which genuinely is Jellyfin's (class C/D)."},
+    {"path": "src/apps/dashboard/constants/helpLinks.ts", "line": "url: 'https://jellyfin.org/docs/general/networking/',", "why": "Documents the behaviour of the upstream server software; descriptive use (class D)."},
+    {"path": ".github/workflows/__quality_checks.yml", "line": "dotnet restore server/Jellyfin.Server/Jellyfin.Server.csproj", "why": "CI provisions the real server fork whose project paths are class C names."}
+  ]
+}

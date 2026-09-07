@@ -44,15 +44,15 @@ namespace Jellyfin.Server.Extensions
                 })
                 .UseSwaggerUI(c =>
                 {
-                    c.DocumentTitle = "Jellyfin API";
-                    c.SwaggerEndpoint($"/{baseUrl}api-docs/openapi.json", "Jellyfin API");
+                    c.DocumentTitle = "SlopTank API";
+                    c.SwaggerEndpoint($"/{baseUrl}api-docs/openapi.json", "SlopTank API");
                     c.InjectStylesheet($"/{baseUrl}api-docs/swagger/custom.css");
                     c.RoutePrefix = "api-docs/swagger";
                     c.UseRequestInterceptor("""(req) => { req.headers['Authorization'] = `MediaBrowser Token=\"${req.headers['Authorization']}\"`; return req; }""");
                 })
                 .UseReDoc(c =>
                 {
-                    c.DocumentTitle = "Jellyfin API";
+                    c.DocumentTitle = "SlopTank API";
                     c.SpecUrl($"/{baseUrl}api-docs/openapi.json");
                     c.InjectStylesheet($"/{baseUrl}api-docs/redoc/custom.css");
                     c.RoutePrefix = "api-docs/redoc";

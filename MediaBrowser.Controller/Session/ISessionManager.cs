@@ -286,6 +286,14 @@ namespace MediaBrowser.Controller.Session
         void ClearTranscodingInfo(string deviceId);
 
         /// <summary>
+        /// Gets whether tracked session state contains a transcode that has
+        /// remained at zero output progress since the threshold.
+        /// </summary>
+        /// <param name="thresholdUtc">Latest acceptable first-zero observation.</param>
+        /// <returns><see langword="true"/> when a tracked transcode is stalled.</returns>
+        bool HasTranscodeAtZeroProgressSince(DateTime thresholdUtc);
+
+        /// <summary>
         /// Gets the session.
         /// </summary>
         /// <param name="deviceId">The device identifier.</param>

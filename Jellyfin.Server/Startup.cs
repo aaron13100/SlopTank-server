@@ -17,10 +17,12 @@ using Jellyfin.Networking;
 using Jellyfin.Networking.HappyEyeballs;
 using Jellyfin.Server.Extensions;
 using Jellyfin.Server.HealthChecks;
+using Jellyfin.Server.Implementations.Health;
 using Jellyfin.Server.Implementations.Extensions;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Extensions;
+using MediaBrowser.Controller.Health;
 using MediaBrowser.XbmcMetadata;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -126,6 +128,8 @@ namespace Jellyfin.Server
 
             services.AddHealthChecks()
                 .AddCheck<DbContextFactoryHealthCheck<JellyfinDbContext>>(nameof(JellyfinDbContext));
+            services.AddSingleton<IDeepHealthProbe, SystemDeepHealthProbe>();
+            services.AddSingleton<IDeepHealthService, DeepHealthService>();
 
             services.AddHlsPlaylistGenerator();
             services.AddLiveTvServices();

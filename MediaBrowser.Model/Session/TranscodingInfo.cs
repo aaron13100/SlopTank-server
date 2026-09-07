@@ -1,5 +1,6 @@
 #nullable disable
 
+using System.Text.Json.Serialization;
 using MediaBrowser.Model.Entities;
 
 namespace MediaBrowser.Model.Session;
@@ -9,6 +10,13 @@ namespace MediaBrowser.Model.Session;
 /// </summary>
 public class TranscodingInfo
 {
+    /// <summary>
+    /// Gets or sets a value indicating whether FFmpeg has produced any output.
+    /// This is internal tracked health state and is never serialized to clients.
+    /// </summary>
+    [JsonIgnore]
+    public bool HasOutputProgress { get; set; }
+
     /// <summary>
     /// Gets or sets the thread count used for encoding.
     /// </summary>

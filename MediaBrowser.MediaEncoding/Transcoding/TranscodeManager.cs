@@ -350,6 +350,9 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
 
             _sessionManager.ReportTranscodingInfo(deviceId, new TranscodingInfo
             {
+                HasOutputProgress = (ticks ?? 0) > 0
+                                    || (percentComplete ?? 0) > 0
+                                    || (bytesTranscoded ?? 0) > 0,
                 Bitrate = bitRate ?? state.TotalOutputBitrate,
                 AudioCodec = audioCodec,
                 VideoCodec = videoCodec,
@@ -644,6 +647,10 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         job.ExitCode = process.ExitCode;
 
         ReportTranscodingProgress(job, state, null, null, null, null, null);
+        if (!string.IsNullOrWhiteSpace(state.Request.DeviceId))
+        {
+            _sessionManager.ClearTranscodingInfo(state.Request.DeviceId);
+        }
 
         _logger.LogDebug("Disposing stream resources");
         state.Dispose();

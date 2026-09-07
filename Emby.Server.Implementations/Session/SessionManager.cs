@@ -66,6 +66,7 @@ namespace Emby.Server.Implementations.Session
 
         private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, string>> _activeLiveStreamSessions
             = new(StringComparer.OrdinalIgnoreCase);
+        private readonly TranscodeProgressHealthTracker _transcodeProgressHealth = new();
 
         private Timer _idleTimer;
         private Timer _inactiveTimer;
@@ -1919,6 +1920,15 @@ namespace Emby.Server.Implementations.Session
         /// <inheritdoc />
         public void ReportTranscodingInfo(string deviceId, TranscodingInfo info)
         {
+            if (info is null)
+            {
+                _transcodeProgressHealth.Clear(deviceId);
+            }
+            else
+            {
+                _transcodeProgressHealth.Report(deviceId, info.HasOutputProgress, DateTime.UtcNow);
+            }
+
             var session = Sessions.FirstOrDefault(i =>
                 string.Equals(i.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
 
@@ -1933,6 +1943,10 @@ namespace Emby.Server.Implementations.Session
         {
             ReportTranscodingInfo(deviceId, null);
         }
+
+        /// <inheritdoc />
+        public bool HasTranscodeAtZeroProgressSince(DateTime thresholdUtc)
+            => _transcodeProgressHealth.HasZeroProgressSince(thresholdUtc);
 
         /// <inheritdoc />
         public SessionInfo GetSession(string deviceId, string client, string version)

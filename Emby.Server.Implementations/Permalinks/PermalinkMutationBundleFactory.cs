@@ -72,20 +72,24 @@ internal sealed class PermalinkMutationBundleFactory
             }
 
             contentRoot ??= reservation.RootPath;
-            var predecessor = reservation.ContentRoot;
+            var capsulePath = await _capsules.PublishGenesisAsync(
+                reservation,
+                reservation.RootPath,
+                candidate.Path,
+                cancellationToken).ConfigureAwait(false);
+            var snapshot = await _capsules.ReadValidatedAsync(
+                capsulePath,
+                reservation.CapsuleId,
+                reservation.ItemKind,
+                cancellationToken).ConfigureAwait(false);
+            // A reservation's content root is its immutable genesis. Claims
+            // must follow the folded capsule head or the first committed
+            // rewrite permanently consumes the only predecessor subsequent
+            // rewrites can see.
+            var predecessor = snapshot.ContentHead.ContentRoot;
             var claimKind = candidate.Id.Equals(item.Id) ? "content" : "aggregate";
             if (pathMutation)
             {
-                var capsulePath = await _capsules.PublishGenesisAsync(
-                    reservation,
-                    reservation.RootPath,
-                    candidate.Path,
-                    cancellationToken).ConfigureAwait(false);
-                var snapshot = await _capsules.ReadValidatedAsync(
-                    capsulePath,
-                    reservation.CapsuleId,
-                    reservation.ItemKind,
-                    cancellationToken).ConfigureAwait(false);
                 predecessor = snapshot.ContentHead.PathAssignment.EventId.ToString("D");
                 claimKind = "path";
             }

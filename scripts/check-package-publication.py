@@ -7,7 +7,6 @@ import xml.etree.ElementTree as ET
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-CENTRAL_PROPS = REPO_ROOT / "Directory.Build.props"
 FORBIDDEN_PACKAGE_FIELDS = {
     "AllowedOutputExtensionsInPackageBuildOutputFolder",
     "Authors",
@@ -25,16 +24,18 @@ def _local_name(tag):
     return tag.rsplit("}", 1)[-1]
 
 
-def _parse(path):
+def _parse(path, repo_root):
     try:
         return ET.parse(path).getroot()
     except (OSError, ET.ParseError) as exc:
-        raise RuntimeError("cannot parse {}: {}".format(path.relative_to(REPO_ROOT), exc)) from exc
+        raise RuntimeError("cannot parse {}: {}".format(path.relative_to(repo_root), exc)) from exc
 
 
-def check_repository():
+def check_repository(repo_root=REPO_ROOT, central_props=None):
+    repo_root = pathlib.Path(repo_root)
+    central_props = pathlib.Path(central_props) if central_props else repo_root / "Directory.Build.props"
     violations = []
-    root = _parse(CENTRAL_PROPS)
+    root = _parse(central_props, repo_root)
     central_values = []
     for group in root:
         if _local_name(group.tag) != "PropertyGroup" or group.attrib.get("Condition"):
@@ -47,11 +48,11 @@ def check_repository():
             "Directory.Build.props must declare exactly one unconditional <IsPackable>false</IsPackable>"
         )
 
-    for project in sorted(REPO_ROOT.rglob("*.csproj")):
+    for project in sorted(repo_root.rglob("*.csproj")):
         if any(part in {"bin", "obj"} for part in project.parts):
             continue
-        project_root = _parse(project)
-        relative = project.relative_to(REPO_ROOT)
+        project_root = _parse(project, repo_root)
+        relative = project.relative_to(repo_root)
         for element in project_root.iter():
             field = _local_name(element.tag)
             value = (element.text or "").strip()

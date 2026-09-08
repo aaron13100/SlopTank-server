@@ -234,7 +234,7 @@ internal sealed class PermalinkContentDigestCache
             {
                 var shardPath = Path.GetDirectoryName(entryPath)!;
                 Directory.CreateDirectory(shardPath);
-                if (!File.Exists(entryPath) && !ShardHasCapacity(shardPath))
+                if (!File.Exists(entryPath) && !TryMakeRoomInShard(shardPath))
                 {
                     _logger.LogWarning(
                         "Content digest shard {ShardPath} reached its {MaximumEntries} entry bound; {MediaPath} will not be cached",
@@ -287,18 +287,38 @@ internal sealed class PermalinkContentDigestCache
         }
     }
 
-    private bool ShardHasCapacity(string shardPath)
+    private bool TryMakeRoomInShard(string shardPath)
     {
         var count = 0;
-        foreach (var unused in Directory.EnumerateFileSystemEntries(shardPath))
+        string? evictionCandidate = null;
+        foreach (var existingPath in Directory.EnumerateFileSystemEntries(shardPath))
         {
             count++;
+            if (evictionCandidate is null
+                && string.Equals(Path.GetExtension(existingPath), ".json", StringComparison.Ordinal)
+                && File.Exists(existingPath)
+                && (File.GetAttributes(existingPath) & FileAttributes.ReparsePoint) == 0)
+            {
+                evictionCandidate = existingPath;
+            }
+
             if (count >= _maximumEntriesPerShard)
             {
-                return false;
+                break;
             }
         }
 
+        if (count < _maximumEntriesPerShard)
+        {
+            return true;
+        }
+
+        if (evictionCandidate is null)
+        {
+            return false;
+        }
+
+        File.Delete(evictionCandidate);
         return true;
     }
 

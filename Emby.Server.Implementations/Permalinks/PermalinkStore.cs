@@ -66,6 +66,19 @@ internal sealed class PermalinkStore : IPermalinkStore
     }
 
     /// <inheritdoc />
+    public async Task PrepareContentIdentityAsync(
+        string path,
+        string itemKind,
+        CancellationToken cancellationToken)
+    {
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        EnsureReachableOrVirtualSeason(path, itemKind);
+        _ = ResolveRoot(path);
+        _ = await _fileSystem.GetOrCreateAnchorTokenAsync(path, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<PermalinkStoredState> EnsureAsync(
         PermalinkStoreRequest request,
         CancellationToken cancellationToken)
@@ -82,7 +95,7 @@ internal sealed class PermalinkStore : IPermalinkStore
         await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
         tAvailable = stepWatch.ElapsedMilliseconds;
         stepWatch.Restart();
-        EnsureReachableOrVirtualSeason(request);
+        EnsureReachableOrVirtualSeason(request.Path, request.ItemKind);
         var root = ResolveRoot(request.Path);
         var anchorToken = await _fileSystem.GetOrCreateAnchorTokenAsync(
             request.Path,
@@ -222,26 +235,26 @@ internal sealed class PermalinkStore : IPermalinkStore
             cancellationToken).ConfigureAwait(false);
     }
 
-    private void EnsureReachableOrVirtualSeason(PermalinkStoreRequest request)
+    private void EnsureReachableOrVirtualSeason(string path, string itemKind)
     {
-        if (File.Exists(request.Path) || Directory.Exists(request.Path))
+        if (File.Exists(path) || Directory.Exists(path))
         {
             return;
         }
 
-        if (request.ItemKind == "Season"
-            && request.Path.Contains(
+        if (itemKind == "Season"
+            && path.Contains(
                 $"{Path.DirectorySeparatorChar}permalink-virtual-seasons{Path.DirectorySeparatorChar}",
                 StringComparison.Ordinal))
         {
-            _fileSystem.CreateDirectoryDurable(request.Path);
+            _fileSystem.CreateDirectoryDurable(path);
             return;
         }
 
         throw new PermalinkException(
             PermalinkErrorKind.Unavailable,
             "content-unreachable",
-            $"Permalink content is unreachable at '{request.Path}'.");
+            $"Permalink content is unreachable at '{path}'.");
     }
 
     private string ResolveRoot(string path)

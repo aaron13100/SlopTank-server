@@ -82,6 +82,18 @@ public sealed class PermalinkManager : IPermalinkManager
             // lifetime so a browser navigation cannot strand a half-minted alias.
             var mutationCancellationToken = CancellationToken.None;
             var path = ResolveLocalPath(item);
+            if (IsContentItem(item))
+            {
+                // Anchor creation changes macOS ctime. Establish it before evidence so the
+                // digest is cached against the stable post-anchor token on the genesis call.
+                // Aggregates stay on the store-owned path: a virtual Season directory may not
+                // exist until the store validates and creates it, and aggregates hash no bytes.
+                await _store.PrepareContentIdentityAsync(
+                    path,
+                    item.GetType().Name,
+                    mutationCancellationToken).ConfigureAwait(false);
+            }
+
             var evidence = item switch
             {
                 Series series => await ComputeSeriesAsync(

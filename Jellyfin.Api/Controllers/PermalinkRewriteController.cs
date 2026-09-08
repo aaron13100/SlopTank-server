@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Extensions;
+using MediaBrowser.Common.Api;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
@@ -105,6 +106,7 @@ public sealed class PermalinkRewriteController : BaseJellyfinApiController
     /// <param name="cancellationToken">The request cancellation token.</param>
     /// <returns>The folded continued operation state.</returns>
     [HttpPost("{operationId}/ResolveOperation")]
+    [Authorize(Policy = Policies.RequiresElevation)]
     public Task<ActionResult<PermalinkMutationResult>> ResolveOperation(
         [FromRoute] Guid operationId,
         [FromBody] PermalinkOperationResolutionRequest request,

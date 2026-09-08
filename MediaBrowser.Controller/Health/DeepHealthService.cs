@@ -143,6 +143,10 @@ public sealed class DeepHealthService : IDeepHealthService
         {
             return Result("ffmpeg", "degraded", "not_executable");
         }
+        catch
+        {
+            return Result("ffmpeg", "unknown", "internal_error");
+        }
     }
 
     private DeepHealthCheck CheckTranscodeProgress(DateTime now)

@@ -32,32 +32,40 @@ internal sealed class PermalinkPlaybackDocumentStore
         string handle,
         CancellationToken cancellationToken)
     {
-        await _recovery.RecoverAsync(cancellationToken).ConfigureAwait(false);
-        var resolutionRoot = Path.Combine(
-            _authority.Root,
-            ".sloptank",
-            "permalink-resolution-leases",
-            handle);
-        var source = new[] { "playback-lease.json", "lease.json" }
-            .Select(fileName => Path.Combine(resolutionRoot, fileName))
-            .FirstOrDefault(File.Exists)
-            ?? throw new PermalinkException(
-                PermalinkErrorKind.Conflict,
-                "playback-lease-missing",
-                $"Playback resolution lease '{handle}' was not durably published.");
-        var root = Path.Combine(
-            _authority.Root,
-            ".sloptank",
-            "permalink-playback-leases",
-            handle);
-        _fileSystem.CreateDirectoryDurable(root);
-        var document = CanonicalJson.Deserialize<PermalinkLeaseDocument>(
-            await File.ReadAllBytesAsync(source, cancellationToken).ConfigureAwait(false),
-            source);
-        await PublishAsync(
-            Path.Combine(root, "lease.json"),
-            document,
-            cancellationToken).ConfigureAwait(false);
+        var admissionLock = _recovery.GetAdmissionLock(handle);
+        await admissionLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var resolutionRoot = Path.Combine(
+                _authority.Root,
+                ".sloptank",
+                "permalink-resolution-leases",
+                handle);
+            var source = new[] { "playback-lease.json", "lease.json" }
+                .Select(fileName => Path.Combine(resolutionRoot, fileName))
+                .FirstOrDefault(File.Exists)
+                ?? throw new PermalinkException(
+                    PermalinkErrorKind.Conflict,
+                    "playback-lease-missing",
+                    $"Playback resolution lease '{handle}' was not durably published.");
+            var root = Path.Combine(
+                _authority.Root,
+                ".sloptank",
+                "permalink-playback-leases",
+                handle);
+            _fileSystem.CreateDirectoryDurable(root);
+            var document = CanonicalJson.Deserialize<PermalinkLeaseDocument>(
+                await File.ReadAllBytesAsync(source, cancellationToken).ConfigureAwait(false),
+                source);
+            await PublishAsync(
+                Path.Combine(root, "lease.json"),
+                document,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            admissionLock.Release();
+        }
     }
 
     public async Task PublishAsync<T>(

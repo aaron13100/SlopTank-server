@@ -17,7 +17,6 @@ namespace Emby.Server.Implementations.Permalinks;
 internal sealed class PermalinkPlaybackStateStore
 {
     private readonly ConcurrentDictionary<string, ActivePlaybackSession> _activeSessions = new();
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
     private readonly PermalinkAuthorityStore _authority;
     private readonly PermalinkPlaybackDocumentStore _documents;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
@@ -41,9 +40,11 @@ internal sealed class PermalinkPlaybackStateStore
         _timeProvider = timeProvider;
     }
 
-    public Task RecoverAsync(CancellationToken cancellationToken)
+    public async Task RecoverAsync(CancellationToken cancellationToken)
     {
-        return _recovery.RecoverAsync(cancellationToken);
+        _ = await _recovery.ReclaimAsync(
+            IsActiveHandle,
+            cancellationToken).ConfigureAwait(false);
     }
 
     public bool IsActiveSession(string handle, string playbackSessionId, Guid userId)
@@ -76,8 +77,7 @@ internal sealed class PermalinkPlaybackStateStore
                 "Playback session, plan entries, and an in-range queue ordinal are required.");
         }
 
-        await RecoverAsync(cancellationToken).ConfigureAwait(false);
-        var admissionLock = _locks.GetOrAdd(handle, _ => new SemaphoreSlim(1, 1));
+        var admissionLock = GetAdmissionLock(handle);
         await admissionLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -290,6 +290,16 @@ internal sealed class PermalinkPlaybackStateStore
             ".sloptank",
             "permalink-playback-leases",
             handle);
+    }
+
+    private bool IsActiveHandle(string handle)
+    {
+        return _activeSessions.ContainsKey(handle);
+    }
+
+    private SemaphoreSlim GetAdmissionLock(string handle)
+    {
+        return _recovery.GetAdmissionLock(handle);
     }
 
     private static PermalinkException Conflict(string code, string message)

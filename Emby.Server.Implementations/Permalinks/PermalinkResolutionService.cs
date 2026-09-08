@@ -58,6 +58,13 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
             throw Conflict("purpose-invalid", $"Unknown permalink purpose '{purpose}'.");
         }
 
+        if (purpose == "playback")
+        {
+            // Retention is request-triggered so it cannot create load while the store is idle.
+            // The reclaimer is disabled by default and every enabled pass has a hard entry cap.
+            await _playback.RecoverAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         var candidates = await _bindings.FindResolutionBindingsAsync(
             permalinkId,
             cancellationToken).ConfigureAwait(false);
@@ -142,6 +149,7 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
             userId,
             cancellationToken,
             handle).ConfigureAwait(false);
+        await _playback.RecoverAsync(cancellationToken).ConfigureAwait(false);
         await _playbackDocuments.PublishLeaseAsync(envelope.Handle, cancellationToken)
             .ConfigureAwait(false);
         return envelope;

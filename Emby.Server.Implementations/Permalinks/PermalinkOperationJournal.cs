@@ -55,8 +55,8 @@ internal sealed class PermalinkOperationJournal : IDisposable
     public const string OperationJournalRetentionKey = "Permalinks:OperationJournalRetention";
 
     /// <summary>
-    /// The hard ceiling on operation directories examined (and therefore moved) by one automatic
-    /// archive pass.
+    /// The hard ceiling on indexed candidates selected and exact operation directories examined by
+    /// one automatic archive pass.
     /// </summary>
     public const string OperationJournalArchiveMaximumOperationsPerPassKey =
         "Permalinks:OperationJournalArchiveMaximumOperationsPerPass";
@@ -361,6 +361,15 @@ internal sealed class PermalinkOperationJournal : IDisposable
         PermalinkOperationPhase document,
         CancellationToken cancellationToken)
     {
+        if (phase.Disposition == PermalinkPhaseDisposition.Terminal)
+        {
+            await QueueArchiveCandidateAsync(
+                operationId,
+                phase,
+                document,
+                cancellationToken).ConfigureAwait(false);
+        }
+
         await PublishExactAsync(
             Path.Combine(GetActiveOperationPath(operationId), phase.Name + ".json"),
             CanonicalJson.Serialize(document),
@@ -1017,6 +1026,78 @@ internal sealed class PermalinkOperationJournal : IDisposable
         return _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture);
     }
 
+    private async Task QueueArchiveCandidateAsync(
+        Guid operationId,
+        PermalinkPhase phase,
+        PermalinkOperationPhase document,
+        CancellationToken cancellationToken)
+    {
+        if (document.OperationId != operationId
+            || !string.Equals(document.State, phase.Name, StringComparison.Ordinal)
+            || !DateTimeOffset.TryParse(
+                document.CreatedAt,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind,
+                out var terminalAt))
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "operation-terminal-invalid",
+                $"Operation '{operationId}' has invalid terminal candidate evidence.");
+        }
+
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        var now = UtcNow();
+        var canonicalTerminalAt = terminalAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection
+            .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT OR IGNORE INTO PermalinkOperationArchiveCandidates
+                    (operation_id, terminal_phase, terminal_at, next_attempt_at,
+                     attempts, created_at, updated_at)
+                VALUES ($operation, $phase, $terminal, $next, 0, $created, $updated);
+                """;
+            insert.Parameters.AddWithValue("$operation", operationId.ToString("D"));
+            insert.Parameters.AddWithValue("$phase", phase.Name);
+            insert.Parameters.AddWithValue("$terminal", canonicalTerminalAt);
+            insert.Parameters.AddWithValue("$next", now);
+            insert.Parameters.AddWithValue("$created", now);
+            insert.Parameters.AddWithValue("$updated", now);
+            _ = await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using var select = connection.CreateCommand();
+        select.Transaction = transaction;
+        select.CommandText = """
+            SELECT terminal_phase, terminal_at
+              FROM PermalinkOperationArchiveCandidates
+             WHERE operation_id = $operation;
+            """;
+        select.Parameters.AddWithValue("$operation", operationId.ToString("D"));
+        await using var reader = await select.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            || !string.Equals(reader.GetString(0), phase.Name, StringComparison.Ordinal)
+            || !DateTimeOffset.TryParse(
+                reader.GetString(1),
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind,
+                out var recordedTerminalAt)
+            || recordedTerminalAt != terminalAt)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "operation-archive-candidate-conflict",
+                $"Operation '{operationId}' has conflicting terminal archive evidence.");
+        }
+
+        await reader.DisposeAsync().ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Builds the pending index now and returns the operations it holds.
     ///
@@ -1056,8 +1137,8 @@ internal sealed class PermalinkOperationJournal : IDisposable
     }
 
     /// <summary>
-    /// Moves old terminal operation directories from the hot journal to the month-partitioned
-    /// archive without rewriting any record.
+    /// Moves indexed old terminal operation directories from the hot journal to the
+    /// month-partitioned archive without rewriting any record or listing the flat journal root.
     /// </summary>
     /// <remarks>
     /// This runs only after the pending index has been primed and abandoned work reconciled. Each
@@ -1081,124 +1162,163 @@ internal sealed class PermalinkOperationJournal : IDisposable
                 "The permalink hot operation journal root is a symbolic link and was refused.");
         }
 
-        if (!Directory.Exists(operationsRoot))
-        {
-            return new PermalinkOperationArchiveResult(
-                0,
-                0,
-                0,
-                0,
-                0,
-                _operationJournalArchiveMaximumOperationsPerPass);
-        }
-
         var examined = 0;
         var archived = 0;
         var retained = 0;
         var refused = 0;
         var failed = 0;
-        var cutoff = _timeProvider.GetUtcNow() - _operationJournalRetention;
-        foreach (var enumeratedPath in Directory.EnumerateDirectories(operationsRoot)
-                     .Take(_operationJournalArchiveMaximumOperationsPerPass))
+        var now = _timeProvider.GetUtcNow();
+        var cutoff = now - _operationJournalRetention;
+        var candidates = await ReadDueArchiveCandidatesAsync(now, cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var candidate in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
             examined++;
-            var name = Path.GetFileName(enumeratedPath);
-            if (!Guid.TryParseExact(name, "D", out var operationId)
-                || !string.Equals(name, operationId.ToString("D"), StringComparison.Ordinal))
+            if (!Guid.TryParseExact(candidate.OperationId, "D", out var operationId)
+                || !string.Equals(
+                    candidate.OperationId,
+                    operationId.ToString("D"),
+                    StringComparison.Ordinal)
+                || candidate.Attempts < 0
+                || !DateTimeOffset.TryParse(
+                    candidate.TerminalAt,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind,
+                    out var candidateTerminalAt))
             {
                 refused++;
                 _logger.LogError(
-                    "Refusing to archive permalink operation directory '{OperationPath}': its name "
-                    + "is not a canonical lowercase operation id.",
-                    enumeratedPath);
+                    "Refusing invalid permalink archive candidate '{OperationId}'.",
+                    candidate.OperationId);
+                await DeferArchiveCandidateAsync(candidate, now, cancellationToken)
+                    .ConfigureAwait(false);
                 continue;
             }
 
             var source = GetActiveOperationPath(operationId);
-            if (!string.Equals(
-                    Path.GetFullPath(enumeratedPath),
-                    Path.GetFullPath(source),
-                    StringComparison.Ordinal)
-                || IsSymbolicLink(enumeratedPath))
+            var terminal = PermalinkPhase.Declared.FirstOrDefault(
+                phase => phase.Disposition == PermalinkPhaseDisposition.Terminal
+                    && string.Equals(phase.Name, candidate.TerminalPhase, StringComparison.Ordinal));
+            if (terminal is null)
+            {
+                refused++;
+                _logger.LogError(
+                    "Refusing permalink archive candidate {OperationId}: terminal phase '{Phase}' "
+                    + "is not declared.",
+                    operationId,
+                    candidate.TerminalPhase);
+                await DeferArchiveCandidateAsync(candidate, now, cancellationToken)
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            var month = candidateTerminalAt.UtcDateTime.ToString(
+                "yyyy-MM",
+                CultureInfo.InvariantCulture);
+            var archiveRoot = GetArchiveRoot();
+            var monthRoot = Path.Combine(archiveRoot, month);
+            var destination = Path.Combine(monthRoot, operationId.ToString("D"));
+            if (IsSymbolicLink(archiveRoot)
+                || IsSymbolicLink(monthRoot)
+                || IsSymbolicLink(destination))
+            {
+                refused++;
+                _logger.LogError(
+                    "Refusing permalink archive candidate {OperationId}: its archive path is linked.",
+                    operationId);
+                await DeferArchiveCandidateAsync(candidate, now, cancellationToken)
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            if (!Directory.Exists(source))
+            {
+                if (Directory.Exists(destination))
+                {
+                    try
+                    {
+                        await ValidateArchiveDirectoryAsync(
+                            destination,
+                            operationId,
+                            terminal,
+                            candidateTerminalAt,
+                            cancellationToken).ConfigureAwait(false);
+                        await DeleteArchiveCandidateAsync(candidate.OperationId, cancellationToken)
+                            .ConfigureAwait(false);
+                        archived++;
+                        continue;
+                    }
+                    catch (Exception exception) when (
+                        exception is IOException
+                            or UnauthorizedAccessException
+                            or PermalinkException)
+                    {
+                        refused++;
+                        _logger.LogError(
+                            exception,
+                            "Refusing incomplete archive destination for operation {OperationId}; "
+                            + "the candidate remains queued.",
+                            operationId);
+                        await DeferArchiveCandidateAsync(candidate, now, cancellationToken)
+                            .ConfigureAwait(false);
+                        continue;
+                    }
+                }
+
+                failed++;
+                _logger.LogError(
+                    "Permalink archive candidate {OperationId} is readable at neither its hot nor "
+                    + "expected archive path; retaining the candidate for retry.",
+                    operationId);
+                await DeferArchiveCandidateAsync(candidate, now, cancellationToken)
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            if (IsSymbolicLink(source))
             {
                 refused++;
                 _logger.LogError(
                     "Refusing to archive permalink operation {OperationId}: the hot journal entry "
-                    + "is linked or does not resolve to its canonical path.",
+                    + "is linked.",
                     operationId);
+                await DeferArchiveCandidateAsync(candidate, now, cancellationToken)
+                    .ConfigureAwait(false);
                 continue;
             }
 
-            string? destination = null;
+            var moveAttempted = false;
             try
             {
-                var operation = await ReadAsync(operationId, cancellationToken).ConfigureAwait(false)
-                    ?? throw new PermalinkException(
-                        PermalinkErrorKind.Conflict,
-                        "operation-document-missing",
-                        $"Operation '{operationId}' has no operation.json document.");
-                if (operation.OperationId != operationId)
-                {
-                    throw new PermalinkException(
-                        PermalinkErrorKind.Conflict,
-                        "operation-document-id-mismatch",
-                        $"Operation directory '{operationId}' contains document '{operation.OperationId}'.");
-                }
-
-                var terminal = GetActiveTerminalPhase(operationId);
-                if (terminal is null || File.Exists(GetPendingMarkerPath(operationId)))
+                var pendingMarker = GetPendingMarkerPath(operationId);
+                if (File.Exists(pendingMarker) || IsSymbolicLink(pendingMarker))
                 {
                     refused++;
                     _logger.LogInformation(
                         "Retaining permalink operation {OperationId} in the hot journal because it "
                         + "is non-terminal or still has a pending marker.",
                         operationId);
+                    await DeferArchiveCandidateAsync(candidate, now, cancellationToken)
+                        .ConfigureAwait(false);
                     continue;
                 }
 
-                var terminalPath = Path.Combine(source, terminal.Name + ".json");
-                var terminalDocument = CanonicalJson.Deserialize<PermalinkOperationPhase>(
-                    await File.ReadAllBytesAsync(terminalPath, cancellationToken).ConfigureAwait(false),
-                    terminalPath);
-                if (terminalDocument.OperationId != operationId
-                    || !string.Equals(terminalDocument.State, terminal.Name, StringComparison.Ordinal)
-                    || !DateTimeOffset.TryParse(
-                        terminalDocument.CreatedAt,
-                        CultureInfo.InvariantCulture,
-                        DateTimeStyles.RoundtripKind,
-                        out var terminalAt))
-                {
-                    throw new PermalinkException(
-                        PermalinkErrorKind.Conflict,
-                        "operation-terminal-invalid",
-                        $"Operation '{operationId}' has an invalid terminal phase document.");
-                }
+                await ValidateArchiveDirectoryAsync(
+                    source,
+                    operationId,
+                    terminal,
+                    candidateTerminalAt,
+                    cancellationToken).ConfigureAwait(false);
 
-                if (terminalAt > cutoff)
+                if (candidateTerminalAt > cutoff)
                 {
                     retained++;
+                    await ScheduleArchiveCandidateAsync(
+                        candidate.OperationId,
+                        candidateTerminalAt + _operationJournalRetention,
+                        cancellationToken).ConfigureAwait(false);
                     continue;
-                }
-
-                var month = terminalAt.UtcDateTime.ToString("yyyy-MM", CultureInfo.InvariantCulture);
-                destination = Path.Combine(GetArchiveRoot(), month, operationId.ToString("D"));
-                var archiveRoot = GetArchiveRoot();
-                if (IsSymbolicLink(archiveRoot))
-                {
-                    throw new PermalinkException(
-                        PermalinkErrorKind.Unavailable,
-                        "operation-archive-linked",
-                        "The permalink operation archive root is a symbolic link and was refused.");
-                }
-
-                var monthRoot = Path.GetDirectoryName(destination)!;
-                if (IsSymbolicLink(monthRoot))
-                {
-                    throw new PermalinkException(
-                        PermalinkErrorKind.Unavailable,
-                        "operation-archive-month-linked",
-                        $"Archive month '{month}' is a symbolic link and was refused.");
                 }
 
                 if (Directory.Exists(destination) || File.Exists(destination))
@@ -1209,7 +1329,10 @@ internal sealed class PermalinkOperationJournal : IDisposable
                         $"Archive destination for operation '{operationId}' already exists.");
                 }
 
+                moveAttempted = true;
                 _fileSystem.PublishDirectoryImmutable(source, destination);
+                await DeleteArchiveCandidateAsync(candidate.OperationId, cancellationToken)
+                    .ConfigureAwait(false);
                 archived++;
             }
             catch (Exception exception) when (
@@ -1218,8 +1341,8 @@ internal sealed class PermalinkOperationJournal : IDisposable
                 or PermalinkException)
             {
                 var sourceExists = Directory.Exists(source);
-                var destinationExists = destination is not null && Directory.Exists(destination);
-                if (!sourceExists && !destinationExists)
+                var destinationExists = Directory.Exists(destination);
+                if (moveAttempted && !sourceExists && !destinationExists)
                 {
                     throw new PermalinkException(
                         PermalinkErrorKind.Unavailable,
@@ -1230,6 +1353,8 @@ internal sealed class PermalinkOperationJournal : IDisposable
 
                 if (!sourceExists && destinationExists)
                 {
+                    await DeleteArchiveCandidateAsync(candidate.OperationId, cancellationToken)
+                        .ConfigureAwait(false);
                     archived++;
                     _logger.LogError(
                         exception,
@@ -1241,6 +1366,8 @@ internal sealed class PermalinkOperationJournal : IDisposable
                 }
 
                 failed++;
+                await DeferArchiveCandidateAsync(candidate, now, cancellationToken)
+                    .ConfigureAwait(false);
                 _logger.LogError(
                     exception,
                     "Could not archive permalink operation {OperationId}; its hot source remains "
@@ -1259,6 +1386,140 @@ internal sealed class PermalinkOperationJournal : IDisposable
             _operationJournalArchiveMaximumOperationsPerPass);
     }
 
+    private static async Task ValidateArchiveDirectoryAsync(
+        string root,
+        Guid operationId,
+        PermalinkPhase terminal,
+        DateTimeOffset candidateTerminalAt,
+        CancellationToken cancellationToken)
+    {
+        var operationPath = Path.Combine(root, "operation.json");
+        var operation = CanonicalJson.Deserialize<PermalinkOperationDocument>(
+            await File.ReadAllBytesAsync(operationPath, cancellationToken).ConfigureAwait(false),
+            operationPath);
+        if (operation.OperationId != operationId)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "operation-document-id-mismatch",
+                $"Operation directory '{operationId}' contains document '{operation.OperationId}'.");
+        }
+
+        var terminalPath = Path.Combine(root, terminal.Name + ".json");
+        var terminalDocument = CanonicalJson.Deserialize<PermalinkOperationPhase>(
+            await File.ReadAllBytesAsync(terminalPath, cancellationToken).ConfigureAwait(false),
+            terminalPath);
+        if (terminalDocument.OperationId != operationId
+            || !string.Equals(terminalDocument.State, terminal.Name, StringComparison.Ordinal)
+            || !DateTimeOffset.TryParse(
+                terminalDocument.CreatedAt,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind,
+                out var terminalAt))
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "operation-terminal-invalid",
+                $"Operation '{operationId}' has an invalid terminal phase document.");
+        }
+
+        if (terminalAt != candidateTerminalAt)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "operation-archive-candidate-mismatch",
+                $"Operation '{operationId}' terminal evidence differs from its archive candidate.");
+        }
+    }
+
+    private async Task<IReadOnlyList<ArchiveCandidate>> ReadDueArchiveCandidatesAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var result = new List<ArchiveCandidate>();
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT operation_id, terminal_phase, terminal_at, attempts
+              FROM PermalinkOperationArchiveCandidates
+             WHERE next_attempt_at <= $now
+             ORDER BY next_attempt_at, created_at, operation_id
+             LIMIT $maximum;
+            """;
+        command.Parameters.AddWithValue(
+            "$now",
+            now.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$maximum", _operationJournalArchiveMaximumOperationsPerPass);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            result.Add(new ArchiveCandidate(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetInt64(3)));
+        }
+
+        return result;
+    }
+
+    private async Task ScheduleArchiveCandidateAsync(
+        string operationId,
+        DateTimeOffset nextAttemptAt,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE PermalinkOperationArchiveCandidates
+               SET next_attempt_at = $next, attempts = 0, updated_at = $updated
+             WHERE operation_id = $operation;
+            """;
+        command.Parameters.AddWithValue("$operation", operationId);
+        command.Parameters.AddWithValue(
+            "$next",
+            nextAttemptAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$updated", UtcNow());
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task DeferArchiveCandidateAsync(
+        ArchiveCandidate candidate,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var exponent = (int)Math.Clamp(candidate.Attempts, 0, 9);
+        var delay = TimeSpan.FromMinutes(Math.Min(24 * 60, 5 * (1 << exponent)));
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE PermalinkOperationArchiveCandidates
+               SET next_attempt_at = $next,
+                   attempts = CASE WHEN attempts BETWEEN 0 AND 1000000 THEN attempts + 1 ELSE 1 END,
+                   updated_at = $updated
+             WHERE operation_id = $operation;
+            """;
+        command.Parameters.AddWithValue("$operation", candidate.OperationId);
+        command.Parameters.AddWithValue(
+            "$next",
+            (now + delay).ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$updated", UtcNow());
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task DeleteArchiveCandidateAsync(
+        string operationId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            DELETE FROM PermalinkOperationArchiveCandidates WHERE operation_id = $operation;
+            """;
+        command.Parameters.AddWithValue("$operation", operationId);
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Returns whether any non-terminal durable operation fences an item.</summary>
     /// <param name="itemId">The Jellyfin item identifier.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
@@ -1268,13 +1529,6 @@ internal sealed class PermalinkOperationJournal : IDisposable
         CancellationToken cancellationToken)
     {
         return await FindLatestPendingAsync(itemId, cancellationToken).ConfigureAwait(false) is not null;
-    }
-
-    private PermalinkPhase? GetActiveTerminalPhase(Guid operationId)
-    {
-        return PermalinkPhase.Declared.FirstOrDefault(
-            phase => phase.Disposition == PermalinkPhaseDisposition.Terminal
-                && HasActivePhase(operationId, phase));
     }
 
     private static bool IsSymbolicLink(string path)
@@ -1301,6 +1555,12 @@ internal sealed class PermalinkOperationJournal : IDisposable
         FlushLookupRun();
         _pendingIndexLock.Dispose();
     }
+
+    private sealed record ArchiveCandidate(
+        string OperationId,
+        string TerminalPhase,
+        string TerminalAt,
+        long Attempts);
 
     /// <summary>Publishes bytes create-exclusively, tolerating an exact-byte-identical retry.</summary>
     /// <param name="path">The destination path.</param>

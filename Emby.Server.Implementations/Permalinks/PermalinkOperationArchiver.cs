@@ -74,7 +74,7 @@ internal sealed class PermalinkOperationArchiver : BackgroundService
                 var result = await _journal.ArchiveTerminalOperationsAsync(stoppingToken)
                     .ConfigureAwait(false);
                 _logger.LogInformation(
-                    "Permalink journal archive: {Examined} hot directories examined, {Archived} "
+                    "Permalink journal archive: {Examined} indexed candidates examined, {Archived} "
                     + "archived, {Retained} within retention, {Refused} non-terminal or invalid, "
                     + "{Failed} safely retained after failure.",
                     result.Examined,

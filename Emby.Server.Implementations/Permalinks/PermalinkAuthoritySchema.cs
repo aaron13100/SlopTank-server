@@ -82,6 +82,16 @@ internal static class PermalinkAuthoritySchema
                 name TEXT PRIMARY KEY, last_operation_id TEXT NULL,
                 directories_seen INTEGER NOT NULL, completed_at TEXT NULL,
                 created_at TEXT NOT NULL);
+            -- Future terminal writes enqueue here before their immutable phase is
+            -- published. The archiver can therefore select a small indexed batch
+            -- without repeatedly enumerating the flat operations directory.
+            CREATE TABLE IF NOT EXISTS PermalinkOperationArchiveCandidates (
+                operation_id TEXT PRIMARY KEY, terminal_phase TEXT NOT NULL,
+                terminal_at TEXT NOT NULL, next_attempt_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS IX_PermalinkOperationArchiveCandidates_Due
+                ON PermalinkOperationArchiveCandidates(next_attempt_at, created_at, operation_id);
             -- FirstAliasClaims is keyed by capsule_id, so every lookup BY ALIAS
             -- was a full scan: the resolver's own binding join does one, and so
             -- does the competing-claims test in BindAsync, which runs for every

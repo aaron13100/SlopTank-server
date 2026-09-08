@@ -1,7 +1,7 @@
 namespace Emby.Server.Implementations.Permalinks;
 
 /// <summary>Summarizes one terminal-operation archive pass.</summary>
-/// <param name="Examined">The hot directories examined.</param>
+/// <param name="Examined">The indexed candidates and exact hot directories examined.</param>
 /// <param name="Archived">The terminal directories atomically moved.</param>
 /// <param name="Retained">The terminal directories still within retention.</param>
 /// <param name="Refused">The invalid, linked, pending, or suspended directories retained.</param>

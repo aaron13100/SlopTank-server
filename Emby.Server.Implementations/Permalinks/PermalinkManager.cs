@@ -75,22 +75,28 @@ public sealed class PermalinkManager : IPermalinkManager
         await itemLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            // Request cancellation is an admission signal, not the lifetime of an admitted
+            // durable mutation. Once this item lock is held, interruption can leave authority,
+            // capsule, alias, and binding publication at different durable steps while the next
+            // resolver waits behind this lock. Finish or fail the admitted transaction on its own
+            // lifetime so a browser navigation cannot strand a half-minted alias.
+            var mutationCancellationToken = CancellationToken.None;
             var path = ResolveLocalPath(item);
             var evidence = item switch
             {
                 Series series => await ComputeSeriesAsync(
                     series,
                     ancestry,
-                    cancellationToken).ConfigureAwait(false),
+                    mutationCancellationToken).ConfigureAwait(false),
                 Season season => await ComputeSeasonAsync(
                     season,
                     ancestry,
-                    cancellationToken).ConfigureAwait(false),
+                    mutationCancellationToken).ConfigureAwait(false),
                 BoxSet boxSet => await ComputeBoxSetAsync(
                     boxSet,
                     ancestry,
-                    cancellationToken).ConfigureAwait(false),
-                _ => await _evidence.ComputeContentItemAsync(item, cancellationToken)
+                    mutationCancellationToken).ConfigureAwait(false),
+                _ => await _evidence.ComputeContentItemAsync(item, mutationCancellationToken)
                     .ConfigureAwait(false)
             };
             if (evidence.Leaves.Count == 0)
@@ -110,7 +116,7 @@ public sealed class PermalinkManager : IPermalinkManager
                     evidence.Leaves,
                     publishAlias,
                     preferredAlias),
-                cancellationToken).ConfigureAwait(false);
+                mutationCancellationToken).ConfigureAwait(false);
         }
         finally
         {

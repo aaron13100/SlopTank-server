@@ -126,6 +126,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
                 "operation-journal-archive-limit-invalid",
                 $"{OperationJournalArchiveMaximumOperationsPerPassKey} must be between 1 and 10000.");
         }
+
         if (!_pendingIndexEnabled)
         {
             _logger.LogWarning(
@@ -1032,7 +1033,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
         PermalinkOperationPhase document,
         CancellationToken cancellationToken)
     {
-        if (document.OperationId != operationId
+        if (!document.OperationId.Equals(operationId)
             || !string.Equals(document.State, phase.Name, StringComparison.Ordinal)
             || !DateTimeOffset.TryParse(
                 document.CreatedAt,
@@ -1397,7 +1398,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
         var operation = CanonicalJson.Deserialize<PermalinkOperationDocument>(
             await File.ReadAllBytesAsync(operationPath, cancellationToken).ConfigureAwait(false),
             operationPath);
-        if (operation.OperationId != operationId)
+        if (!operation.OperationId.Equals(operationId))
         {
             throw new PermalinkException(
                 PermalinkErrorKind.Conflict,
@@ -1409,7 +1410,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
         var terminalDocument = CanonicalJson.Deserialize<PermalinkOperationPhase>(
             await File.ReadAllBytesAsync(terminalPath, cancellationToken).ConfigureAwait(false),
             terminalPath);
-        if (terminalDocument.OperationId != operationId
+        if (!terminalDocument.OperationId.Equals(operationId)
             || !string.Equals(terminalDocument.State, terminal.Name, StringComparison.Ordinal)
             || !DateTimeOffset.TryParse(
                 terminalDocument.CreatedAt,
@@ -1556,12 +1557,6 @@ internal sealed class PermalinkOperationJournal : IDisposable
         _pendingIndexLock.Dispose();
     }
 
-    private sealed record ArchiveCandidate(
-        string OperationId,
-        string TerminalPhase,
-        string TerminalAt,
-        long Attempts);
-
     /// <summary>Publishes bytes create-exclusively, tolerating an exact-byte-identical retry.</summary>
     /// <param name="path">The destination path.</param>
     /// <param name="bytes">The canonical bytes.</param>
@@ -1602,4 +1597,10 @@ internal sealed class PermalinkOperationJournal : IDisposable
 
         return false;
     }
+
+    private sealed record ArchiveCandidate(
+        string OperationId,
+        string TerminalPhase,
+        string TerminalAt,
+        long Attempts);
 }

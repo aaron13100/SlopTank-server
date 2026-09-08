@@ -41,6 +41,7 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
     private readonly SemaphoreSlim[] _admissionLocks = Enumerable.Range(0, AdmissionLockCount)
         .Select(_ => new SemaphoreSlim(1, 1))
         .ToArray();
+
     private readonly PermalinkAuthorityStore _authority;
     private readonly ILogger<PermalinkPlaybackRecovery> _logger;
     private readonly TimeProvider _timeProvider;
@@ -435,13 +436,4 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
             "playback-lease-retention-invalid",
             $"{key} {constraint}.");
     }
-
-    private enum TerminalMarker
-    {
-        Missing,
-        Retained,
-        Reclaimable,
-        Invalid
-    }
-
 }

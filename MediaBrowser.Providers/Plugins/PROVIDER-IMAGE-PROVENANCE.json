@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "scope": "Embedded IHasEmbeddedImage provider artwork in MediaBrowser.Providers",
+  "policy": "Original neutral category artwork only; provider names remain functional configuration labels and are not drawn into the artwork. No affiliation or endorsement is implied.",
+  "licenseBasis": "Wholly new post-fork material owned by the SlopTank project maintainer and covered by LICENSE-ELECTION.md as GPL-2.0-or-later.",
+  "assets": [
+    {
+      "path": "MediaBrowser.Providers/Plugins/AudioDb/jellyfin-plugin-tadb.svg",
+      "sourcePath": "MediaBrowser.Providers/Plugins/AudioDb/jellyfin-plugin-tadb.svg",
+      "category": "audio metadata",
+      "origin": "original-neutral-category-artwork",
+      "creationMethod": "Hand-authored geometric SVG using repository-native primitives; no external visual reference or copied path data.",
+      "copyrightHolder": "SlopTank project maintainer",
+      "license": "GPL-2.0-or-later",
+      "thirdPartySource": false,
+      "trademarkUse": "none",
+      "generatedDerivative": false,
+      "sha256": "b34ae5d4f4da37c21fbbc578815acf27e6b735749dc651a2b7a12a7dbdd6f9a8",
+      "sourceSha256": "b34ae5d4f4da37c21fbbc578815acf27e6b735749dc651a2b7a12a7dbdd6f9a8"
+    },
+    {
+      "path": "MediaBrowser.Providers/Plugins/MusicBrainz/jellyfin-plugin-musicbrainz.svg",
+      "sourcePath": "MediaBrowser.Providers/Plugins/MusicBrainz/jellyfin-plugin-musicbrainz.svg",
+      "category": "music catalogue metadata",
+      "origin": "original-neutral-category-artwork",
+      "creationMethod": "Hand-authored geometric SVG using repository-native primitives; no external visual reference or copied path data.",
+      "copyrightHolder": "SlopTank project maintainer",
+      "license": "GPL-2.0-or-later",
+      "thirdPartySource": false,
+      "trademarkUse": "none",
+      "generatedDerivative": false,
+      "sha256": "a4766d182ee790d13f61f744961506193412fb96c770d682e353f2505bdab288",
+      "sourceSha256": "a4766d182ee790d13f61f744961506193412fb96c770d682e353f2505bdab288"
+    },
+    {
+      "path": "MediaBrowser.Providers/Plugins/Omdb/jellyfin-plugin-omdb.png",
+      "sourcePath": "MediaBrowser.Providers/Plugins/Omdb/jellyfin-plugin-omdb.source.svg",
+      "category": "movie information metadata",
+      "origin": "original-neutral-category-artwork",
+      "creationMethod": "The checked-in geometric SVG was rasterized locally with ImageMagick using -background none -resize 1920x1080! -strip and PNG32 output; no external visual reference or copied path data.",
+      "copyrightHolder": "SlopTank project maintainer",
+      "license": "GPL-2.0-or-later",
+      "thirdPartySource": false,
+      "trademarkUse": "none",
+      "generatedDerivative": true,
+      "sha256": "e68273244167064c4545cc6be93bbc28b28397d46c297c06260888ac838e1fd4",
+      "sourceSha256": "f872cffdd9ad64ce0a9f7f5b223c147a05c4aed1531e4d9a3da7a13d9c1595e1"
+    },
+    {
+      "path": "MediaBrowser.Providers/Plugins/StudioImages/jellyfin-plugin-studioimages.svg",
+      "sourcePath": "MediaBrowser.Providers/Plugins/StudioImages/jellyfin-plugin-studioimages.svg",
+      "category": "studio artwork",
+      "origin": "original-neutral-category-artwork",
+      "creationMethod": "Hand-authored geometric SVG using repository-native primitives; no external visual reference or copied path data.",
+      "copyrightHolder": "SlopTank project maintainer",
+      "license": "GPL-2.0-or-later",
+      "thirdPartySource": false,
+      "trademarkUse": "none",
+      "generatedDerivative": false,
+      "sha256": "dd403472898567469b75968d636da6d7ad7071d9df44f1f64ce780f321995440",
+      "sourceSha256": "dd403472898567469b75968d636da6d7ad7071d9df44f1f64ce780f321995440"
+    },
+    {
+      "path": "MediaBrowser.Providers/Plugins/Tmdb/jellyfin-plugin-tmdb.svg",
+      "sourcePath": "MediaBrowser.Providers/Plugins/Tmdb/jellyfin-plugin-tmdb.svg",
+      "category": "film and television metadata search",
+      "origin": "original-neutral-category-artwork",
+      "creationMethod": "Hand-authored geometric SVG using repository-native primitives; no external visual reference or copied path data.",
+      "copyrightHolder": "SlopTank project maintainer",
+      "license": "GPL-2.0-or-later",
+      "thirdPartySource": false,
+      "trademarkUse": "none",
+      "generatedDerivative": false,
+      "sha256": "b75cfea9777f4487138304e1e053ccc705bec7925a1f17f360dc97f3fa992b1a",
+      "sourceSha256": "b75cfea9777f4487138304e1e053ccc705bec7925a1f17f360dc97f3fa992b1a"
+    }
+  ]
+}

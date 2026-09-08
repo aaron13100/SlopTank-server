@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" role="img" aria-labelledby="movie-title movie-desc">
+  <title id="movie-title">Movie information</title>
+  <desc id="movie-desc">Neutral illustration of a clapperboard and an information card.</desc>
+  <rect width="1920" height="1080" rx="72" fill="#111827"/>
+  <rect x="330" y="370" width="760" height="430" rx="42" fill="#1e293b" stroke="#f8fafc" stroke-width="32"/>
+  <path d="M340 365l105-178h760l-105 178z" fill="#fbbf24" stroke="#f8fafc" stroke-width="32" stroke-linejoin="round"/>
+  <path d="M525 187l-105 178M760 187L655 365M995 187L890 365" stroke="#111827" stroke-width="34"/>
+  <path d="M500 540h420M500 655h330" stroke="#7dd3fc" stroke-width="34" stroke-linecap="round"/>
+  <rect x="1240" y="300" width="350" height="500" rx="48" fill="#0f3d3e" stroke="#5eead4" stroke-width="32"/>
+  <circle cx="1415" cy="440" r="44" fill="#f8fafc"/>
+  <path d="M1415 545v145" stroke="#f8fafc" stroke-width="42" stroke-linecap="round"/>
+</svg>

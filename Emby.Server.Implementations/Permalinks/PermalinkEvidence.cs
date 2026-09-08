@@ -53,6 +53,7 @@ public sealed class PermalinkEvidence
     /// </summary>
     /// <param name="contentReads">Records each full media read this class performs.</param>
     /// <param name="digestCache">Remembers digests across process lifetimes.</param>
+    /// <param name="contentDigestMemoryLimit">Maximum number of completed digests retained in memory.</param>
     internal PermalinkEvidence(
         PermalinkContentReadMeter contentReads,
         PermalinkContentDigestCache digestCache,

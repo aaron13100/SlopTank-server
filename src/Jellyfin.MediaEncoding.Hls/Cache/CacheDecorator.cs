@@ -42,7 +42,25 @@ public class CacheDecorator : IKeyframeExtractor
     /// <inheritdoc />
     public bool TryExtractKeyframes(Guid itemId, string filePath, [NotNullWhen(true)] out KeyframeData? keyframeData)
     {
-        keyframeData = _keyframeRepository.GetKeyframeData(itemId).FirstOrDefault();
+        try
+        {
+            keyframeData = _keyframeRepository.GetKeyframeData(itemId).FirstOrDefault();
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                exception,
+                "Failed to read cached keyframes for item {ItemId} at {FilePath}",
+                itemId,
+                filePath);
+            keyframeData = null;
+            return false;
+        }
+
         if (keyframeData is null)
         {
             if (!_keyframeExtractor.TryExtractKeyframes(itemId, filePath, out var result))
@@ -53,7 +71,24 @@ public class CacheDecorator : IKeyframeExtractor
 
             _logger.LogDebug("Successfully extracted keyframes using {ExtractorName}", _keyframeExtractorName);
             keyframeData = result;
-            _keyframeRepository.SaveKeyframeDataAsync(itemId, keyframeData, CancellationToken.None).GetAwaiter().GetResult();
+            try
+            {
+                _keyframeRepository.SaveKeyframeDataAsync(itemId, keyframeData, CancellationToken.None).GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(
+                    exception,
+                    "Failed to save cached keyframes for item {ItemId} at {FilePath}",
+                    itemId,
+                    filePath);
+                keyframeData = null;
+                return false;
+            }
         }
 
         return true;

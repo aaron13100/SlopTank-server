@@ -95,16 +95,10 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
             return PlaybackLeaseReclamationResult.Disabled(_maximumEntriesPerPass);
         }
 
-        var now = _timeProvider.GetUtcNow();
-        if (now < _nextPassAt)
-        {
-            return PlaybackLeaseReclamationResult.Noop(_maximumEntriesPerPass);
-        }
-
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            now = _timeProvider.GetUtcNow();
+            var now = _timeProvider.GetUtcNow();
             if (now < _nextPassAt)
             {
                 return PlaybackLeaseReclamationResult.Noop(_maximumEntriesPerPass);
@@ -294,7 +288,7 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
             }
 
             var leasePath = Path.Combine(directory, "lease.json");
-            if (!File.Exists(leasePath))
+            if (PermalinkPlaybackLeaseShape.IsLink(leasePath) || !File.Exists(leasePath))
             {
                 result.Refused++;
                 return;
@@ -353,6 +347,11 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
         DateTimeOffset now)
     {
         var path = Path.Combine(directory, fileName);
+        if (PermalinkPlaybackLeaseShape.IsLink(path))
+        {
+            return TerminalMarker.Invalid;
+        }
+
         if (!File.Exists(path))
         {
             return TerminalMarker.Missing;

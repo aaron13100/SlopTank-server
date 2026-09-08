@@ -56,9 +56,10 @@ public class ExceptionMiddleware
         }
         catch (Exception ex)
         {
+            var caughtException = ex;
             ex = GetActualException(ex);
 
-            if (ex is OperationCanceledException
+            if (IsSingleCancellation(caughtException)
                 && context.RequestAborted.IsCancellationRequested)
             {
                 _logger.LogDebug(
@@ -109,6 +110,21 @@ public class ExceptionMiddleware
                     : "Error processing request.";
             await context.Response.WriteAsync(errorContent).ConfigureAwait(false);
         }
+    }
+
+    private static bool IsSingleCancellation(Exception ex)
+    {
+        while (ex is AggregateException aggregate)
+        {
+            if (aggregate.InnerExceptions.Count != 1)
+            {
+                return false;
+            }
+
+            ex = aggregate.InnerExceptions[0];
+        }
+
+        return ex is OperationCanceledException;
     }
 
     private static Exception GetActualException(Exception ex)

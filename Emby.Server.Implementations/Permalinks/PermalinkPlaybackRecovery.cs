@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -33,17 +32,8 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
     public const string TerminalRetentionKey = "Permalinks:PlaybackLeaseTerminalRetention";
 
     private const int AbsoluteMaximumEntriesPerPass = 1024;
-    private const int MaximumNodesPerLease = 256;
     private static readonly TimeSpan _absoluteMaximumInterval = TimeSpan.FromDays(365);
     private static readonly TimeSpan _absoluteMaximumRetention = TimeSpan.FromDays(3650);
-    private static readonly HashSet<string> _knownRootFiles = new(StringComparer.Ordinal)
-    {
-        "completed.json",
-        "consumed.json",
-        "lease.json",
-        "plan.json",
-        "ready.json"
-    };
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _admissionLocks = new();
     private readonly PermalinkAuthorityStore _authority;
@@ -168,12 +158,12 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
         Func<string, bool> isActive,
         CancellationToken cancellationToken)
     {
-        var result = new MutableResult(_maximumEntriesPerPass);
+        var result = new PlaybackLeaseReclamationAccumulator(_maximumEntriesPerPass);
         var root = Path.Combine(
             _authority.Root,
             ".sloptank",
             "permalink-playback-leases");
-        if (IsLink(root))
+        if (PermalinkPlaybackLeaseShape.IsLink(root))
         {
             ResetEnumeration();
             result.RootRefused = true;
@@ -242,8 +232,8 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
             {
                 // Re-check the path after acquiring the shared admission lock. Admission inserts
                 // the active-session record before releasing this same lock, closing the race
-                // between a stale map check and recursive deletion.
-                if (IsLink(root))
+                // between a stale map check and bounded state deletion.
+                if (PermalinkPlaybackLeaseShape.IsLink(root))
                 {
                     ResetEnumeration();
                     result.RootRefused = true;
@@ -279,7 +269,7 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
     private void ReclaimInactive(
         string directory,
         DateTimeOffset now,
-        MutableResult result)
+        PlaybackLeaseReclamationAccumulator result)
     {
         try
         {
@@ -299,7 +289,7 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
 
             if (consumed == TerminalMarker.Reclaimable || completed == TerminalMarker.Reclaimable)
             {
-                Delete(directory, result);
+                ReclaimKnownShape(directory, result);
                 return;
             }
 
@@ -339,7 +329,7 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
 
             if (expiresAt <= now)
             {
-                Delete(directory, result);
+                ReclaimKnownShape(directory, result);
             }
             else
             {
@@ -406,7 +396,7 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
                 Path.GetFullPath(Path.GetDirectoryName(entry)!),
                 Path.GetFullPath(root),
                 StringComparison.Ordinal)
-            || IsLink(entry))
+            || PermalinkPlaybackLeaseShape.IsLink(entry))
         {
             return false;
         }
@@ -414,164 +404,17 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
         return Directory.Exists(entry);
     }
 
-    private static bool IsLink(string path)
+    private static void ReclaimKnownShape(
+        string directory,
+        PlaybackLeaseReclamationAccumulator result)
     {
-        var info = new DirectoryInfo(path);
-        try
-        {
-            // LinkTarget detects dangling links, for which Directory.Exists is false.
-            if (info.LinkTarget is not null)
-            {
-                return true;
-            }
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            return true;
-        }
-
-        if (!Directory.Exists(path) && !File.Exists(path))
-        {
-            return false;
-        }
-
-        try
-        {
-            return (info.Attributes & FileAttributes.ReparsePoint) != 0;
-        }
-        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
-        {
-            return false;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            return true;
-        }
-    }
-
-    private static void Delete(string directory, MutableResult result)
-    {
-        if (!TryCollectKnownLeaseShape(directory, out var files, out var directories))
+        if (!PermalinkPlaybackLeaseShape.TryDelete(directory))
         {
             result.Refused++;
             return;
         }
 
-        foreach (var file in files)
-        {
-            File.Delete(file);
-        }
-
-        foreach (var childDirectory in directories)
-        {
-            Directory.Delete(childDirectory, recursive: false);
-        }
-
-        Directory.Delete(directory, recursive: false);
         result.Reclaimed++;
-    }
-
-    private static bool TryCollectKnownLeaseShape(
-        string directory,
-        out IReadOnlyList<string> files,
-        out IReadOnlyList<string> directories)
-    {
-        var foundFiles = new List<string>();
-        var ordinalDirectories = new List<string>();
-        string? entriesDirectory = null;
-        var examined = 0;
-        foreach (var child in Directory.EnumerateFileSystemEntries(directory))
-        {
-            if (++examined > MaximumNodesPerLease || IsLink(child))
-            {
-                return Failed(out files, out directories);
-            }
-
-            var name = Path.GetFileName(child);
-            if (File.Exists(child))
-            {
-                if (!_knownRootFiles.Contains(name))
-                {
-                    return Failed(out files, out directories);
-                }
-
-                foundFiles.Add(child);
-            }
-            else if (Directory.Exists(child)
-                     && string.Equals(name, "entries", StringComparison.Ordinal)
-                     && entriesDirectory is null)
-            {
-                entriesDirectory = child;
-            }
-            else
-            {
-                return Failed(out files, out directories);
-            }
-        }
-
-        if (entriesDirectory is not null)
-        {
-            foreach (var ordinalDirectory in Directory.EnumerateFileSystemEntries(entriesDirectory))
-            {
-                if (++examined > MaximumNodesPerLease
-                    || IsLink(ordinalDirectory)
-                    || !Directory.Exists(ordinalDirectory)
-                    || !IsCanonicalOrdinal(Path.GetFileName(ordinalDirectory)))
-                {
-                    return Failed(out files, out directories);
-                }
-
-                foreach (var ordinalChild in Directory.EnumerateFileSystemEntries(ordinalDirectory))
-                {
-                    if (++examined > MaximumNodesPerLease
-                        || IsLink(ordinalChild)
-                        || !File.Exists(ordinalChild)
-                        || !string.Equals(
-                            Path.GetFileName(ordinalChild),
-                            "ready.json",
-                            StringComparison.Ordinal))
-                    {
-                        return Failed(out files, out directories);
-                    }
-
-                    foundFiles.Add(ordinalChild);
-                }
-
-                ordinalDirectories.Add(ordinalDirectory);
-            }
-        }
-
-        if (entriesDirectory is not null)
-        {
-            ordinalDirectories.Add(entriesDirectory);
-        }
-
-        files = foundFiles;
-        directories = ordinalDirectories;
-        return true;
-    }
-
-    private static bool IsCanonicalOrdinal(string name)
-    {
-        return int.TryParse(
-                name,
-                NumberStyles.None,
-                CultureInfo.InvariantCulture,
-                out var ordinal)
-            && ordinal >= 0
-            && string.Equals(
-                ordinal.ToString(CultureInfo.InvariantCulture),
-                name,
-                StringComparison.Ordinal);
-    }
-
-    private static bool Failed(
-        out IReadOnlyList<string> files,
-        out IReadOnlyList<string> directories)
-    {
-        files = Array.Empty<string>();
-        directories = Array.Empty<string>();
-        return false;
     }
 
     private void ResetEnumeration()
@@ -596,59 +439,4 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
         Invalid
     }
 
-    private sealed class MutableResult
-    {
-        public MutableResult(int maximumEntriesPerPass)
-        {
-            MaximumEntriesPerPass = maximumEntriesPerPass;
-        }
-
-        public int MaximumEntriesPerPass { get; }
-
-        public int Examined { get; set; }
-
-        public int Reclaimed { get; set; }
-
-        public int Active { get; set; }
-
-        public int Retained { get; set; }
-
-        public int Refused { get; set; }
-
-        public int Failed { get; set; }
-
-        public bool RootRefused { get; set; }
-
-        public PlaybackLeaseReclamationResult Freeze()
-        {
-            return new PlaybackLeaseReclamationResult(
-                true,
-                Examined,
-                Reclaimed,
-                Active,
-                Retained,
-                Refused,
-                Failed,
-                RootRefused,
-                MaximumEntriesPerPass);
-        }
-    }
-}
-
-internal sealed record PlaybackLeaseReclamationResult(
-    bool Enabled,
-    int Examined,
-    int Reclaimed,
-    int Active,
-    int Retained,
-    int Refused,
-    int Failed,
-    bool RootRefused,
-    int MaximumEntriesPerPass)
-{
-    public static PlaybackLeaseReclamationResult Disabled(int maximumEntriesPerPass)
-        => new(false, 0, 0, 0, 0, 0, 0, false, maximumEntriesPerPass);
-
-    public static PlaybackLeaseReclamationResult Noop(int maximumEntriesPerPass)
-        => new(true, 0, 0, 0, 0, 0, 0, false, maximumEntriesPerPass);
 }

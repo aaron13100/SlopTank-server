@@ -3,7 +3,6 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -26,8 +25,6 @@ using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.MediaInfo;
 using Microsoft.Extensions.Logging;
-using Nikse.SubtitleEdit.Core.Common;
-using Nikse.SubtitleEdit.Core.SubtitleFormats;
 using UtfUnknown;
 using SubtitleFormat = MediaBrowser.Model.MediaInfo.SubtitleFormat;
 
@@ -81,38 +78,38 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             long endTimeTicks,
             bool preserveOriginalTimestamps)
         {
-            var subtitle = Subtitle.Parse(stream, Path.GetExtension(inputInfo.Path));
+            var subtitle = _subtitleParser.Parse(stream, Path.GetExtension(inputInfo.Path));
 
             FilterEvents(subtitle, startTimeTicks, endTimeTicks, preserveOriginalTimestamps);
 
-            var formatter = GetWriter(outputFormat);
-
-            var text = formatter.ToText(subtitle, "untitled");
+            var text = SubtitleTextWriter.ToText(subtitle, outputFormat);
             var bytes = Encoding.UTF8.GetBytes(text);
 
             return new MemoryStream(bytes, 0, bytes.Length, false, true);
         }
 
-        internal void FilterEvents(Subtitle track, long startPositionTicks, long endTimeTicks, bool preserveTimestamps)
+        internal void FilterEvents(SubtitleTrackInfo track, long startPositionTicks, long endTimeTicks, bool preserveTimestamps)
         {
             // Drop subs that have fully elapsed before the requested start position
-            track.Paragraphs
-                .RemoveAll(i => (i.StartTime.TimeSpan.Ticks - startPositionTicks) < 0 && (i.EndTime.TimeSpan.Ticks - startPositionTicks) < 0);
+            var events = track.TrackEvents
+                .Where(i => (i.StartPositionTicks - startPositionTicks) >= 0 || (i.EndPositionTicks - startPositionTicks) >= 0)
+                .ToList();
 
             if (endTimeTicks > 0)
             {
-                track.Paragraphs
-                    .RemoveAll(i => i.StartTime.TimeSpan.Ticks > endTimeTicks);
+                events.RemoveAll(i => i.StartPositionTicks > endTimeTicks);
             }
 
             if (!preserveTimestamps)
             {
-                foreach (var trackEvent in track.Paragraphs)
+                foreach (var trackEvent in events)
                 {
-                    trackEvent.StartTime = new TimeCode(TimeSpan.FromTicks(Math.Max(0, trackEvent.StartTime.TimeSpan.Ticks - startPositionTicks)));
-                    trackEvent.EndTime = new TimeCode(TimeSpan.FromTicks(Math.Max(0, trackEvent.EndTime.TimeSpan.Ticks - startPositionTicks)));
+                    trackEvent.StartPositionTicks = Math.Max(0, trackEvent.StartPositionTicks - startPositionTicks);
+                    trackEvent.EndPositionTicks = Math.Max(0, trackEvent.EndPositionTicks - startPositionTicks);
                 }
             }
+
+            track.TrackEvents = events;
         }
 
         async Task<Stream> ISubtitleEncoder.GetSubtitles(BaseItem item, string mediaSourceId, int subtitleStreamIndex, string outputFormat, long startTimeTicks, long endTimeTicks, bool preserveOriginalTimestamps, CancellationToken cancellationToken)
@@ -255,62 +252,6 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                 Format = currentFormat,
                 IsExternal = true
             };
-        }
-
-        private bool TryGetWriter(string format, [NotNullWhen(true)] out Nikse.SubtitleEdit.Core.SubtitleFormats.SubtitleFormat? value)
-        {
-            ArgumentException.ThrowIfNullOrEmpty(format);
-
-            if (string.Equals(format, SubtitleFormat.ASS, StringComparison.OrdinalIgnoreCase))
-            {
-                value = new AdvancedSubStationAlpha();
-                return true;
-            }
-
-            if (string.Equals(format, "json", StringComparison.OrdinalIgnoreCase))
-            {
-                value = new JsonWriter();
-                return true;
-            }
-
-            if (string.Equals(format, SubtitleFormat.SRT, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(format, SubtitleFormat.SUBRIP, StringComparison.OrdinalIgnoreCase))
-            {
-                value = new SubRip();
-                return true;
-            }
-
-            if (string.Equals(format, SubtitleFormat.SSA, StringComparison.OrdinalIgnoreCase))
-            {
-                value = new SubStationAlpha();
-                return true;
-            }
-
-            if (string.Equals(format, SubtitleFormat.VTT, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(format, SubtitleFormat.WEBVTT, StringComparison.OrdinalIgnoreCase))
-            {
-                value = new WebVTT();
-                return true;
-            }
-
-            if (string.Equals(format, SubtitleFormat.TTML, StringComparison.OrdinalIgnoreCase))
-            {
-                value = new TimedText10();
-                return true;
-            }
-
-            value = null;
-            return false;
-        }
-
-        private Nikse.SubtitleEdit.Core.SubtitleFormats.SubtitleFormat GetWriter(string format)
-        {
-            if (TryGetWriter(format, out var writer))
-            {
-                return writer;
-            }
-
-            throw new ArgumentException("Unsupported format: " + format);
         }
 
         /// <summary>

@@ -649,7 +649,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IAuthService, AuthService>();
             serviceCollection.AddSingleton<IQuickConnect, QuickConnectManager>();
 
-            serviceCollection.AddSingleton<ISubtitleParser, SubtitleEditParser>();
+            serviceCollection.AddSingleton<ISubtitleParser, SubtitleParser>();
             serviceCollection.AddSingleton<ISubtitleEncoder, SubtitleEncoder>();
             serviceCollection.AddSingleton<IKeyframeManager, KeyframeManager>();
 

@@ -407,9 +407,27 @@ internal sealed class PermalinkOperationJournal : IDisposable
 
     public bool HasPhase(Guid operationId, PermalinkPhase phase)
     {
-        var path = Path.Combine(GetOperationPath(operationId), phase.Name + ".json");
-        return File.Exists(path)
-            || File.Exists(Path.Combine(GetOperationPath(operationId), phase.Name + ".json"));
+        var operationPath = GetOperationPath(operationId);
+        if (File.Exists(Path.Combine(operationPath, phase.Name + ".json")))
+        {
+            return true;
+        }
+
+        // Only a hot path can change locations: archived directories are immutable and never move
+        // again. Retry the locator once when the first lookup named the hot directory, covering an
+        // atomic archive rename between GetOperationPath and File.Exists without rescanning every
+        // archive month twice for a genuinely absent phase.
+        if (!string.Equals(
+                operationPath,
+                GetActiveOperationPath(operationId),
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var afterPossibleArchiveMove = GetOperationPath(operationId);
+        return !string.Equals(operationPath, afterPossibleArchiveMove, StringComparison.Ordinal)
+            && File.Exists(Path.Combine(afterPossibleArchiveMove, phase.Name + ".json"));
     }
 
     private bool HasActivePhase(Guid operationId, PermalinkPhase phase)

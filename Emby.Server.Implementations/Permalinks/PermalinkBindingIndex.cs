@@ -484,7 +484,7 @@ internal sealed class PermalinkBindingIndex
             throw new PermalinkException(
                 PermalinkErrorKind.Conflict,
                 "binding-ambiguous",
-                $"Binding '{permalinkId}' for item '{itemId}' resolves to more than one capsule.",
+                $"Binding '{permalinkId}' for item '{itemId}' resolves to {itemMatches.Count} capsules.",
                 itemId: itemId);
         }
 

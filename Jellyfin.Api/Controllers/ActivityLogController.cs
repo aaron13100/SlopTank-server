@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Jellyfin.Api.Extensions;
+using Jellyfin.Api.Models.ActivityLogDtos;
 using Jellyfin.Data.Enums;
 using Jellyfin.Data.Queries;
+using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Common.Api;
 using MediaBrowser.Model.Activity;
@@ -22,6 +25,11 @@ namespace Jellyfin.Api.Controllers;
 [Tags("System")]
 public class ActivityLogController : BaseJellyfinApiController
 {
+    /// <summary>
+    /// Maximum accepted JSON body size for a tool alert.
+    /// </summary>
+    public const int MaxToolAlertPayloadSize = 4_096;
+
     private readonly IActivityManager _activityManager;
 
     /// <summary>
@@ -88,6 +96,39 @@ public class ActivityLogController : BaseJellyfinApiController
         };
 
         return await _activityManager.GetPagedResultAsync(query).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Creates a warning surfaced in the owner activity log for the local media organizer.
+    /// </summary>
+    /// <param name="request">The bounded alert payload.</param>
+    /// <response code="204">The alert was created.</response>
+    /// <response code="400">The alert payload is invalid.</response>
+    /// <response code="401">The request is unauthenticated.</response>
+    /// <response code="403">The requester is not elevated.</response>
+    /// <response code="413">The request exceeds the endpoint body limit.</response>
+    /// <returns>A status-only response.</returns>
+    [HttpPost("Entries/ToolAlert")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status413PayloadTooLarge)]
+    [RequestSizeLimit(MaxToolAlertPayloadSize)]
+    public async Task<ActionResult> CreateToolAlert(
+        [FromBody] CreateToolAlertRequestDto request)
+    {
+        await _activityManager.CreateAsync(new ActivityLog(
+            request.Name,
+            CreateToolAlertRequestDto.AllowedType,
+            User.GetUserId())
+        {
+            Overview = request.Overview,
+            ShortOverview = request.Name,
+            LogSeverity = LogLevel.Warning
+        }).ConfigureAwait(false);
+
+        return NoContent();
     }
 
     private static (ActivityLogSortBy SortBy, SortOrder SortOrder)[] GetOrderBy(

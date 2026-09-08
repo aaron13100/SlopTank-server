@@ -1,8 +1,8 @@
 using System;
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,6 +19,8 @@ namespace Emby.Server.Implementations.Permalinks;
 /// </summary>
 internal sealed class PermalinkPlaybackRecovery : IDisposable
 {
+    private const int AdmissionLockCount = 64;
+
     /// <summary>Gets the deployment gate for playback-lease retention.</summary>
     public const string EnabledKey = "Permalinks:PlaybackLeaseRetentionEnabled";
 
@@ -35,7 +37,9 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
     private static readonly TimeSpan _absoluteMaximumInterval = TimeSpan.FromDays(365);
     private static readonly TimeSpan _absoluteMaximumRetention = TimeSpan.FromDays(3650);
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _admissionLocks = new();
+    private readonly SemaphoreSlim[] _admissionLocks = Enumerable.Range(0, AdmissionLockCount)
+        .Select(_ => new SemaphoreSlim(1, 1))
+        .ToArray();
     private readonly PermalinkAuthorityStore _authority;
     private readonly ILogger<PermalinkPlaybackRecovery> _logger;
     private readonly TimeProvider _timeProvider;
@@ -134,7 +138,7 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
     public void Dispose()
     {
         ResetEnumeration();
-        foreach (var admissionLock in _admissionLocks.Values)
+        foreach (var admissionLock in _admissionLocks)
         {
             admissionLock.Dispose();
         }
@@ -144,7 +148,8 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
 
     internal SemaphoreSlim GetAdmissionLock(string handle)
     {
-        return _admissionLocks.GetOrAdd(handle, _ => new SemaphoreSlim(1, 1));
+        return _admissionLocks[
+            (int)((uint)StringComparer.Ordinal.GetHashCode(handle) % AdmissionLockCount)];
     }
 
     private async Task<PlaybackLeaseReclamationResult> ReclaimPassAsync(

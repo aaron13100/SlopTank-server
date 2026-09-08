@@ -162,6 +162,7 @@ internal sealed class PermalinkPlaybackStateStore
             cancellationToken).ConfigureAwait(false);
         await CompleteIfRequestedAsync(
             root,
+            handle,
             consumption,
             queueOrdinal,
             queueCount,
@@ -213,6 +214,7 @@ internal sealed class PermalinkPlaybackStateStore
             serverId);
         await CompleteIfRequestedAsync(
             root,
+            handle,
             consumption,
             queueOrdinal,
             queueCount,
@@ -223,6 +225,7 @@ internal sealed class PermalinkPlaybackStateStore
 
     private async Task CompleteIfRequestedAsync(
         string root,
+        string handle,
         PlaybackConsumedDocument consumed,
         int ordinal,
         int queueCount,
@@ -258,6 +261,7 @@ internal sealed class PermalinkPlaybackStateStore
                     "Playback completion belongs to another session or queue entry.");
             }
 
+            _ = _activeSessions.TryRemove(handle, out _);
             return;
         }
 
@@ -268,6 +272,7 @@ internal sealed class PermalinkPlaybackStateStore
                 ordinal,
                 _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture)),
             cancellationToken).ConfigureAwait(false);
+        _ = _activeSessions.TryRemove(handle, out _);
     }
 
     private static PermalinkPlaybackSnapshot Result(

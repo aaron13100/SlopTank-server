@@ -233,7 +233,7 @@ internal sealed class PermalinkItemStateMutation
     /// <param name="item">The live item when one is in scope, otherwise null.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The terminal mutation result.</returns>
-    private async Task<PermalinkMutationResult> CloseAssignmentUnknownAsync(
+    internal async Task<PermalinkMutationResult> CloseAssignmentUnknownAsync(
         PermalinkOperationDocument operation,
         BaseItem? item,
         CancellationToken cancellationToken)

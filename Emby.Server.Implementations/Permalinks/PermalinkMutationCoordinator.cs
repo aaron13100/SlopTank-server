@@ -18,6 +18,8 @@ namespace Emby.Server.Implementations.Permalinks;
 /// </summary>
 internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinator
 {
+    private const int OperationGateCount = 64;
+
     private static readonly HashSet<string> _kinds = new(StringComparer.Ordinal)
     {
         "media",
@@ -52,6 +54,9 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     private readonly PermalinkPathMutation _pathMutation;
     private readonly PermalinkItemStateMutation _itemStateMutation;
     private readonly TimeProvider _timeProvider;
+    private readonly SemaphoreSlim[] _operationGates = Enumerable.Range(0, OperationGateCount)
+        .Select(_ => new SemaphoreSlim(1, 1))
+        .ToArray();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkMutationCoordinator"/> class.
@@ -207,6 +212,17 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         PermalinkMutationCommitRequest request,
         CancellationToken cancellationToken)
     {
+        return await ExecuteSerializedAsync(
+            operationId,
+            cancellationToken,
+            () => CommitCoreAsync(operationId, request, cancellationToken)).ConfigureAwait(false);
+    }
+
+    private async Task<PermalinkMutationResult> CommitCoreAsync(
+        Guid operationId,
+        PermalinkMutationCommitRequest request,
+        CancellationToken cancellationToken)
+    {
         var operation = await RequireOperationAsync(operationId, cancellationToken).ConfigureAwait(false);
         if (_journal.GetSettledPhase(operationId) is { } settledPhase)
         {
@@ -245,6 +261,16 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         Guid operationId,
         CancellationToken cancellationToken)
     {
+        return await ExecuteSerializedAsync(
+            operationId,
+            cancellationToken,
+            () => RecoverCoreAsync(operationId, cancellationToken)).ConfigureAwait(false);
+    }
+
+    private async Task<PermalinkMutationResult> RecoverCoreAsync(
+        Guid operationId,
+        CancellationToken cancellationToken)
+    {
         var operation = await RequireOperationAsync(operationId, cancellationToken).ConfigureAwait(false);
         if (_journal.GetSettledPhase(operationId) is { } settledPhase)
         {
@@ -269,7 +295,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         if (!_journal.HasPhase(operationId, PermalinkPhase.Ready)
             && !_journal.HasPhase(operationId, PermalinkPhase.Published))
         {
-            return await AbortAsync(operationId, cancellationToken).ConfigureAwait(false);
+            return await AbortCoreAsync(operationId, cancellationToken).ConfigureAwait(false);
         }
 
         var item = RequireItem(operation.ItemId);
@@ -292,6 +318,17 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
 
     /// <inheritdoc />
     public async Task<PermalinkMutationResult> ResolveAsync(
+        Guid operationId,
+        PermalinkOperationResolutionRequest request,
+        CancellationToken cancellationToken)
+    {
+        return await ExecuteSerializedAsync(
+            operationId,
+            cancellationToken,
+            () => ResolveCoreAsync(operationId, request, cancellationToken)).ConfigureAwait(false);
+    }
+
+    private async Task<PermalinkMutationResult> ResolveCoreAsync(
         Guid operationId,
         PermalinkOperationResolutionRequest request,
         CancellationToken cancellationToken)
@@ -320,6 +357,16 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         Guid operationId,
         CancellationToken cancellationToken)
     {
+        return await ExecuteSerializedAsync(
+            operationId,
+            cancellationToken,
+            () => CancelCoreAsync(operationId, cancellationToken)).ConfigureAwait(false);
+    }
+
+    private async Task<PermalinkMutationResult> CancelCoreAsync(
+        Guid operationId,
+        CancellationToken cancellationToken)
+    {
         var operation = await RequireOperationAsync(operationId, cancellationToken).ConfigureAwait(false);
         var settledPhase = _journal.GetSettledPhase(operationId);
         if (settledPhase == PermalinkPhase.Cancelled)
@@ -345,6 +392,16 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         Guid operationId,
         CancellationToken cancellationToken)
     {
+        return await ExecuteSerializedAsync(
+            operationId,
+            cancellationToken,
+            () => AbortCoreAsync(operationId, cancellationToken)).ConfigureAwait(false);
+    }
+
+    private async Task<PermalinkMutationResult> AbortCoreAsync(
+        Guid operationId,
+        CancellationToken cancellationToken)
+    {
         var operation = await RequireOperationAsync(operationId, cancellationToken).ConfigureAwait(false);
         if (_journal.GetSettledPhase(operationId) is { } settledPhase)
         {
@@ -353,7 +410,10 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
 
         if (_journal.HasPhase(operationId, PermalinkPhase.Published))
         {
-            return new PermalinkMutationResult(operationId, PermalinkPhase.Published.Name);
+            return await _itemStateMutation.CloseAssignmentUnknownAsync(
+                operation,
+                _libraryManager.GetItemById<BaseItem>(operation.ItemId),
+                cancellationToken).ConfigureAwait(false);
         }
 
         await _journal.WritePhaseAsync(
@@ -362,6 +422,24 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             Phase(operation, PermalinkPhase.Aborted, operation.OldContentRoot),
             cancellationToken).ConfigureAwait(false);
         return new PermalinkMutationResult(operationId, PermalinkPhase.Aborted.Name);
+    }
+
+    private async Task<PermalinkMutationResult> ExecuteSerializedAsync(
+        Guid operationId,
+        CancellationToken cancellationToken,
+        Func<Task<PermalinkMutationResult>> action)
+    {
+        var operationGate = _operationGates[
+            (int)((uint)operationId.GetHashCode() % OperationGateCount)];
+        await operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await action().ConfigureAwait(false);
+        }
+        finally
+        {
+            operationGate.Release();
+        }
     }
 
     private async Task<PermalinkOperationDocument> RequireOperationAsync(

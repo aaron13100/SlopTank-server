@@ -56,10 +56,10 @@ public interface IPermalinkMutationCoordinator
         Guid operationId,
         CancellationToken cancellationToken);
 
-    /// <summary>Terminates failed unpublished work without releasing published work from recovery.</summary>
+    /// <summary>Terminates failed work without claiming an unknown published assignment.</summary>
     /// <param name="operationId">The prepared operation identifier.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>The folded aborted, published, or existing terminal state.</returns>
+    /// <returns>The folded aborted, assignment-unknown, or existing terminal state.</returns>
     Task<PermalinkMutationResult> AbortAsync(
         Guid operationId,
         CancellationToken cancellationToken);

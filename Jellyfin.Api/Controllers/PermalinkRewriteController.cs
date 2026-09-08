@@ -87,6 +87,18 @@ public sealed class PermalinkRewriteController : BaseJellyfinApiController
         return ExecuteAsync(() => _coordinator.RecoverAsync(operationId, cancellationToken));
     }
 
+    /// <summary>Terminalizes a suspended mutation without asserting unknown published state.</summary>
+    /// <param name="operationId">The suspended operation identifier.</param>
+    /// <param name="cancellationToken">The request cancellation token.</param>
+    /// <returns>The folded terminal operation state.</returns>
+    [HttpPost("{operationId}/Abort")]
+    public Task<ActionResult<PermalinkMutationResult>> Abort(
+        [FromRoute] Guid operationId,
+        CancellationToken cancellationToken)
+    {
+        return ExecuteAsync(() => _coordinator.AbortAsync(operationId, cancellationToken));
+    }
+
     /// <summary>Continues a suspended operation only when exact evidence permits it.</summary>
     /// <param name="operationId">The suspended operation identifier.</param>
     /// <param name="request">The guarded administrator action.</param>

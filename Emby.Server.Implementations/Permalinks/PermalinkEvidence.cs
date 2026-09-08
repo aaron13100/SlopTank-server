@@ -356,11 +356,23 @@ public sealed class PermalinkEvidence
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (TryGetCachedDigest(path, out var digest, out var length))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return BuildLeaf(kind, role, relativePath, digest, length);
+        }
+
         var gate = _contentDigestGates[(StringComparer.Ordinal.GetHashCode(path) & int.MaxValue) % ContentDigestGateCount];
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (TryGetCachedDigest(path, out digest, out length))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return BuildLeaf(kind, role, relativePath, digest, length);
+            }
+
             return await HashFileCoreAsync(kind, role, relativePath, path, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -377,63 +389,88 @@ public sealed class PermalinkEvidence
         CancellationToken cancellationToken)
     {
         var token = MacPermalinkContentIdentity.TryRead(path);
-        string digest;
-        long length;
+        _contentReads.RecordFullContentRead();
+        await using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            1024 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var hash = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
+        var length = stream.Length;
+        var digest = "sha256:" + Convert.ToHexStringLower(hash);
 
-        if (token is { } current
-            && TryGetContentDigest(path, out var cached)
-            && cached.MatchesToken(current))
+        var tokenAfterRead = MacPermalinkContentIdentity.TryRead(path);
+        if (token is { } beforeRead && tokenAfterRead is { } afterRead && beforeRead == afterRead)
         {
-            digest = cached.Digest;
-            length = current.Length;
-        }
-        else if (token is { } durable
-            && _digestCache.TryRead(path, durable, out var recorded))
-        {
-            // The durable tier is what survives a restart. Without it the first
-            // play of every item after every restart pays the full read again,
-            // which on a multi-GB film is minutes of saturated disk before
-            // anyone can watch anything. Promote the answer back into the
-            // in-process tier so repeats within this process cost a stat.
-            digest = recorded;
-            length = durable.Length;
-            RememberContentDigest(path, new ContentDigestCacheEntry(durable, digest));
+            RememberContentDigest(path, new ContentDigestCacheEntry(afterRead, digest));
+            _digestCache.Write(path, afterRead, digest);
         }
         else
         {
-            _contentReads.RecordFullContentRead();
-            await using var stream = new FileStream(
-                path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                1024 * 1024,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-            var hash = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
-            length = stream.Length;
-            digest = "sha256:" + Convert.ToHexStringLower(hash);
-
-            var tokenAfterRead = MacPermalinkContentIdentity.TryRead(path);
-            if (token is { } beforeRead && tokenAfterRead is { } afterRead && beforeRead == afterRead)
+            // No readable change token means nothing authorizes reuse, so
+            // neither tier may keep an answer for this path.
+            ForgetContentDigest(path);
+            _digestCache.Invalidate(path);
+            if (token != tokenAfterRead
+                && (token is not null || tokenAfterRead is not null))
             {
-                RememberContentDigest(path, new ContentDigestCacheEntry(afterRead, digest));
-                _digestCache.Write(path, afterRead, digest);
-            }
-            else
-            {
-                // No readable change token means nothing authorizes reuse, so
-                // neither tier may keep an answer for this path.
-                ForgetContentDigest(path);
-                _digestCache.Invalidate(path);
-                if (token != tokenAfterRead
-                    && (token is not null || tokenAfterRead is not null))
-                {
-                    throw new IOException($"Media changed while its content identity was being computed: '{path}'.");
-                }
+                throw new IOException($"Media changed while its content identity was being computed: '{path}'.");
             }
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+        return BuildLeaf(kind, role, relativePath, digest, length);
+    }
+
+    private bool TryGetCachedDigest(string path, out string digest, out long length)
+    {
+        digest = string.Empty;
+        length = 0;
+        if (MacPermalinkContentIdentity.TryRead(path) is not { } token)
+        {
+            ForgetContentDigest(path);
+            _digestCache.Invalidate(path);
+            return false;
+        }
+
+        if (TryGetContentDigest(path, out var cached) && cached.MatchesToken(token))
+        {
+            digest = cached.Digest;
+        }
+        else if (_digestCache.TryRead(path, token, out var recorded))
+        {
+            // The durable tier is what survives a restart. Promote its answer
+            // into memory so later requests cost only a stat.
+            digest = recorded;
+            RememberContentDigest(path, new ContentDigestCacheEntry(token, digest));
+        }
+        else
+        {
+            ForgetContentDigest(path);
+            return false;
+        }
+
+        if (MacPermalinkContentIdentity.TryRead(path) != token)
+        {
+            ForgetContentDigest(path);
+            _digestCache.Invalidate(path);
+            digest = string.Empty;
+            return false;
+        }
+
+        length = token.Length;
+        return true;
+    }
+
+    private static PermalinkLeaf BuildLeaf(
+        string kind,
+        string role,
+        string? relativePath,
+        string digest,
+        long length)
+    {
         var leafBytes = Encoding.UTF8.GetBytes(
             $"{kind}\0{role}\0{relativePath}\0{length}\0{digest}");
         return new PermalinkLeaf(

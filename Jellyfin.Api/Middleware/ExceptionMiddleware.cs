@@ -56,13 +56,24 @@ public class ExceptionMiddleware
         }
         catch (Exception ex)
         {
+            ex = GetActualException(ex);
+
+            if (ex is OperationCanceledException
+                && context.RequestAborted.IsCancellationRequested)
+            {
+                _logger.LogDebug(
+                    "Request aborted by client: {ExceptionMessage}. URL {Method} {Url}.",
+                    ex.Message.TrimEnd('.'),
+                    context.Request.Method,
+                    context.Request.Path);
+                return;
+            }
+
             if (context.Response.HasStarted)
             {
                 _logger.LogWarning("The response has already started, the exception middleware will not be executed.");
                 throw;
             }
-
-            ex = GetActualException(ex);
 
             bool ignoreStackTrace =
                 ex is SocketException

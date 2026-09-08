@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -18,6 +17,9 @@ namespace Emby.Server.Implementations.Permalinks;
 /// </summary>
 public sealed class PermalinkEvidence
 {
+    private const int DefaultContentDigestMemoryLimit = 4096;
+    private const int ContentDigestGateCount = 256;
+
     /// <summary>
     /// Caches the full-content SHA-256 for a path, valid as long as its macOS
     /// change token (device, inode, status change time, length -- see
@@ -31,11 +33,16 @@ public sealed class PermalinkEvidence
     /// read (non-macOS host, or the stat call fails) is never cached and is
     /// hashed on every call, per the same design rule.
     /// </summary>
-    private readonly ConcurrentDictionary<string, ContentDigestCacheEntry> _contentDigestCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ContentDigestCacheEntry> _contentDigestCache = new(StringComparer.Ordinal);
+    private readonly object _contentDigestCacheGate = new();
+    private readonly SemaphoreSlim[] _contentDigestGates = Enumerable.Range(0, ContentDigestGateCount)
+        .Select(_ => new SemaphoreSlim(1, 1))
+        .ToArray();
 
     private readonly PermalinkContentReadMeter _contentReads;
 
     private readonly PermalinkContentDigestCache _digestCache;
+    private readonly int _contentDigestMemoryLimit;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkEvidence"/> class.
@@ -48,10 +55,14 @@ public sealed class PermalinkEvidence
     /// <param name="digestCache">Remembers digests across process lifetimes.</param>
     internal PermalinkEvidence(
         PermalinkContentReadMeter contentReads,
-        PermalinkContentDigestCache digestCache)
+        PermalinkContentDigestCache digestCache,
+        int contentDigestMemoryLimit = DefaultContentDigestMemoryLimit)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(contentDigestMemoryLimit);
+
         _contentReads = contentReads;
         _digestCache = digestCache;
+        _contentDigestMemoryLimit = contentDigestMemoryLimit;
     }
 
     /// <summary>
@@ -74,7 +85,7 @@ public sealed class PermalinkEvidence
     /// <param name="path">The path whose on-disk content just changed.</param>
     public void InvalidateContentDigest(string path)
     {
-        _contentDigestCache.TryRemove(path, out _);
+        ForgetContentDigest(path);
         _digestCache.Invalidate(path);
     }
 
@@ -95,7 +106,7 @@ public sealed class PermalinkEvidence
             return false;
         }
 
-        if (_contentDigestCache.TryGetValue(path, out var cached) && cached.MatchesToken(token))
+        if (TryGetContentDigest(path, out var cached) && cached.MatchesToken(token))
         {
             return true;
         }
@@ -343,12 +354,33 @@ public sealed class PermalinkEvidence
         string path,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        var gate = _contentDigestGates[(StringComparer.Ordinal.GetHashCode(path) & int.MaxValue) % ContentDigestGateCount];
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return await HashFileCoreAsync(kind, role, relativePath, path, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task<PermalinkLeaf> HashFileCoreAsync(
+        string kind,
+        string role,
+        string? relativePath,
+        string path,
+        CancellationToken cancellationToken)
+    {
         var token = MacPermalinkContentIdentity.TryRead(path);
         string digest;
         long length;
 
         if (token is { } current
-            && _contentDigestCache.TryGetValue(path, out var cached)
+            && TryGetContentDigest(path, out var cached)
             && cached.MatchesToken(current))
         {
             digest = cached.Digest;
@@ -364,7 +396,7 @@ public sealed class PermalinkEvidence
             // in-process tier so repeats within this process cost a stat.
             digest = recorded;
             length = durable.Length;
-            _contentDigestCache[path] = new ContentDigestCacheEntry(durable, digest);
+            RememberContentDigest(path, new ContentDigestCacheEntry(durable, digest));
         }
         else
         {
@@ -380,20 +412,27 @@ public sealed class PermalinkEvidence
             length = stream.Length;
             digest = "sha256:" + Convert.ToHexStringLower(hash);
 
-            if (token is { } fresh)
+            var tokenAfterRead = MacPermalinkContentIdentity.TryRead(path);
+            if (token is { } beforeRead && tokenAfterRead is { } afterRead && beforeRead == afterRead)
             {
-                _contentDigestCache[path] = new ContentDigestCacheEntry(fresh, digest);
-                _digestCache.Write(path, fresh, digest);
+                RememberContentDigest(path, new ContentDigestCacheEntry(afterRead, digest));
+                _digestCache.Write(path, afterRead, digest);
             }
             else
             {
                 // No readable change token means nothing authorizes reuse, so
                 // neither tier may keep an answer for this path.
-                _contentDigestCache.TryRemove(path, out _);
+                ForgetContentDigest(path);
                 _digestCache.Invalidate(path);
+                if (token != tokenAfterRead
+                    && (token is not null || tokenAfterRead is not null))
+                {
+                    throw new IOException($"Media changed while its content identity was being computed: '{path}'.");
+                }
             }
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         var leafBytes = Encoding.UTF8.GetBytes(
             $"{kind}\0{role}\0{relativePath}\0{length}\0{digest}");
         return new PermalinkLeaf(
@@ -403,6 +442,39 @@ public sealed class PermalinkEvidence
             "sha256:" + Convert.ToHexStringLower(SHA256.HashData(leafBytes)),
             length,
             1);
+    }
+
+    private bool TryGetContentDigest(string path, out ContentDigestCacheEntry entry)
+    {
+        lock (_contentDigestCacheGate)
+        {
+            return _contentDigestCache.TryGetValue(path, out entry!);
+        }
+    }
+
+    private void RememberContentDigest(string path, ContentDigestCacheEntry entry)
+    {
+        lock (_contentDigestCacheGate)
+        {
+            if (!_contentDigestCache.ContainsKey(path)
+                && _contentDigestCache.Count >= _contentDigestMemoryLimit)
+            {
+                // Clearing is deliberately simple and bounded. The durable
+                // tier keeps evicted entries O(1), so an LRU would add state
+                // and lock complexity without avoiding a media read.
+                _contentDigestCache.Clear();
+            }
+
+            _contentDigestCache[path] = entry;
+        }
+    }
+
+    private void ForgetContentDigest(string path)
+    {
+        lock (_contentDigestCacheGate)
+        {
+            _contentDigestCache.Remove(path);
+        }
     }
 
     private static PermalinkEvidenceResult Build(IReadOnlyList<PermalinkLeaf> source)

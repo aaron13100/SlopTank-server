@@ -26,21 +26,23 @@ namespace Emby.Server.Implementations.Permalinks;
 /// Entries are written as ordinary JSON rather than canonical JSON: unlike a
 /// permalink document, a cache entry's bytes are not hashed into any identity,
 /// so byte-exact serialization would be a cost with no consumer. The record is
-/// versioned and tolerates unknown fields so a later field can be added without
-/// invalidating every entry on disk.
+/// versioned, tolerates unknown fields, and carries a checksum over every field
+/// used to authorize reuse so a valid-looking corruption is still a miss.
 ///
 /// Every failure is a miss, never an error: a cache that cannot be read or
 /// written degrades to the full read that would have happened anyway. Each one
 /// is logged with the path and the exception, because a cache that has silently
 /// stopped working looks exactly like a server that is simply slow.
 ///
-/// Entries for deleted media are not swept. At roughly 400 bytes per file and a
-/// library of a few thousand, the whole store is under a megabyte, so a sweeper
-/// would be more moving parts than the space it reclaims.
+/// Entries for deleted media are not swept. Each of the 256 shards accepts at
+/// most 64 entries and each entry is at most 4 KiB, so cache-created disk use
+/// remains bounded without a whole-store traversal on a playback request.
 /// </summary>
 internal sealed class PermalinkContentDigestCache
 {
-    private const int CurrentVersion = 1;
+    private const int CurrentVersion = 2;
+    private const int MaximumEntryBytes = 4096;
+    private const int DefaultMaximumEntriesPerShard = 64;
     private const string RecordKind = "permalink-content-digest";
 
     private static readonly JsonSerializerOptions _jsonOptions = new()
@@ -51,6 +53,8 @@ internal sealed class PermalinkContentDigestCache
 
     private readonly string? _cacheRoot;
     private readonly ILogger<PermalinkContentDigestCache> _logger;
+    private readonly int _maximumEntriesPerShard;
+    private readonly object _writeGate = new();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkContentDigestCache"/> class.
@@ -62,12 +66,19 @@ internal sealed class PermalinkContentDigestCache
     /// cache existed rather than failing.
     /// </param>
     /// <param name="logger">The logger.</param>
-    public PermalinkContentDigestCache(string? authorityRoot, ILogger<PermalinkContentDigestCache> logger)
+    /// <param name="maximumEntriesPerShard">Maximum number of cache-owned or hostile entries accepted in one shard.</param>
+    public PermalinkContentDigestCache(
+        string? authorityRoot,
+        ILogger<PermalinkContentDigestCache> logger,
+        int maximumEntriesPerShard = DefaultMaximumEntriesPerShard)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumEntriesPerShard);
+
         _cacheRoot = string.IsNullOrWhiteSpace(authorityRoot)
             ? null
             : Path.Combine(authorityRoot, ".sloptank", "content-digests");
         _logger = logger;
+        _maximumEntriesPerShard = maximumEntriesPerShard;
     }
 
     /// <summary>
@@ -98,8 +109,44 @@ internal sealed class PermalinkContentDigestCache
                 return false;
             }
 
-            record = JsonSerializer.Deserialize<PermalinkContentDigestRecord>(
-                File.ReadAllBytes(entryPath), _jsonOptions);
+            if ((File.GetAttributes(entryPath) & FileAttributes.ReparsePoint) != 0)
+            {
+                _logger.LogWarning(
+                    "Content digest entry {EntryPath} for {MediaPath} is a symbolic link; treating it as a miss",
+                    entryPath,
+                    path);
+                return false;
+            }
+
+            using var stream = new FileStream(
+                entryPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: MaximumEntryBytes,
+                options: FileOptions.SequentialScan);
+            if (stream.Length <= 0 || stream.Length > MaximumEntryBytes)
+            {
+                _logger.LogWarning(
+                    "Content digest entry {EntryPath} for {MediaPath} is {EntryLength} bytes, which exceeds the accepted cache record bounds",
+                    entryPath,
+                    path,
+                    stream.Length);
+                return false;
+            }
+
+            var bytes = new byte[(int)stream.Length];
+            stream.ReadExactly(bytes);
+            if (stream.ReadByte() != -1)
+            {
+                _logger.LogWarning(
+                    "Content digest entry {EntryPath} for {MediaPath} grew while it was read; treating it as a miss",
+                    entryPath,
+                    path);
+                return false;
+            }
+
+            record = JsonSerializer.Deserialize<PermalinkContentDigestRecord>(bytes, _jsonOptions);
         }
         catch (Exception exception) when (exception is IOException
             or UnauthorizedAccessException
@@ -113,13 +160,20 @@ internal sealed class PermalinkContentDigestCache
             return false;
         }
 
-        if (record is null || record.Version != CurrentVersion || !record.Matches(path, token))
+        if (record is null
+            || record.Version != CurrentVersion
+            || !string.Equals(record.Kind, RecordKind, StringComparison.Ordinal)
+            || !record.Matches(path, token)
+            || !IsCanonicalDigest(record.Digest)
+            || !IsCanonicalTimestamp(record.CreatedAt)
+            || !IsCanonicalTimestamp(record.UpdatedAt)
+            || !string.Equals(record.RecordHash, ComputeRecordHash(record), StringComparison.Ordinal))
         {
             return false;
         }
 
         digest = record.Digest;
-        return digest.Length > 0;
+        return true;
     }
 
     /// <summary>
@@ -132,6 +186,14 @@ internal sealed class PermalinkContentDigestCache
     {
         if (EntryPath(path) is not { } entryPath)
         {
+            return;
+        }
+
+        if (!IsCanonicalDigest(digest))
+        {
+            _logger.LogWarning(
+                "Content digest for {MediaPath} was not recorded because it is not a canonical SHA-256 value",
+                path);
             return;
         }
 
@@ -150,26 +212,50 @@ internal sealed class PermalinkContentDigestCache
             CreatedAt = now,
             UpdatedAt = now,
         };
+        record.RecordHash = ComputeRecordHash(record);
+        var serialized = JsonSerializer.SerializeToUtf8Bytes(record, _jsonOptions);
+        if (serialized.Length > MaximumEntryBytes)
+        {
+            _logger.LogWarning(
+                "Content digest for {MediaPath} was not recorded because its {EntryLength} byte record exceeds the cache bound",
+                path,
+                serialized.Length);
+            return;
+        }
 
         // Written to a sibling temporary file and renamed, so a reader never
         // sees a half-written entry. A torn entry here would authorize a wrong
         // digest for a content-addressed identity, which is worse than the slow
         // path this cache exists to avoid.
         var temporaryPath = entryPath + ".tmp-" + Guid.NewGuid().ToString("N");
-        try
+        lock (_writeGate)
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(entryPath)!);
-            File.WriteAllBytes(temporaryPath, JsonSerializer.SerializeToUtf8Bytes(record, _jsonOptions));
-            File.Move(temporaryPath, entryPath, overwrite: true);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            _logger.LogWarning(
-                exception,
-                "Content digest for {MediaPath} could not be recorded at {EntryPath}; the next evidence computation will read the file again",
-                path,
-                entryPath);
-            TryDeleteTemporary(temporaryPath);
+            try
+            {
+                var shardPath = Path.GetDirectoryName(entryPath)!;
+                Directory.CreateDirectory(shardPath);
+                if (!File.Exists(entryPath) && !ShardHasCapacity(shardPath))
+                {
+                    _logger.LogWarning(
+                        "Content digest shard {ShardPath} reached its {MaximumEntries} entry bound; {MediaPath} will not be cached",
+                        shardPath,
+                        _maximumEntriesPerShard,
+                        path);
+                    return;
+                }
+
+                File.WriteAllBytes(temporaryPath, serialized);
+                File.Move(temporaryPath, entryPath, overwrite: true);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                _logger.LogWarning(
+                    exception,
+                    "Content digest for {MediaPath} could not be recorded at {EntryPath}; the next evidence computation will read the file again",
+                    path,
+                    entryPath);
+                TryDeleteTemporary(temporaryPath);
+            }
         }
     }
 
@@ -184,18 +270,36 @@ internal sealed class PermalinkContentDigestCache
             return;
         }
 
-        try
+        lock (_writeGate)
         {
-            File.Delete(entryPath);
+            try
+            {
+                File.Delete(entryPath);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                _logger.LogWarning(
+                    exception,
+                    "Content digest entry {EntryPath} for {MediaPath} could not be removed; the change token still rejects it, so this is a leak of one small file rather than a stale answer",
+                    entryPath,
+                    path);
+            }
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+    }
+
+    private bool ShardHasCapacity(string shardPath)
+    {
+        var count = 0;
+        foreach (var unused in Directory.EnumerateFileSystemEntries(shardPath))
         {
-            _logger.LogWarning(
-                exception,
-                "Content digest entry {EntryPath} for {MediaPath} could not be removed; the change token still rejects it, so this is a leak of one small file rather than a stale answer",
-                entryPath,
-                path);
+            count++;
+            if (count >= _maximumEntriesPerShard)
+            {
+                return false;
+            }
         }
+
+        return true;
     }
 
     private void TryDeleteTemporary(string temporaryPath)
@@ -226,6 +330,52 @@ internal sealed class PermalinkContentDigestCache
 
         var key = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(path)));
         return Path.Combine(_cacheRoot, key[..2], key + ".json");
+    }
+
+    private static bool IsCanonicalDigest(string? value)
+    {
+        if (value is null
+            || value.Length != 71
+            || !value.StartsWith("sha256:", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        foreach (var character in value.AsSpan(7))
+        {
+            if (!char.IsAsciiHexDigitLower(character))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsCanonicalTimestamp(string? value)
+        => DateTimeOffset.TryParseExact(
+            value,
+            "O",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None,
+            out _);
+
+    private static string ComputeRecordHash(PermalinkContentDigestRecord record)
+    {
+        var material = string.Join(
+            '\0',
+            record.Version.ToString(CultureInfo.InvariantCulture),
+            record.Kind,
+            record.Path,
+            record.Device.ToString(CultureInfo.InvariantCulture),
+            record.Inode.ToString(CultureInfo.InvariantCulture),
+            record.ChangeTimeSeconds.ToString(CultureInfo.InvariantCulture),
+            record.ChangeTimeNanoseconds.ToString(CultureInfo.InvariantCulture),
+            record.Length.ToString(CultureInfo.InvariantCulture),
+            record.Digest,
+            record.CreatedAt,
+            record.UpdatedAt);
+        return "sha256:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(material)));
     }
 
     /// <summary>
@@ -265,6 +415,9 @@ internal sealed class PermalinkContentDigestCache
 
         [JsonPropertyName("updated_at")]
         public string UpdatedAt { get; set; } = string.Empty;
+
+        [JsonPropertyName("record_hash")]
+        public string RecordHash { get; set; } = string.Empty;
 
         /// <summary>
         /// Returns whether this record still describes the file at hand.

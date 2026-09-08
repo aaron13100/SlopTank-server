@@ -14,67 +14,72 @@
 
 ---
 
-Jellyfin is a Free Software Media System that puts you in control of managing and streaming your media. It is an alternative to the proprietary Emby and Plex, to provide media from a dedicated server to end-user devices via multiple apps. Jellyfin is descended from Emby's 3.5.2 release and ported to the .NET platform to enable full cross-platform support.
+SlopTank Server is a customized media-server backend derived from the
+[upstream Jellyfin server](https://github.com/jellyfin/jellyfin). Jellyfin is
+a free-software media system descended from Emby 3.5.2; SlopTank retains that
+history and the notices and copyrights of the upstream copyright holders. The
+SlopTank name and fork-specific changes do not imply endorsement by Jellyfin.
 
-There are no strings attached, no premium licenses or features, and no hidden agendas: just a team that wants to build something better and work together to achieve it. We welcome anyone who is interested in joining us in our quest!
-
-For further details, please see [our documentation page](https://jellyfin.org/docs/). To receive the latest updates, get help with Jellyfin, and join the community, please visit [one of our communication channels](https://jellyfin.org/docs/general/getting-help). For more information about the project, please see our [about page](https://jellyfin.org/docs/general/about).
-
-<strong>Want to get started?</strong><br/>
-Check out our <a href="https://jellyfin.org/downloads">downloads page</a> or our <a href="https://jellyfin.org/docs/general/installation/">installation guide</a>, then see our <a href="https://jellyfin.org/docs/general/quick-start">quick start guide</a>. You can also <a href="https://jellyfin.org/docs/general/installation/source">build from source</a>.<br/>
-
-<strong>Something not working right?</strong><br/>
-Open an <a href="https://jellyfin.org/docs/general/contributing/issues">Issue</a> on GitHub.<br/>
-
-<strong>Want to contribute?</strong><br/>
-Check out our <a href="https://jellyfin.org/contribute">contributing choose-your-own-adventure</a> to see where you can help, then see our <a href="https://jellyfin.org/docs/general/contributing/">contributing guide</a> and our <a href="https://jellyfin.org/docs/general/community-standards">community standards</a>.<br/>
-
-<strong>New idea or improvement?</strong><br/>
-Check out our <a href="https://features.jellyfin.org/?view=most-wanted">feature request hub</a>.<br/>
-
-<strong>Don't see Jellyfin in your language?</strong><br/>
-Check out our <a href="https://translate.jellyfin.org">Weblate instance</a> to help translate Jellyfin and its subprojects.<br/>
-
-<a href="https://translate.jellyfin.org/engage/jellyfin/?utm_source=widget">
-<img src="https://translate.jellyfin.org/widgets/jellyfin/-/jellyfin-web/multi-auto.svg" alt="Detailed Translation Status"/>
-</a>
+The canonical public source repositories are
+[SlopTank-server](https://github.com/aaron13100/SlopTank-server) for this
+backend and [SlopTank](https://github.com/aaron13100/SlopTank) for its web
+client. Use the [SlopTank-server issue tracker](https://github.com/aaron13100/SlopTank-server/issues)
+for fork-specific defects or source questions. Jellyfin's
+[documentation](https://jellyfin.org/docs/) remains useful for inherited
+server concepts; upstream defects and contributions should follow Jellyfin's
+own repository and contribution process.
 
 ---
 
 ## SlopTank Server
 
-This repository contains the code for Jellyfin's backend server. Note that this is only one of many projects under the Jellyfin GitHub [organization](https://github.com/jellyfin/) on GitHub. If you want to contribute, you can start by checking out our [documentation](https://jellyfin.org/docs/general/contributing/index.html) to see what to work on.
+This repository contains SlopTank's backend source. It is maintained as a
+fork of Jellyfin rather than as one of the projects in the Jellyfin GitHub
+organization. See `DISTRIBUTION-SOURCE.md` for the source/artifact contract,
+`LICENSE-ELECTION.md` for the narrowly scoped election covering SlopTank's
+own contributions, and `LICENSE` for the distributed GPLv2 text.
 
 ## Server Development
 
-These instructions will help you get set up with a local development environment in order to contribute to this repository. Before you start, please be sure to completely read our [guidelines on development contributions](https://jellyfin.org/docs/general/contributing/development.html). Note that this project is supported on all major operating systems except FreeBSD, which is still incompatible.
+These instructions set up a local development environment for this fork.
+Jellyfin's [development guide](https://jellyfin.org/docs/general/contributing/development.html)
+provides useful upstream context, but SlopTank repository paths and policies
+in this README take precedence for SlopTank work. The inherited server is
+supported on all major operating systems except FreeBSD, which remains
+incompatible.
 
 ### Prerequisites
 
 Before the project can be built, you must first install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet) on your system.
 
-Instructions to run this project from the command line are included here, but you will also need to install an IDE if you want to debug the server while it is running. Any IDE that supports .NET 6 development will work, but two options are recent versions of [Visual Studio](https://visualstudio.microsoft.com/downloads/) (at least 2022) and [Visual Studio Code](https://code.visualstudio.com/Download).
+Instructions to run this project from the command line are included here, but you will also need to install an IDE if you want to debug the server while it is running. Any IDE that supports .NET 10 development will work, but two options are recent versions of [Visual Studio](https://visualstudio.microsoft.com/downloads/) (at least 2022) and [Visual Studio Code](https://code.visualstudio.com/Download).
 
 [ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg) will also need to be installed.
 
 ### Cloning the Repository
 
-After dependencies have been installed you will need to clone a local copy of this repository. If you just want to run the server from source you can clone this repository directly, but if you are intending to contribute code changes to the project, you should [set up your own fork](https://jellyfin.org/docs/general/contributing/development.html#set-up-your-copy-of-the-repo) of the repository. The following example shows how you can clone the repository directly over HTTPS.
+After installing the dependencies, clone the canonical SlopTank server
+repository over HTTPS:
 
 ```bash
-git clone https://github.com/jellyfin/jellyfin.git
+git clone https://github.com/aaron13100/SlopTank-server.git
 ```
 
 ### Installing the Web Client
 
-The server is configured to host the static files required for the [web client](https://github.com/jellyfin/jellyfin-web) in addition to serving the backend by default. Before you can run the server, you will need to get a copy of the web client since they are not included in this repository directly.
+The server is configured to host the static files required for the
+[SlopTank web client](https://github.com/aaron13100/SlopTank) in addition to
+serving the backend by default. The web client is not included in this
+repository.
 
 Note that it is recommended for development to [host the web client separately](#hosting-the-web-client-separately) from the web server with some additional configuration, in which case you can skip this step.
 
 There are two options to get the files for the web client.
 
-1. Build them from source following the instructions on the [jellyfin-web repository](https://github.com/jellyfin/jellyfin-web)
-2. Get the pre-built files from an existing installation of the server. For example, with a Windows server installation the client files are located at `C:\Program Files\Jellyfin\Server\jellyfin-web`
+1. Build it from source following the instructions in the [SlopTank repository](https://github.com/aaron13100/SlopTank).
+2. Use the web artifact supplied with the matching SlopTank distribution.
+   Do not silently substitute an upstream Jellyfin web artifact: its source
+   and identity would not match the SlopTank distribution manifest.
 
 ### Running The Server
 
@@ -94,11 +99,13 @@ After the required extensions are installed, you can run the server by pressing 
 
 #### Running From the Command Line
 
-To run the server from the command line you can use the `dotnet run` command. The example below shows how to do this if you have cloned the repository into a directory named `jellyfin` (the default directory name) and should work on all operating systems.
+To run the server from the command line you can use the `dotnet run` command.
+The example below assumes the default clone directory names and works on all
+operating systems.
 
 ```bash
-cd jellyfin                          # Move into the repository directory
-dotnet run --project Jellyfin.Server --webdir /absolute/path/to/jellyfin-web/dist # Run the server startup project
+cd SlopTank-server
+dotnet run --project Jellyfin.Server --webdir /absolute/path/to/SlopTank/dist
 ```
 
 A second option is to build the project and then run the resulting executable file directly. When running the executable directly you can easily add command line options. Add the `--help` flag to list details on all the supported command line options.
@@ -154,7 +161,10 @@ The following sections describe some more advanced scenarios for running the ser
 
 #### Hosting The Web Client Separately
 
-It is not necessary to host the frontend web client as part of the backend server. Hosting these two components separately may be useful for frontend developers who would prefer to host the client in a separate webpack development server for a tighter development loop. See the [jellyfin-web](https://github.com/jellyfin/jellyfin-web#getting-started) repo for instructions on how to do this.
+It is not necessary to host the frontend web client as part of the backend
+server. Hosting these two components separately may be useful for frontend
+development. See the [SlopTank web client](https://github.com/aaron13100/SlopTank)
+for its current development instructions.
 
 To instruct the server not to host the web content, there is a `nowebclient` configuration flag that must be set. This can be specified using the command line
 switch `--nowebclient` or the environment variable `JELLYFIN_NOWEBCONTENT=true`.

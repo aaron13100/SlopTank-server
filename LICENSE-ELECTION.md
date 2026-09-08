@@ -98,12 +98,15 @@ no upstream lineage (for example, everything under
 `Emby.Server.Implementations/Permalinks/`), the election applies to that
 file in full, because the whole file is that commit's own material.
 
-This election also does not change, and has no bearing on, the
-`GPL-3.0-only` `PackageLicenseExpression` declared in this repository's
-seven packable `.csproj` files (see the audit cited above, Part 1.4 and
-Part 3.1). Those declarations describe upstream-authored projects and are
-outside this election's scope in the same way the rest of the inherited
-code is.
+This repository currently has a repository-wide `IsPackable=false` default
+in `Directory.Build.props` and does not publish its internal server projects
+as NuGet packages. Its current project files do not declare a
+`PackageLicenseExpression`. These are packaging facts, not a licence grant:
+disabling package publication does not change the licence of inherited
+upstream material, and this election does not change the licence of inherited
+upstream material either. If package publication is enabled in the future,
+the package identifiers, licence metadata, corresponding source, and notices
+must be audited at that time rather than inferred from this election.
 
 ## Why a single document instead of per-file headers
 

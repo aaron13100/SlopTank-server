@@ -588,6 +588,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkOperationJournal>();
             serviceCollection.AddSingleton<PermalinkItemStateMutation>();
             serviceCollection.AddSingleton<IHostedService, PermalinkOperationReconciler>();
+            serviceCollection.AddSingleton<IHostedService, PermalinkOperationArchiver>();
             serviceCollection.AddSingleton<PermalinkPendingIdentityMutation>();
             serviceCollection.AddSingleton<PermalinkMutationBundleFactory>();
             serviceCollection.AddSingleton<PermalinkMutationClaimStore>();

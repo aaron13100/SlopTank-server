@@ -49,6 +49,19 @@ internal sealed class PermalinkOperationJournal : IDisposable
         "Permalinks:Diagnostics:PendingMigrationFaultAfterDirectories";
 
     /// <summary>
+    /// The time terminal operation records remain in the hot journal before startup moves their
+    /// byte-identical directory to the monthly archive.
+    /// </summary>
+    public const string OperationJournalRetentionKey = "Permalinks:OperationJournalRetention";
+
+    /// <summary>
+    /// The hard ceiling on operation directories examined (and therefore moved) by one automatic
+    /// archive pass.
+    /// </summary>
+    public const string OperationJournalArchiveMaximumOperationsPerPassKey =
+        "Permalinks:OperationJournalArchiveMaximumOperationsPerPass";
+
+    /// <summary>
     /// How long the pending-check meter waits before it calls a run of lookups
     /// finished and logs its totals.
     ///
@@ -65,6 +78,8 @@ internal sealed class PermalinkOperationJournal : IDisposable
     private readonly bool _pendingIndexEnabled;
     private readonly int _pendingMigrationBatchSize;
     private readonly long _pendingMigrationFaultAfterDirectories;
+    private readonly TimeSpan _operationJournalRetention;
+    private readonly int _operationJournalArchiveMaximumOperationsPerPass;
     private readonly SemaphoreSlim _pendingIndexLock = new(1, 1);
     private Dictionary<Guid, PermalinkOperationDocument>? _pendingOperations;
     private int _runLookups;
@@ -90,6 +105,27 @@ internal sealed class PermalinkOperationJournal : IDisposable
         _pendingMigrationFaultAfterDirectories = configuration.GetValue(
             PendingMigrationFaultAfterDirectoriesKey,
             0L);
+        _operationJournalRetention = configuration.GetValue(
+            OperationJournalRetentionKey,
+            TimeSpan.Zero);
+        if (_operationJournalRetention < TimeSpan.Zero)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "operation-journal-retention-invalid",
+                $"{OperationJournalRetentionKey} cannot be negative.");
+        }
+
+        _operationJournalArchiveMaximumOperationsPerPass = configuration.GetValue(
+            OperationJournalArchiveMaximumOperationsPerPassKey,
+            100);
+        if (_operationJournalArchiveMaximumOperationsPerPass is <= 0 or > 10_000)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "operation-journal-archive-limit-invalid",
+                $"{OperationJournalArchiveMaximumOperationsPerPassKey} must be between 1 and 10000.");
+        }
         if (!_pendingIndexEnabled)
         {
             _logger.LogWarning(
@@ -111,12 +147,90 @@ internal sealed class PermalinkOperationJournal : IDisposable
 
     public string GetOperationPath(Guid operationId)
     {
+        var active = GetActiveOperationPath(operationId);
+        if (IsSymbolicLink(active))
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "operation-path-linked",
+                $"Operation '{operationId}' is stored through a symbolic link and was refused.");
+        }
+
+        if (Directory.Exists(active))
+        {
+            return active;
+        }
+
+        var archiveRoot = GetArchiveRoot();
+        if (IsSymbolicLink(archiveRoot))
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "operation-archive-linked",
+                "The permalink operation archive root is a symbolic link and was refused.");
+        }
+
+        if (!Directory.Exists(archiveRoot))
+        {
+            return active;
+        }
+
+        string? found = null;
+        foreach (var monthPath in Directory.EnumerateDirectories(archiveRoot))
+        {
+            var month = Path.GetFileName(monthPath);
+            if (!DateTime.TryParseExact(
+                    month,
+                    "yyyy-MM",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out _)
+                || IsSymbolicLink(monthPath))
+            {
+                continue;
+            }
+
+            var candidate = Path.Combine(monthPath, operationId.ToString("D"));
+            if (IsSymbolicLink(candidate))
+            {
+                throw new PermalinkException(
+                    PermalinkErrorKind.Conflict,
+                    "operation-archive-path-linked",
+                    $"Archived operation '{operationId}' is stored through a symbolic link and was refused.");
+            }
+
+            if (!Directory.Exists(candidate))
+            {
+                continue;
+            }
+
+            if (found is not null)
+            {
+                throw new PermalinkException(
+                    PermalinkErrorKind.Conflict,
+                    "operation-archive-ambiguous",
+                    $"Operation '{operationId}' exists in more than one archive month.");
+            }
+
+            found = candidate;
+        }
+
+        return found ?? active;
+    }
+
+    private string GetActiveOperationPath(Guid operationId)
+    {
         return Path.Combine(
             _authority.Root,
             ".sloptank",
             "permalinks",
             "operations",
             operationId.ToString("D"));
+    }
+
+    private string GetArchiveRoot()
+    {
+        return Path.Combine(_authority.Root, ".sloptank", "permalinks", "operations-archive");
     }
 
     /// <summary>
@@ -166,15 +280,29 @@ internal sealed class PermalinkOperationJournal : IDisposable
         Guid operationId,
         CancellationToken cancellationToken)
     {
-        var path = Path.Combine(GetOperationPath(operationId), "operation.json");
-        if (!File.Exists(path))
+        for (var attempt = 0; attempt < 2; attempt++)
         {
-            return null;
+            var path = Path.Combine(GetOperationPath(operationId), "operation.json");
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+
+            try
+            {
+                return CanonicalJson.Deserialize<PermalinkOperationDocument>(
+                    await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false),
+                    path);
+            }
+            catch (Exception exception) when (
+                attempt == 0
+                && exception is FileNotFoundException or DirectoryNotFoundException)
+            {
+                // Retry the locator once across an atomic hot-to-archive rename.
+            }
         }
 
-        return CanonicalJson.Deserialize<PermalinkOperationDocument>(
-            await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false),
-            path);
+        return null;
     }
 
     public async Task WriteOperationAsync(
@@ -192,7 +320,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
         _fileSystem.CreateDirectoryDurable(Path.GetDirectoryName(markerPath)!);
         await PublishExactAsync(markerPath, bytes, cancellationToken).ConfigureAwait(false);
 
-        var root = GetOperationPath(operation.OperationId);
+        var root = GetActiveOperationPath(operation.OperationId);
         _fileSystem.CreateDirectoryDurable(root);
         var createdOperation = await PublishExactAsync(
             Path.Combine(root, "operation.json"),
@@ -211,7 +339,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
         {
             if (_pendingOperations is not null)
             {
-                if (GetSettledPhase(operation.OperationId) is null)
+                if (GetActiveSettledPhase(operation.OperationId) is null)
                 {
                     _pendingOperations[operation.OperationId] = operation;
                 }
@@ -234,7 +362,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
         CancellationToken cancellationToken)
     {
         await PublishExactAsync(
-            Path.Combine(GetOperationPath(operationId), phase.Name + ".json"),
+            Path.Combine(GetActiveOperationPath(operationId), phase.Name + ".json"),
             CanonicalJson.Serialize(document),
             cancellationToken).ConfigureAwait(false);
         if (phase.FencesItem)
@@ -279,7 +407,20 @@ internal sealed class PermalinkOperationJournal : IDisposable
 
     public bool HasPhase(Guid operationId, PermalinkPhase phase)
     {
-        return File.Exists(Path.Combine(GetOperationPath(operationId), phase.Name + ".json"));
+        var path = Path.Combine(GetOperationPath(operationId), phase.Name + ".json");
+        return File.Exists(path)
+            || File.Exists(Path.Combine(GetOperationPath(operationId), phase.Name + ".json"));
+    }
+
+    private bool HasActivePhase(Guid operationId, PermalinkPhase phase)
+    {
+        return File.Exists(Path.Combine(GetActiveOperationPath(operationId), phase.Name + ".json"));
+    }
+
+    private PermalinkPhase? GetActiveSettledPhase(Guid operationId)
+    {
+        return PermalinkPhase.Declared.FirstOrDefault(
+            phase => !phase.FencesItem && HasActivePhase(operationId, phase));
     }
 
     /// <summary>
@@ -319,15 +460,29 @@ internal sealed class PermalinkOperationJournal : IDisposable
         PermalinkPhase phase,
         CancellationToken cancellationToken)
     {
-        var path = Path.Combine(GetOperationPath(operationId), phase.Name + ".json");
-        if (!File.Exists(path))
+        for (var attempt = 0; attempt < 2; attempt++)
         {
-            return null;
+            var path = Path.Combine(GetOperationPath(operationId), phase.Name + ".json");
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+
+            try
+            {
+                return CanonicalJson.Deserialize<PermalinkOperationPhase>(
+                    await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false),
+                    path);
+            }
+            catch (Exception exception) when (
+                attempt == 0
+                && exception is FileNotFoundException or DirectoryNotFoundException)
+            {
+                // Retry the locator once across an atomic hot-to-archive rename.
+            }
         }
 
-        return CanonicalJson.Deserialize<PermalinkOperationPhase>(
-            await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false),
-            path);
+        return null;
     }
 
     /// <summary>Appends one immutable administrator resolution audit record.</summary>
@@ -340,7 +495,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
         PermalinkOperationResolution resolution,
         CancellationToken cancellationToken)
     {
-        var root = GetOperationPath(operationId);
+        var root = GetActiveOperationPath(operationId);
         var ordinal = Directory.Exists(root)
             ? Directory.EnumerateFiles(root, "resolution-*.json").Count() + 1
             : 1;
@@ -525,7 +680,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
                 continue;
             }
 
-            if (GetSettledPhase(operationId) is not null)
+            if (GetActiveSettledPhase(operationId) is not null)
             {
                 TryDeleteMarker(marker, operationId, "settled");
                 continue;
@@ -580,7 +735,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
             return null;
         }
 
-        var root = GetOperationPath(operationId);
+        var root = GetActiveOperationPath(operationId);
         _fileSystem.CreateDirectoryDurable(root);
         await PublishExactAsync(Path.Combine(root, "operation.json"), markerBytes, cancellationToken)
             .ConfigureAwait(false);
@@ -657,7 +812,8 @@ internal sealed class PermalinkOperationJournal : IDisposable
                     continue;
                 }
 
-                if (Guid.TryParse(name, out var operationId) && GetSettledPhase(operationId) is null)
+                if (Guid.TryParse(name, out var operationId)
+                    && GetActiveSettledPhase(operationId) is null)
                 {
                     var candidate = await ReadAsync(operationId, cancellationToken).ConfigureAwait(false);
                     if (candidate is not null)
@@ -881,6 +1037,210 @@ internal sealed class PermalinkOperationJournal : IDisposable
         }
     }
 
+    /// <summary>
+    /// Moves old terminal operation directories from the hot journal to the month-partitioned
+    /// archive without rewriting any record.
+    /// </summary>
+    /// <remarks>
+    /// This runs only after the pending index has been primed and abandoned work reconciled. Each
+    /// move uses the same create-exclusive, fsynced atomic directory publication primitive as
+    /// permalink content publication. Therefore an interruption can expose the source or the
+    /// destination, never a partially copied replacement. Invalid, linked, pending, suspended, or
+    /// destination-conflicting entries are retained in the hot journal for inspection.
+    /// </remarks>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>Counts describing this bounded maintenance pass.</returns>
+    public async Task<PermalinkOperationArchiveResult> ArchiveTerminalOperationsAsync(
+        CancellationToken cancellationToken)
+    {
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        var operationsRoot = Path.Combine(_authority.Root, ".sloptank", "permalinks", "operations");
+        if (IsSymbolicLink(operationsRoot))
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "operation-journal-linked",
+                "The permalink hot operation journal root is a symbolic link and was refused.");
+        }
+
+        if (!Directory.Exists(operationsRoot))
+        {
+            return new PermalinkOperationArchiveResult(
+                0,
+                0,
+                0,
+                0,
+                0,
+                _operationJournalArchiveMaximumOperationsPerPass);
+        }
+
+        var examined = 0;
+        var archived = 0;
+        var retained = 0;
+        var refused = 0;
+        var failed = 0;
+        var cutoff = _timeProvider.GetUtcNow() - _operationJournalRetention;
+        foreach (var enumeratedPath in Directory.EnumerateDirectories(operationsRoot)
+                     .Take(_operationJournalArchiveMaximumOperationsPerPass))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            examined++;
+            var name = Path.GetFileName(enumeratedPath);
+            if (!Guid.TryParseExact(name, "D", out var operationId)
+                || !string.Equals(name, operationId.ToString("D"), StringComparison.Ordinal))
+            {
+                refused++;
+                _logger.LogError(
+                    "Refusing to archive permalink operation directory '{OperationPath}': its name "
+                    + "is not a canonical lowercase operation id.",
+                    enumeratedPath);
+                continue;
+            }
+
+            var source = GetActiveOperationPath(operationId);
+            if (!string.Equals(
+                    Path.GetFullPath(enumeratedPath),
+                    Path.GetFullPath(source),
+                    StringComparison.Ordinal)
+                || IsSymbolicLink(enumeratedPath))
+            {
+                refused++;
+                _logger.LogError(
+                    "Refusing to archive permalink operation {OperationId}: the hot journal entry "
+                    + "is linked or does not resolve to its canonical path.",
+                    operationId);
+                continue;
+            }
+
+            string? destination = null;
+            try
+            {
+                var operation = await ReadAsync(operationId, cancellationToken).ConfigureAwait(false)
+                    ?? throw new PermalinkException(
+                        PermalinkErrorKind.Conflict,
+                        "operation-document-missing",
+                        $"Operation '{operationId}' has no operation.json document.");
+                if (operation.OperationId != operationId)
+                {
+                    throw new PermalinkException(
+                        PermalinkErrorKind.Conflict,
+                        "operation-document-id-mismatch",
+                        $"Operation directory '{operationId}' contains document '{operation.OperationId}'.");
+                }
+
+                var terminal = GetActiveTerminalPhase(operationId);
+                if (terminal is null || File.Exists(GetPendingMarkerPath(operationId)))
+                {
+                    refused++;
+                    _logger.LogInformation(
+                        "Retaining permalink operation {OperationId} in the hot journal because it "
+                        + "is non-terminal or still has a pending marker.",
+                        operationId);
+                    continue;
+                }
+
+                var terminalPath = Path.Combine(source, terminal.Name + ".json");
+                var terminalDocument = CanonicalJson.Deserialize<PermalinkOperationPhase>(
+                    await File.ReadAllBytesAsync(terminalPath, cancellationToken).ConfigureAwait(false),
+                    terminalPath);
+                if (terminalDocument.OperationId != operationId
+                    || !string.Equals(terminalDocument.State, terminal.Name, StringComparison.Ordinal)
+                    || !DateTimeOffset.TryParse(
+                        terminalDocument.CreatedAt,
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind,
+                        out var terminalAt))
+                {
+                    throw new PermalinkException(
+                        PermalinkErrorKind.Conflict,
+                        "operation-terminal-invalid",
+                        $"Operation '{operationId}' has an invalid terminal phase document.");
+                }
+
+                if (terminalAt > cutoff)
+                {
+                    retained++;
+                    continue;
+                }
+
+                var month = terminalAt.UtcDateTime.ToString("yyyy-MM", CultureInfo.InvariantCulture);
+                destination = Path.Combine(GetArchiveRoot(), month, operationId.ToString("D"));
+                var archiveRoot = GetArchiveRoot();
+                if (IsSymbolicLink(archiveRoot))
+                {
+                    throw new PermalinkException(
+                        PermalinkErrorKind.Unavailable,
+                        "operation-archive-linked",
+                        "The permalink operation archive root is a symbolic link and was refused.");
+                }
+
+                var monthRoot = Path.GetDirectoryName(destination)!;
+                if (IsSymbolicLink(monthRoot))
+                {
+                    throw new PermalinkException(
+                        PermalinkErrorKind.Unavailable,
+                        "operation-archive-month-linked",
+                        $"Archive month '{month}' is a symbolic link and was refused.");
+                }
+
+                if (Directory.Exists(destination) || File.Exists(destination))
+                {
+                    throw new PermalinkException(
+                        PermalinkErrorKind.Conflict,
+                        "operation-archive-exclusive",
+                        $"Archive destination for operation '{operationId}' already exists.");
+                }
+
+                _fileSystem.PublishDirectoryImmutable(source, destination);
+                archived++;
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                or UnauthorizedAccessException
+                or PermalinkException)
+            {
+                var sourceExists = Directory.Exists(source);
+                var destinationExists = destination is not null && Directory.Exists(destination);
+                if (!sourceExists && !destinationExists)
+                {
+                    throw new PermalinkException(
+                        PermalinkErrorKind.Unavailable,
+                        "operation-archive-lost",
+                        $"Archive failure left operation '{operationId}' unreadable at both locations.",
+                        exception);
+                }
+
+                if (!sourceExists && destinationExists)
+                {
+                    archived++;
+                    _logger.LogError(
+                        exception,
+                        "Archiving permalink operation {OperationId} raised after the atomic rename; "
+                        + "the complete destination remains readable at '{Destination}'.",
+                        operationId,
+                        destination);
+                    continue;
+                }
+
+                failed++;
+                _logger.LogError(
+                    exception,
+                    "Could not archive permalink operation {OperationId}; its hot source remains "
+                    + "readable at '{Source}'.",
+                    operationId,
+                    source);
+            }
+        }
+
+        return new PermalinkOperationArchiveResult(
+            examined,
+            archived,
+            retained,
+            refused,
+            failed,
+            _operationJournalArchiveMaximumOperationsPerPass);
+    }
+
     /// <summary>Returns whether any non-terminal durable operation fences an item.</summary>
     /// <param name="itemId">The Jellyfin item identifier.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
@@ -890,6 +1250,31 @@ internal sealed class PermalinkOperationJournal : IDisposable
         CancellationToken cancellationToken)
     {
         return await FindLatestPendingAsync(itemId, cancellationToken).ConfigureAwait(false) is not null;
+    }
+
+    private PermalinkPhase? GetActiveTerminalPhase(Guid operationId)
+    {
+        return PermalinkPhase.Declared.FirstOrDefault(
+            phase => phase.Disposition == PermalinkPhaseDisposition.Terminal
+                && HasActivePhase(operationId, phase));
+    }
+
+    private static bool IsSymbolicLink(string path)
+    {
+        if (new DirectoryInfo(path).LinkTarget is not null)
+        {
+            return true;
+        }
+
+        try
+        {
+            return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return false;
+        }
     }
 
     /// <inheritdoc />

@@ -46,10 +46,6 @@ public class CacheDecorator : IKeyframeExtractor
         {
             keyframeData = _keyframeRepository.GetKeyframeData(itemId).FirstOrDefault();
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
         catch (Exception exception)
         {
             _logger.LogError(
@@ -74,10 +70,6 @@ public class CacheDecorator : IKeyframeExtractor
             try
             {
                 _keyframeRepository.SaveKeyframeDataAsync(itemId, keyframeData, CancellationToken.None).GetAwaiter().GetResult();
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
             }
             catch (Exception exception)
             {

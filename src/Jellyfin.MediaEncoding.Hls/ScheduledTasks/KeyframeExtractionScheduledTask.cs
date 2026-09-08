@@ -97,16 +97,20 @@ public class KeyframeExtractionScheduledTask : IScheduledTask
                         var extractorThrew = false;
                         foreach (var extractor in _keyframeExtractors)
                         {
+                            cancellationToken.ThrowIfCancellationRequested();
+
                             // The cache decorator will make sure to save the keyframes
                             try
                             {
-                                if (extractor.TryExtractKeyframes(video.Id, path, out _))
+                                var succeeded = extractor.TryExtractKeyframes(video.Id, path, out _);
+                                cancellationToken.ThrowIfCancellationRequested();
+                                if (succeeded)
                                 {
                                     extracted = true;
                                     break;
                                 }
                             }
-                            catch (OperationCanceledException)
+                            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                             {
                                 throw;
                             }
@@ -133,7 +137,7 @@ public class KeyframeExtractionScheduledTask : IScheduledTask
                             }
                         }
                     }
-                    catch (OperationCanceledException)
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
                         throw;
                     }

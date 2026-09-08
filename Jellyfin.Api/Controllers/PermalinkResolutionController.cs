@@ -104,6 +104,39 @@ public sealed class PermalinkResolutionController : BaseJellyfinApiController
                 cancellationToken).ConfigureAwait(false))).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Consumes a details lease and returns a player-ready snapshot while
+    /// retaining the existing exchange and redemption checks server-side.
+    /// </summary>
+    /// <param name="handle">The opaque details-candidate handle.</param>
+    /// <param name="request">The details lease and playback session.</param>
+    /// <param name="cancellationToken">The request cancellation token.</param>
+    /// <returns>The immutable playback snapshot.</returns>
+    [HttpPost("Candidates/{handle}/PlaybackReadyV1")]
+    public async Task<ActionResult<PermalinkPlaybackSnapshot>> PlaybackReadyV1(
+        [FromRoute] string handle,
+        [FromBody] PermalinkLeaseRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.PlaybackSessionId))
+        {
+            return Problem(
+                detail: "PlaybackSessionId is required when consuming a playback lease.",
+                statusCode: StatusCodes.Status409Conflict,
+                title: "playback-session-required");
+        }
+
+        return await ExecuteAsync(async userId => Ok(
+            await _resolution.RedeemPlaybackReadyV1Async(
+                handle,
+                request.Lease,
+                request.PlaybackSessionId,
+                request.QueueOrdinal,
+                request.Complete,
+                userId,
+                cancellationToken).ConfigureAwait(false))).ConfigureAwait(false);
+    }
+
     /// <summary>Consumes a playback lease and returns its immutable snapshot plan.</summary>
     /// <param name="handle">The opaque candidate handle.</param>
     /// <param name="request">The purpose-bound lease.</param>

@@ -47,6 +47,27 @@ public interface IPermalinkResolutionService
         Guid userId,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Consumes a details lease, publishes its playback lease, and redeems the
+    /// first frozen entry while preserving both existing verification steps.
+    /// </summary>
+    /// <param name="handle">The opaque details-candidate handle.</param>
+    /// <param name="lease">The details-purpose lease.</param>
+    /// <param name="playbackSessionId">The playback session claiming the lease.</param>
+    /// <param name="queueOrdinal">The frozen queue ordinal to materialize.</param>
+    /// <param name="complete">Whether the final queue entry has completed.</param>
+    /// <param name="userId">The authenticated user identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The same immutable snapshot returned by playback redemption.</returns>
+    Task<PermalinkPlaybackSnapshot> RedeemPlaybackReadyV1Async(
+        string handle,
+        string lease,
+        string playbackSessionId,
+        int queueOrdinal,
+        bool complete,
+        Guid userId,
+        CancellationToken cancellationToken);
+
     /// <summary>Consumes a playback lease and materializes an immutable snapshot plan.</summary>
     /// <param name="handle">The opaque candidate handle.</param>
     /// <param name="lease">The purpose-bound lease.</param>

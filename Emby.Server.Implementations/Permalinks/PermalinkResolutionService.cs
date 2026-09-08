@@ -196,6 +196,30 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         return snapshot;
     }
 
+    public async Task<PermalinkPlaybackSnapshot> RedeemPlaybackReadyV1Async(
+        string handle,
+        string lease,
+        string playbackSessionId,
+        int queueOrdinal,
+        bool complete,
+        Guid userId,
+        CancellationToken cancellationToken)
+    {
+        var playbackCandidate = await ExchangePlaybackLeaseAsync(
+            handle,
+            lease,
+            userId,
+            cancellationToken).ConfigureAwait(false);
+        return await RedeemPlaybackAsync(
+            playbackCandidate.Handle,
+            playbackCandidate.Lease,
+            playbackSessionId,
+            queueOrdinal,
+            complete,
+            userId,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<VerifiedCandidate> VerifyAsync(
         PermalinkResolutionBinding binding,
         PermalinkLeaseDocument? lease,

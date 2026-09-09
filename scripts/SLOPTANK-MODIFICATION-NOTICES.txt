@@ -1,0 +1,4 @@
+# SlopTank modification notice: added or changed by SlopTank on 2026-09-09.
+# Scope: exact same-directory paths only.
+# Columns: path<TAB>change-dates<TAB>git-mode<TAB>sha256
+product-identity-manifest.json	2026-09-08	100644	3564ba1b2a051db7e2de1703c59ccdff732163d1ec87371cb14b35257d521816

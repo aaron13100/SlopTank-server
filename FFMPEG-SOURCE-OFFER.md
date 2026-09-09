@@ -1,3 +1,4 @@
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09. -->
 # FFmpeg corresponding source offer
 
 SlopTank distributions that include the macOS x86_64 FFmpeg binary described

@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-02, 2026-09-09.
 using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;

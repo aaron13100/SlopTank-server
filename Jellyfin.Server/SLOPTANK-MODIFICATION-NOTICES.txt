@@ -1,0 +1,4 @@
+# SlopTank modification notice: added or changed by SlopTank on 2026-09-09.
+# Scope: exact same-directory paths only.
+# Columns: path<TAB>change-dates<TAB>git-mode<TAB>sha256
+Jellyfin.Server.ico	2026-09-08	100644	89ff2c8c2b595d09850e28a95f887089a2d7f4db9ead0dbe4a093b3df8997db6

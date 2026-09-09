@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-08, 2026-09-09.
 #pragma warning disable CA1826 // Do not use Enumerable methods on indexable collections
 
 using System;

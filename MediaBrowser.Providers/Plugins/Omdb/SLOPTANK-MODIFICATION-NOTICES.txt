@@ -1,0 +1,4 @@
+# SlopTank modification notice: added or changed by SlopTank on 2026-09-09.
+# Scope: exact same-directory paths only.
+# Columns: path<TAB>change-dates<TAB>git-mode<TAB>sha256
+jellyfin-plugin-omdb.png	2026-09-08	100644	e68273244167064c4545cc6be93bbc28b28397d46c297c06260888ac838e1fd4

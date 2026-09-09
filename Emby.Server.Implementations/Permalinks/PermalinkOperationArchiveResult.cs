@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-08, 2026-09-09.
 namespace Emby.Server.Implementations.Permalinks;
 
 /// <summary>Summarizes one terminal-operation archive pass.</summary>

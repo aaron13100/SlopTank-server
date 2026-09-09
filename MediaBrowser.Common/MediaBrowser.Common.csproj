@@ -1,4 +1,5 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09. -->
 
   <!-- ProjectGuid is only included as a requirement for SonarQube analysis -->
   <PropertyGroup>

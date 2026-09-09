@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09.
 """Fail closed if this fork starts publishing internal server NuGet packages."""
 
 import pathlib

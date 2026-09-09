@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-05, 2026-09-09.
 #pragma warning disable CS1591
 
 using System;

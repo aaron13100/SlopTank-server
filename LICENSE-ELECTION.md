@@ -1,3 +1,4 @@
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-08-01, 2026-09-08, 2026-09-09. -->
 # License version election for SlopTank's own contributions
 
 This file is a license **election**, not a license **text**. The license

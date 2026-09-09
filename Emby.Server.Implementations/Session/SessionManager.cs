@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-08, 2026-09-09.
 #nullable disable
 
 using System;

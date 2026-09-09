@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-08-03, 2026-08-13, 2026-09-08, 2026-09-09.
 using System.Collections.Generic;
 using Jellyfin.Api.Middleware;
 using MediaBrowser.Common.Net;

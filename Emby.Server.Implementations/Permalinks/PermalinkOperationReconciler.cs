@@ -71,7 +71,28 @@ internal sealed class PermalinkOperationReconciler : IHostedService
         // pending set and the set this loop used to keep are the same set: both
         // are the directories whose GetSettledPhase is null.
         var startedAt = Stopwatch.GetTimestamp();
-        var priming = await _journal.PrimePendingIndexAsync(cancellationToken).ConfigureAwait(false);
+        PermalinkPendingIndexPriming priming;
+        try
+        {
+            priming = await _journal.PrimePendingIndexAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (PermalinkException exception)
+            when (exception.Kind == PermalinkErrorKind.Unavailable)
+        {
+            // The generic host awaits every IHostedService.StartAsync before the server
+            // accepts a request, so throwing here means a detached or unwritable media
+            // volume stops Jellyfin from booting at all. That is strictly worse than
+            // booting without the index: the permalink endpoints already answer 503 while
+            // the authority is unreachable, every other part of the server is unaffected,
+            // and the index rebuilds lazily on first use once the volume is back.
+            _logger.LogWarning(
+                exception,
+                "Permalink reconciler skipped: the issuance authority is unavailable. Pending "
+                + "operations are not reconciled this boot and the pending index will be built "
+                + "on first use once the authority is reachable.");
+            return;
+        }
+
         var primedAt = Stopwatch.GetElapsedTime(startedAt);
 
         var now = _timeProvider.GetUtcNow();

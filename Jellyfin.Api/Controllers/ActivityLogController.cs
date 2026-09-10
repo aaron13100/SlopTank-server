@@ -119,6 +119,16 @@ public class ActivityLogController : BaseJellyfinApiController
     public async Task<ActionResult> CreateToolAlert(
         [FromBody] CreateToolAlertRequestDto request)
     {
+        if (Request.ContentLength > MaxToolAlertPayloadSize)
+        {
+            // Manually validate to return proper status code: RequestSizeLimit only
+            // enforces on hosts that supply IHttpMaxRequestBodySizeFeature, so it is
+            // silently inert everywhere else. Same pattern as ClientLogController.
+            return StatusCode(
+                StatusCodes.Status413PayloadTooLarge,
+                $"Payload must be less than {MaxToolAlertPayloadSize:N0} bytes");
+        }
+
         await _activityManager.CreateAsync(new ActivityLog(
             request.Name,
             CreateToolAlertRequestDto.AllowedType,

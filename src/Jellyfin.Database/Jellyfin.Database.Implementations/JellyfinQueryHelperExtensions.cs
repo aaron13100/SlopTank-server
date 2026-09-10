@@ -1,5 +1,7 @@
 // SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-08-01, 2026-09-09.
 #pragma warning disable RS0030 // Do not use banned APIs
+#pragma warning disable CA1304 // Specify CultureInfo
+#pragma warning disable CA1311 // Specify a culture or use an invariant version
 
 using System;
 using System.Collections.Concurrent;
@@ -131,8 +133,12 @@ public static class JellyfinQueryHelperExtensions
             return baseQuery;
         }
 
+        // ToLower() here is a marker EF Core translates to SQL lower(); it never runs
+        // in .NET. ToLowerInvariant() has no SQL translation, so substituting it to
+        // satisfy CA1304/CA1311 makes every request using this filter throw. The
+        // suppressions at the top of this file exist for that reason.
         return baseQuery.Where(e => e.Provider!.Any(p =>
-            providerKeys.Contains(p.ProviderId.ToLowerInvariant() + ":" + p.ProviderValue.ToLowerInvariant())));
+            providerKeys.Contains(p.ProviderId.ToLower() + ":" + p.ProviderValue.ToLower())));
     }
 
     /// <summary>

@@ -380,8 +380,21 @@ internal sealed class PermalinkBindingIndex
                AND o.ItemId = b.ItemId
               JOIN AnchorTokenCapsules a
                 ON a.capsule_id = COALESCE(o.capsule_id, f.capsule_id)
+             -- FirstAliasClaims is append-only and holds one row per capsule that has ever
+             -- claimed this alias, so the join above fans out once per historical claim. When
+             -- an override has already decided which capsule wins, those extra rows carry
+             -- nothing but the fan-out, so collapse them to a single arbitrary claim; the
+             -- capsule actually resolved still comes from the override through COALESCE.
+             -- Collapsing by comparing the override to each claim instead only works when the
+             -- winning capsule had itself claimed this alias. That holds after a re-encode and
+             -- does not hold after an alternate-version promotion, where the surviving item's
+             -- capsule claimed its own alias and never this one, so every row was filtered out
+             -- and the promoted alias resolved to nothing.
              WHERE b.PermalinkId = $id
-               AND (o.capsule_id IS NULL OR f.capsule_id = o.capsule_id)
+               AND (o.capsule_id IS NULL
+                    OR f.capsule_id = (SELECT MIN(f2.capsule_id)
+                                         FROM FirstAliasClaims f2
+                                        WHERE f2.permalink_id = b.PermalinkId))
              ORDER BY b.ItemId
             """;
         command.Parameters.AddWithValue("$id", permalinkId);

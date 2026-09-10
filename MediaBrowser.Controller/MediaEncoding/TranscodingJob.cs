@@ -17,6 +17,8 @@ public sealed class TranscodingJob : IDisposable
 
     private Timer? _killTimer;
 
+    private int _activeSegmentWaiters;
+
     /// <summary>
     /// Initializes a new instance of the <see cref="TranscodingJob"/> class.
     /// </summary>
@@ -142,6 +144,16 @@ public sealed class TranscodingJob : IDisposable
     public TranscodingSegmentCleaner? TranscodingSegmentCleaner { get; set; }
 
     /// <summary>
+    /// Gets a value indicating whether at least one HTTP segment request is currently
+    /// blocked waiting for this job's transcoder to produce more output.
+    /// While this is true the transcoding process must not be paused: the waiting
+    /// request can only complete once the transcoder advances, and pausing it would
+    /// deadlock the request (and with it the download-position feedback that lifts
+    /// the throttle).
+    /// </summary>
+    public bool HasActiveSegmentWaiters => Volatile.Read(ref _activeSegmentWaiters) > 0;
+
+    /// <summary>
     /// Gets or sets last ping date.
     /// </summary>
     public DateTime LastPingDate { get; set; }
@@ -150,6 +162,17 @@ public sealed class TranscodingJob : IDisposable
     /// Gets or sets ping timeout.
     /// </summary>
     public int PingTimeout { get; set; }
+
+    /// <summary>
+    /// Registers a segment request that is about to block waiting on transcoder output.
+    /// Always pair with <see cref="EndSegmentWait"/> in a finally block.
+    /// </summary>
+    public void BeginSegmentWait() => Interlocked.Increment(ref _activeSegmentWaiters);
+
+    /// <summary>
+    /// Unregisters a segment request previously registered with <see cref="BeginSegmentWait"/>.
+    /// </summary>
+    public void EndSegmentWait() => Interlocked.Decrement(ref _activeSegmentWaiters);
 
     /// <summary>
     /// Stop kill timer.

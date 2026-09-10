@@ -54,11 +54,10 @@ internal sealed class PermalinkTransitionStore
             var nonce = Guid.NewGuid();
             var createdAt = _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture);
             var issuance = new PermalinkIssuance(id, nonce, createdAt);
-            var path = Path.Combine(_authority.IssuedRoot, id + ".json");
             try
             {
-                await _fileSystem.PublishImmutableAsync(
-                    path,
+                await _authority.PublishIssuanceAsync(
+                    id + ".json",
                     CanonicalJson.Serialize(issuance),
                     cancellationToken).ConfigureAwait(false);
                 return issuance;

@@ -356,6 +356,44 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         }
     }
 
+    /// <summary>
+    /// Publishes one immutable record into the authority's own issuance storage.
+    ///
+    /// Callers must route writes below <see cref="IssuedRoot"/> through here rather than
+    /// composing the path and calling the file system directly: the liveness probe in
+    /// <see cref="ValidateProvisionedAuthorityIfDue"/> is interval-limited, so between probes
+    /// an unwritable authority is only observable as the raw filesystem failure this method
+    /// translates. Without it that failure reaches the client as an opaque 500 rather than
+    /// the documented 503.
+    /// </summary>
+    /// <param name="fileName">The file name to publish below the issuance root.</param>
+    /// <param name="contents">The canonical bytes to publish.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    internal async Task PublishIssuanceAsync(
+        string fileName,
+        ReadOnlyMemory<byte> contents,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _fileSystem.PublishImmutableAsync(
+                Path.Combine(IssuedRoot, fileName),
+                contents,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (PermalinkException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException)
+        {
+            throw AuthorityUnavailable(exception);
+        }
+    }
+
     private PermalinkException AuthorityUnavailable(Exception exception)
     {
         return new PermalinkException(

@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-10.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;

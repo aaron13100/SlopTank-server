@@ -39,5 +39,12 @@ namespace MediaBrowser.Model.Entities
         /// API call updated item user data.
         /// </summary>
         UpdateUserData = 7,
+
+        /// <summary>
+        /// The user removed the item from their Continue Watching rail by
+        /// clearing only the resume position; watched state, play count and
+        /// ratings are deliberately untouched.
+        /// </summary>
+        ResumeCleared = 8,
     }
 }

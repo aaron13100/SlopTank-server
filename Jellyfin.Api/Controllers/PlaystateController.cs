@@ -11,6 +11,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Session;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -191,6 +192,76 @@ public class PlaystateController : BaseJellyfinApiController
         [FromRoute, Required] Guid userId,
         [FromRoute, Required] Guid itemId)
         => MarkUnplayedItem(userId, itemId);
+
+    /// <summary>
+    /// Removes an item from the user's Continue Watching rail without
+    /// marking it watched.
+    /// </summary>
+    /// <remarks>
+    /// The rail is the resume set, so removing one card means clearing only
+    /// that user's resume position. Watched state, play count, ratings and
+    /// favorites are deliberately untouched, other users see no change, and
+    /// a later genuine playback start is free to put the item right back.
+    /// </remarks>
+    /// <param name="userId">User id.</param>
+    /// <param name="itemId">Item id.</param>
+    /// <response code="200">Resume position cleared.</response>
+    /// <response code="404">Item not found.</response>
+    /// <returns>A <see cref="OkObjectResult"/> containing the updated <see cref="UserItemDataDto"/>.</returns>
+    [HttpDelete("UserResumeItems/{itemId}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [Tags("UserData")]
+    public ActionResult<UserItemDataDto?> ClearResumeItem(
+        [FromQuery] Guid? userId,
+        [FromRoute, Required] Guid itemId)
+    {
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(userId.Value);
+        if (user is null)
+        {
+            return NotFound();
+        }
+
+        var item = _libraryManager.GetItemById<BaseItem>(itemId, user);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        var data = _userDataRepository.GetUserData(user, item);
+        if (data is not null && data.PlaybackPositionTicks > 0)
+        {
+            data.PlaybackPositionTicks = 0;
+            _userDataRepository.SaveUserData(
+                user,
+                item,
+                data,
+                UserDataSaveReason.ResumeCleared,
+                HttpContext.RequestAborted);
+        }
+
+        return _userDataRepository.GetUserDataDto(item, user);
+    }
+
+    /// <summary>
+    /// Removes an item from the user's Continue Watching rail without
+    /// marking it watched.
+    /// </summary>
+    /// <param name="userId">User id.</param>
+    /// <param name="itemId">Item id.</param>
+    /// <response code="200">Resume position cleared.</response>
+    /// <response code="404">Item not found.</response>
+    /// <returns>A <see cref="OkObjectResult"/> containing the updated <see cref="UserItemDataDto"/>.</returns>
+    [HttpDelete("Users/{userId}/ResumeItems/{itemId}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public ActionResult<UserItemDataDto?> ClearResumeItemLegacy(
+        [FromRoute, Required] Guid userId,
+        [FromRoute, Required] Guid itemId)
+        => ClearResumeItem(userId, itemId);
 
     /// <summary>
     /// Reports playback has started within a session.

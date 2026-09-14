@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14.
 using System;
 using System.Linq;
 using System.Threading;
@@ -64,6 +64,28 @@ internal static class PermalinkAuthoritySchema
             CREATE TABLE IF NOT EXISTS MutationClaims (
                 capsule_id TEXT NOT NULL, predecessor_root TEXT NOT NULL,
                 operation_id TEXT NOT NULL, created_at TEXT NOT NULL,
+                PRIMARY KEY(capsule_id, predecessor_root));
+            -- Canonical claim rows (permalink-url-design.md 3.6.11 "Canonical
+            -- claims"): the election key is (domain, capsule_id, binding_key,
+            -- predecessor_event_id), where binding_key is the empty string in
+            -- the content domain and the binding instance id in the path
+            -- domain. Shadow-filled by PermalinkCanonicalClaimMigration; no
+            -- election path reads or writes this table yet.
+            CREATE TABLE IF NOT EXISTS CanonicalTransitionClaims (
+                domain TEXT NOT NULL, capsule_id TEXT NOT NULL,
+                binding_key TEXT NOT NULL DEFAULT '',
+                predecessor_event_id TEXT NOT NULL, operation_id TEXT NOT NULL,
+                proposed_decision TEXT NOT NULL, proposed_event_id TEXT NOT NULL,
+                canonical_event_digest TEXT NOT NULL, created_at TEXT NOT NULL,
+                PRIMARY KEY(domain, capsule_id, binding_key, predecessor_event_id));
+            -- Root-to-event mapping recorded for every legacy MutationClaims
+            -- row the migration folds (permalink-orphan-resolution-design-
+            -- 20260913.md P1 step 2). Stays empty until the journal-fold
+            -- slice lands; for now mutation rows are counted but not mapped.
+            CREATE TABLE IF NOT EXISTS LegacyPredecessorMap (
+                capsule_id TEXT NOT NULL, predecessor_root TEXT NOT NULL,
+                mapped_event_id TEXT NOT NULL, operation_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
                 PRIMARY KEY(capsule_id, predecessor_root));
             CREATE TABLE IF NOT EXISTS PermalinkBindings (
                 PermalinkId TEXT NOT NULL, ItemId TEXT NOT NULL,

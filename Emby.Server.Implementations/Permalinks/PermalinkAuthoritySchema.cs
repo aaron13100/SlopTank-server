@@ -80,8 +80,8 @@ internal static class PermalinkAuthoritySchema
                 PRIMARY KEY(domain, capsule_id, binding_key, predecessor_event_id));
             -- Root-to-event mapping recorded for every legacy MutationClaims
             -- row the migration folds (permalink-orphan-resolution-design-
-            -- 20260913.md P1 step 2). Stays empty until the journal-fold
-            -- slice lands; for now mutation rows are counted but not mapped.
+            -- 20260913.md P1 step 2). Path-kind rows stay unmapped until
+            -- their own slice; unmappable rows are quarantined as contested.
             CREATE TABLE IF NOT EXISTS LegacyPredecessorMap (
                 capsule_id TEXT NOT NULL, predecessor_root TEXT NOT NULL,
                 mapped_event_id TEXT NOT NULL, operation_id TEXT NOT NULL,

@@ -122,7 +122,10 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             .ConfigureAwait(false);
         PermalinkResolutionBinding binding;
         string oldContentRoot;
-        if (IsDeletionOfVanishedContent(request.Kind, item))
+        var ensuredIdentity = await TryEnsureIdentityForDeletionAsync(request, item, cancellationToken)
+            .ConfigureAwait(false);
+        if (IsDeletionOfVanishedContent(request.Kind, item)
+            || ensuredIdentity is null)
         {
             // Identity must come from what the authority already recorded, not
             // from the item's bytes: this operation exists precisely because
@@ -132,6 +135,16 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             // removed nor any new sibling added -- one converted file could
             // freeze ingestion for a whole library folder while the scan still
             // reported "Completed" (production, 2026-09-03).
+            //
+            // The same authority-recorded route covers a deletion whose bytes
+            // are present but no longer match the capsule (content-mismatch,
+            // content-unreachable): a fence whose only complaint is that the
+            // content heading out the door changed must not make an item
+            // undeletable. Measured in production 2026-09-11: nine fenced
+            // items were undeletable from the UI and the endpoint answered a
+            // bare 500. Other fences (a pending durable operation, a kind
+            // change) still refuse: those are about concurrent authority
+            // state, not about the leaving content.
             binding = ResolveVanishedContentBinding(
                 item,
                 await _bindings.FindItemBindingsAsync(item.Id, cancellationToken)
@@ -140,10 +153,8 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         }
         else
         {
-            var ensured = await _manager.EnsurePermalinkIdsAsync(item, cancellationToken)
-                .ConfigureAwait(false);
             binding = await _bindings.FindResolutionBindingAsync(
-                ensured.CanonicalId,
+                ensuredIdentity.CanonicalId,
                 item.Id,
                 cancellationToken).ConfigureAwait(false);
             oldContentRoot = item is Series or Season or BoxSet
@@ -495,6 +506,48 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         // folders; a present path of either shape means content is reachable
         // and the normal evidence route applies.
         return !File.Exists(item.Path) && !Directory.Exists(item.Path);
+    }
+
+    /// <summary>
+    /// Runs the identity ensure for a deletion, tolerating the one fence that
+    /// must not block a deletion: present bytes that no longer match the
+    /// recorded capsule (content-mismatch, content-unreachable). Deletion does
+    /// not need a verified content head -- the content is leaving -- so that
+    /// fence, which (correctly) blocks re-encodes and metadata edits, routes
+    /// the deletion onto the authority-recorded identity instead of failing
+    /// it. Every other failure propagates.
+    /// </summary>
+    /// <param name="request">The mutation request, for the kind.</param>
+    /// <param name="item">The item being deleted.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The ensured identity for non-deletions and healthy deletions;
+    /// null when this deletion must take the authority-recorded route.</returns>
+    private async Task<PermalinkResponse?> TryEnsureIdentityForDeletionAsync(
+        PermalinkMutationPrepareRequest request,
+        BaseItem item,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(request.Kind, "deletion", StringComparison.Ordinal))
+        {
+            return await _manager.EnsurePermalinkIdsAsync(item, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        try
+        {
+            return await _manager.EnsurePermalinkIdsAsync(item, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (PermalinkException exception)
+        {
+            if (string.Equals(exception.Code, "content-mismatch", StringComparison.Ordinal)
+                || string.Equals(exception.Code, "content-unreachable", StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            throw;
+        }
     }
 
     /// <summary>

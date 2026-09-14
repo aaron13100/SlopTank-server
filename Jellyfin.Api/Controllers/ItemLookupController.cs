@@ -268,27 +268,40 @@ public class ItemLookupController : BaseJellyfinApiController
             item.Name,
             searchResult.ProviderIds);
 
-        await _identityMutationAdapter.ExecuteAsync(
-            [item],
-            new PermalinkIdentityMutationRequest("identify", searchResult.ProviderIds),
-            async (_, cancellationToken) =>
-            {
-                // Since the refresh process won't erase provider Ids, we need to set this explicitly now.
-                item.ProviderIds = searchResult.ProviderIds;
-                await _providerManager.RefreshFullItem(
-                    item,
-                    new MetadataRefreshOptions(new DirectoryService(_fileSystem))
-                    {
-                        MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
-                        ImageRefreshMode = MetadataRefreshMode.FullRefresh,
-                        ReplaceAllMetadata = true,
-                        ReplaceAllImages = replaceAllImages,
-                        SearchResult = searchResult,
-                        RemoveOldMetadata = true
-                    },
-                    cancellationToken).ConfigureAwait(false);
-            },
-            CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            await _identityMutationAdapter.ExecuteAsync(
+                [item],
+                new PermalinkIdentityMutationRequest("identify", searchResult.ProviderIds),
+                async (_, cancellationToken) =>
+                {
+                    // Since the refresh process won't erase provider Ids, we need to set this explicitly now.
+                    item.ProviderIds = searchResult.ProviderIds;
+                    await _providerManager.RefreshFullItem(
+                        item,
+                        new MetadataRefreshOptions(new DirectoryService(_fileSystem))
+                        {
+                            MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
+                            ImageRefreshMode = MetadataRefreshMode.FullRefresh,
+                            ReplaceAllMetadata = true,
+                            ReplaceAllImages = replaceAllImages,
+                            SearchResult = searchResult,
+                            RemoveOldMetadata = true
+                        },
+                        cancellationToken).ConfigureAwait(false);
+                },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (PermalinkException exception)
+        {
+            // Same typed boundary as ItemUpdateController and the delete
+            // endpoints: the fence reason reaches the caller instead of a
+            // bare 500.
+            return Problem(
+                detail: exception.Message,
+                statusCode: StatusCodes.Status409Conflict,
+                title: exception.Code);
+        }
 
         return NoContent();
     }

@@ -221,6 +221,8 @@ public class VideosController : BaseJellyfinApiController
                 .First();
         }
 
+        try
+        {
         await _identityMutationAdapter.ExecuteAsync(
             items,
             new PermalinkIdentityMutationRequest("grouping"),
@@ -264,6 +266,18 @@ public class VideosController : BaseJellyfinApiController
                 await primaryVersion.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
             },
             CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (PermalinkException exception)
+        {
+            // Same typed boundary as ItemUpdateController and the delete
+            // endpoints: the fence reason reaches the caller instead of a
+            // bare 500.
+            return Problem(
+                detail: exception.Message,
+                statusCode: StatusCodes.Status409Conflict,
+                title: exception.Code);
+        }
+
         return NoContent();
     }
 

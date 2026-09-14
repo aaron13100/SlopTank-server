@@ -394,18 +394,32 @@ public class LibraryController : BaseJellyfinApiController
             return Unauthorized("Unauthorized access");
         }
 
-        await _identityMutationAdapter.ExecuteAsync(
-            [item],
-            new PermalinkIdentityMutationRequest("deletion"),
-            (_, _) =>
-            {
-                _libraryManager.DeleteItem(
-                    item,
-                    new DeleteOptions { DeleteFileLocation = true },
-                    true);
-                return Task.CompletedTask;
-            },
-            CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            await _identityMutationAdapter.ExecuteAsync(
+                [item],
+                new PermalinkIdentityMutationRequest("deletion"),
+                (_, _) =>
+                {
+                    _libraryManager.DeleteItem(
+                        item,
+                        new DeleteOptions { DeleteFileLocation = true },
+                        true);
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (PermalinkException exception)
+        {
+            // Same boundary as ItemUpdateController: a permalink refusal is a
+            // typed conflict naming its fence, not a bare 500 the UI can only
+            // guess at (2026-09-11: the guess told the owner to check write
+            // access to the media folder).
+            return Problem(
+                detail: exception.Message,
+                statusCode: StatusCodes.Status409Conflict,
+                title: exception.Code);
+        }
 
         return NoContent();
     }
@@ -452,22 +466,34 @@ public class LibraryController : BaseJellyfinApiController
             items.Add(item);
         }
 
-        await _identityMutationAdapter.ExecuteAsync(
-            items,
-            new PermalinkIdentityMutationRequest("deletion"),
-            (_, _) =>
-            {
-                foreach (var item in items)
+        try
+        {
+            await _identityMutationAdapter.ExecuteAsync(
+                items,
+                new PermalinkIdentityMutationRequest("deletion"),
+                (_, _) =>
                 {
-                    _libraryManager.DeleteItem(
-                        item,
-                        new DeleteOptions { DeleteFileLocation = true },
-                        true);
-                }
+                    foreach (var item in items)
+                    {
+                        _libraryManager.DeleteItem(
+                            item,
+                            new DeleteOptions { DeleteFileLocation = true },
+                            true);
+                    }
 
-                return Task.CompletedTask;
-            },
-            CancellationToken.None).ConfigureAwait(false);
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (PermalinkException exception)
+        {
+            // Same typed boundary as the single-item delete above and
+            // ItemUpdateController: the fence reason reaches the caller.
+            return Problem(
+                detail: exception.Message,
+                statusCode: StatusCodes.Status409Conflict,
+                title: exception.Code);
+        }
 
         return NoContent();
     }

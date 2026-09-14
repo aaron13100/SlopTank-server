@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09, 2026-09-14.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -45,13 +45,16 @@ public sealed class SystemDeepHealthProbe : IDeepHealthProbe
     /// <inheritdoc />
     public async ValueTask QueryDatabaseAsync(CancellationToken cancellationToken)
     {
-        await using var context = await _database.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        _ = await context.Users
-            .AsNoTracking()
-            .Select(user => user.Id)
-            .Take(1)
-            .ToListAsync(cancellationToken)
-            .ConfigureAwait(false);
+        var context = await _database.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using (context.ConfigureAwait(false))
+        {
+            _ = await context.Users
+                .AsNoTracking()
+                .Select(user => user.Id)
+                .Take(1)
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
     }
 
     /// <inheritdoc />

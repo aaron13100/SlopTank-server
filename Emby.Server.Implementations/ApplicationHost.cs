@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-14.
 #nullable disable
 
 #pragma warning disable CS1591
@@ -593,6 +593,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkPendingIdentityMutation>();
             serviceCollection.AddSingleton<PermalinkMutationBundleFactory>();
             serviceCollection.AddSingleton<PermalinkMutationClaimStore>();
+            serviceCollection.AddSingleton<PermalinkContentAdoption>();
             serviceCollection.AddSingleton<PermalinkMediaMutation>();
             serviceCollection.AddSingleton<PermalinkMediaRecovery>();
             serviceCollection.AddSingleton<PermalinkCrossRootMutation>();

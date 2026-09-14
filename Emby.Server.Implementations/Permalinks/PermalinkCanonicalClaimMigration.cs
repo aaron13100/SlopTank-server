@@ -281,8 +281,9 @@ internal static class PermalinkCanonicalClaimMigration
         }
 
         // The same content-head rules PermalinkCapsuleStore.ReadValidatedAsync
-        // applies: only mint, identity_seed, append-only-discovery, and
-        // controlled-mutation events form the content lineage, the head is the
+        // applies: only mint, identity_seed, append-only-discovery,
+        // controlled-mutation, and operator-confirmed-adoption events form the
+        // content lineage, the head is the
         // content event no other content event names as its predecessor, and
         // a capsule that does not fold to exactly one head is ambiguous.
         var eventIds = new HashSet<Guid>();
@@ -305,7 +306,8 @@ internal static class PermalinkCanonicalClaimMigration
             }
 
             if (evidence.Event.Kind is "mint" or "identity_seed"
-                or "append-only-discovery" or "controlled-mutation")
+                or "append-only-discovery" or "controlled-mutation"
+                or "operator-confirmed-adoption")
             {
                 contentEvents.Add(evidence);
             }

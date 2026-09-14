@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-31, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-31, 2026-09-08, 2026-09-09, 2026-09-14.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -115,6 +115,39 @@ public sealed class PermalinkRewriteController : BaseJellyfinApiController
     {
         return ExecuteAsync(
             () => _coordinator.ResolveAsync(operationId, request, cancellationToken));
+    }
+
+    /// <summary>Publishes an authorized successor for an already-fenced leaf after exact operator evidence.</summary>
+    /// <param name="request">The administrator-confirmed adoption evidence.</param>
+    /// <param name="cancellationToken">The request cancellation token.</param>
+    /// <returns>The folded adopted operation state.</returns>
+    [HttpPost("AdoptContent")]
+    [Authorize(Policy = Policies.RequiresElevation)]
+    public async Task<ActionResult<PermalinkMutationResult>> AdoptContent(
+        [FromBody] PermalinkContentAdoptionRequest request,
+        CancellationToken cancellationToken)
+    {
+        var user = User.GetRequestUser(_userManager);
+        if (user is null)
+        {
+            return NotFound();
+        }
+
+        var item = _libraryManager.GetItemById<BaseItem>(request.ItemId, user);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        // The elevation policy on the route runs before this lookup, and the
+        // administrator identity is stamped here from the authenticated user rather
+        // than accepted from the request body it arrived in.
+        return await ExecuteAsync(
+            () => _coordinator.AdoptContentAsync(
+                item,
+                request with { AdministratorUserId = user.Id },
+                cancellationToken))
+            .ConfigureAwait(false);
     }
 
     private async Task<ActionResult<PermalinkMutationResult>> ExecuteAsync(

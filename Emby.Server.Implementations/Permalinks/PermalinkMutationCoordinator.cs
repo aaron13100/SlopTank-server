@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -54,6 +54,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     private readonly PermalinkMediaRecovery _mediaRecovery;
     private readonly PermalinkPathMutation _pathMutation;
     private readonly PermalinkItemStateMutation _itemStateMutation;
+    private readonly PermalinkContentAdoption _contentAdoption;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim[] _operationGates = Enumerable.Range(0, OperationGateCount)
         .Select(_ => new SemaphoreSlim(1, 1))
@@ -74,6 +75,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     /// <param name="mediaRecovery">The media recovery.</param>
     /// <param name="pathMutation">The path mutation.</param>
     /// <param name="itemStateMutation">The journal-only item-state mutation service.</param>
+    /// <param name="contentAdoption">The elevated leaf content adoption service.</param>
     /// <param name="timeProvider">The time provider.</param>
     public PermalinkMutationCoordinator(
         ILibraryManager libraryManager,
@@ -88,6 +90,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         PermalinkMediaRecovery mediaRecovery,
         PermalinkPathMutation pathMutation,
         PermalinkItemStateMutation itemStateMutation,
+        PermalinkContentAdoption contentAdoption,
         TimeProvider timeProvider)
     {
         _libraryManager = libraryManager;
@@ -102,6 +105,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         _mediaRecovery = mediaRecovery;
         _pathMutation = pathMutation;
         _itemStateMutation = itemStateMutation;
+        _contentAdoption = contentAdoption;
         _timeProvider = timeProvider;
     }
 
@@ -434,6 +438,28 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             Phase(operation, PermalinkPhase.Aborted, operation.OldContentRoot),
             cancellationToken).ConfigureAwait(false);
         return new PermalinkMutationResult(operationId, PermalinkPhase.Aborted.Name);
+    }
+
+    /// <inheritdoc />
+    public async Task<PermalinkMutationResult> AdoptContentAsync(
+        BaseItem item,
+        PermalinkContentAdoptionRequest request,
+        CancellationToken cancellationToken)
+    {
+        // The operation id is derived from the item and the restated observed root,
+        // so the serialization gate and the journal record share one identity no
+        // caller ever chose.
+        var operationId = PermalinkContentAdoption.DeriveOperationId(
+            item.Id,
+            request.ObservedContentRoot);
+        return await ExecuteSerializedAsync(
+            operationId,
+            cancellationToken,
+            () => _contentAdoption.AdoptContentAsync(
+                item,
+                request,
+                operationId,
+                cancellationToken)).ConfigureAwait(false);
     }
 
     private async Task<PermalinkMutationResult> ExecuteSerializedAsync(

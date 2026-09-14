@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -244,9 +244,13 @@ internal sealed class PermalinkCapsuleStore
         }
 
         ValidateParents(events, capsulePath);
+        // operator-confirmed-adoption events advance content exactly like controlled
+        // mutations do; a fold that skipped them would leave the adopted capsule's
+        // head on its predecessor and fence the item the adoption just unfenced.
         var contentEvents = events.Values
             .Where(value => value.Kind is "mint" or "identity_seed"
-                or "append-only-discovery" or "controlled-mutation")
+                or "append-only-discovery" or "controlled-mutation"
+                or "operator-confirmed-adoption")
             .ToArray();
         var heads = contentEvents
             .Where(candidate => !contentEvents.Any(

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-09-08, 2026-09-09, 2026-09-14.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -63,5 +63,15 @@ public interface IPermalinkMutationCoordinator
     /// <returns>The folded aborted, assignment-unknown, or existing terminal state.</returns>
     Task<PermalinkMutationResult> AbortAsync(
         Guid operationId,
+        CancellationToken cancellationToken);
+
+    /// <summary>Publishes an authorized successor for an already-fenced leaf after exact operator evidence.</summary>
+    /// <param name="item">The fenced library item.</param>
+    /// <param name="request">The administrator-confirmed adoption evidence.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The folded adopted operation state.</returns>
+    Task<PermalinkMutationResult> AdoptContentAsync(
+        BaseItem item,
+        PermalinkContentAdoptionRequest request,
         CancellationToken cancellationToken);
 }

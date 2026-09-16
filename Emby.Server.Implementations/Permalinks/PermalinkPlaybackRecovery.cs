@@ -1,10 +1,12 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-30, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-30, 2026-09-08, 2026-09-09, 2026-09-16.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -291,6 +293,11 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
 
             if (consumed == TerminalMarker.Reclaimable || completed == TerminalMarker.Reclaimable)
             {
+                if (IsUnmarkedDangerWindow(directory, now, result))
+                {
+                    return;
+                }
+
                 ReclaimKnownShape(directory, result);
                 return;
             }
@@ -345,6 +352,103 @@ internal sealed class PermalinkPlaybackRecovery : IDisposable
                 exception,
                 "Playback lease reclamation failed closed; retaining {LeaseDirectory}.",
                 directory);
+        }
+    }
+
+    /// <summary>
+    /// Detects the Admit-to-marker crash window: a terminal playback root whose lease is
+    /// still live but whose playback-purpose consumption marker was never published. The
+    /// client still holds a valid token and consumed.json is the only record of the
+    /// admitted session, so reclaiming the root would let a second session start.
+    /// </summary>
+    /// <returns>True when the entry was counted retained or refused and reclamation must stop.</returns>
+    private bool IsUnmarkedDangerWindow(
+        string directory,
+        DateTimeOffset now,
+        PlaybackLeaseReclamationAccumulator result)
+    {
+        var leasePath = Path.Combine(directory, "lease.json");
+        if (PermalinkPlaybackLeaseShape.IsLink(leasePath) || !File.Exists(leasePath))
+        {
+            result.Refused++;
+            return true;
+        }
+
+        PermalinkLeaseDocument lease;
+        try
+        {
+            lease = CanonicalJson.Deserialize<PermalinkLeaseDocument>(
+                File.ReadAllBytes(leasePath),
+                leasePath);
+        }
+        catch (PermalinkException exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "Retaining terminal playback state with a malformed lease copy: {LeasePath}",
+                leasePath);
+            result.Refused++;
+            return true;
+        }
+
+        if (!DateTimeOffset.TryParse(
+                lease.ExpiresAt,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind,
+                out var expiresAt))
+        {
+            result.Refused++;
+            return true;
+        }
+
+        if (expiresAt <= now)
+        {
+            return false;
+        }
+
+        if (PlaybackMarkerValid(directory, lease))
+        {
+            return false;
+        }
+
+        result.Retained++;
+        return true;
+    }
+
+    private bool PlaybackMarkerValid(string directory, PermalinkLeaseDocument lease)
+    {
+        var handle = Path.GetFileName(directory);
+        var marker = Path.Combine(
+            _authority.Root,
+            ".sloptank",
+            "permalink-resolution-leases",
+            handle,
+            "consumed-" + Convert.ToHexStringLower(
+                SHA256.HashData(Encoding.UTF8.GetBytes(lease.Lease))) + ".json");
+        if (PermalinkPlaybackLeaseShape.IsLink(marker) || !File.Exists(marker))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllBytes(marker));
+            var root = document.RootElement;
+            return root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("handle", out var markerHandle)
+                && string.Equals(markerHandle.GetString(), handle, StringComparison.Ordinal)
+                && root.TryGetProperty("purpose", out var purpose)
+                && string.Equals(purpose.GetString(), "playback", StringComparison.Ordinal)
+                && root.TryGetProperty("user_id", out var userId)
+                && Guid.TryParse(userId.GetString(), out var markerUserId)
+                && markerUserId.Equals(lease.UserId)
+                && root.TryGetProperty("server_id", out var serverId)
+                && Guid.TryParse(serverId.GetString(), out var markerServerId)
+                && markerServerId.Equals(lease.ServerId);
+        }
+        catch (JsonException)
+        {
+            return false;
         }
     }
 

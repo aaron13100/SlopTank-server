@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-09-09, 2026-09-16.
 using System;
 using System.Collections.Concurrent;
 using System.Globalization;
@@ -37,7 +37,8 @@ internal sealed class PermalinkLeaseStore
         string purpose,
         Guid userId,
         CancellationToken cancellationToken,
-        string? existingHandle = null)
+        string? existingHandle = null,
+        bool durable = true)
     {
         var handle = existingHandle ?? Token();
         var lease = Token();
@@ -67,10 +68,22 @@ internal sealed class PermalinkLeaseStore
             "permalink-resolution-leases",
             handle);
         _fileSystem.CreateDirectoryDurable(root);
-        await _fileSystem.PublishImmutableAsync(
-            Path.Combine(root, existingHandle is null ? "lease.json" : "playback-lease.json"),
-            CanonicalJson.Serialize(document),
-            cancellationToken).ConfigureAwait(false);
+        var leasePath = Path.Combine(root, existingHandle is null ? "lease.json" : "playback-lease.json");
+        if (durable)
+        {
+            await _fileSystem.PublishImmutableAsync(
+                leasePath,
+                CanonicalJson.Serialize(document),
+                cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await _fileSystem.PublishUnflushedAsync(
+                leasePath,
+                CanonicalJson.Serialize(document),
+                cancellationToken).ConfigureAwait(false);
+        }
+
         return new PermalinkCandidateEnvelope(0, Namespace(binding.PermalinkId), handle, lease);
     }
 
@@ -180,7 +193,8 @@ internal sealed class PermalinkLeaseStore
         bool allowConsumed,
         CancellationToken cancellationToken)
     {
-        var document = await ReadLeaseAsync(handle, lease, cancellationToken).ConfigureAwait(false);
+        var document = await ReadLeaseAsync(handle, lease, purpose, userId, cancellationToken)
+            .ConfigureAwait(false);
         var serverId = await ReadServerIdAsync(cancellationToken).ConfigureAwait(false);
         if (!CryptographicOperations.FixedTimeEquals(
                 Encoding.UTF8.GetBytes(document.Lease),
@@ -211,6 +225,8 @@ internal sealed class PermalinkLeaseStore
     private async Task<PermalinkLeaseDocument> ReadLeaseAsync(
         string handle,
         string lease,
+        string purpose,
+        Guid userId,
         CancellationToken cancellationToken)
     {
         if (_leases.TryGetValue(handle, out var cached)
@@ -227,9 +243,20 @@ internal sealed class PermalinkLeaseStore
                 continue;
             }
 
-            var document = CanonicalJson.Deserialize<PermalinkLeaseDocument>(
-                await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false),
-                path);
+            PermalinkLeaseDocument document;
+            try
+            {
+                document = CanonicalJson.Deserialize<PermalinkLeaseDocument>(
+                    await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false),
+                    path);
+            }
+            catch (PermalinkException)
+            {
+                // Torn content from an unflushed server-confined lease lost to a crash
+                // reads as missing; the consumption marker below still decides the verdict.
+                continue;
+            }
+
             if (string.Equals(document.Lease, lease, StringComparison.Ordinal))
             {
                 _leases[handle] = document;
@@ -237,7 +264,53 @@ internal sealed class PermalinkLeaseStore
             }
         }
 
-        throw Invalid();
+        throw await ResolveMissingLeaseAsync(handle, lease, purpose, userId, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<PermalinkException> ResolveMissingLeaseAsync(
+        string handle,
+        string lease,
+        string purpose,
+        Guid userId,
+        CancellationToken cancellationToken)
+    {
+        var consumedPath = Path.Combine(
+            ResolutionRoot(handle),
+            "consumed-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(lease))) + ".json");
+        if (!File.Exists(consumedPath))
+        {
+            return Invalid();
+        }
+
+        PermalinkLeaseConsumption existing;
+        try
+        {
+            existing = CanonicalJson.Deserialize<PermalinkLeaseConsumption>(
+                await File.ReadAllBytesAsync(consumedPath, cancellationToken).ConfigureAwait(false),
+                consumedPath);
+        }
+        catch (PermalinkException)
+        {
+            return Invalid();
+        }
+
+        var serverId = await ReadServerIdAsync(cancellationToken).ConfigureAwait(false);
+        if (string.Equals(existing.Handle, handle, StringComparison.Ordinal)
+            && string.Equals(existing.Purpose, purpose, StringComparison.Ordinal)
+            && existing.UserId.Equals(userId)
+            && existing.ServerId.Equals(serverId))
+        {
+            return new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "lease-consumed",
+                "The permalink lease has already been consumed.");
+        }
+
+        // Accepted corner: an expired consumed lease whose unflushed document was lost
+        // reports consumed here instead of invalid (the marker carries no expiry). Both
+        // are 409 re-mint signals and the web client maps every 409 to one state.
+        return Invalid();
     }
 
     private async Task<Guid> ReadServerIdAsync(CancellationToken cancellationToken)

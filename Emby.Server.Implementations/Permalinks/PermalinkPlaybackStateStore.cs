@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-30, 2026-09-02, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-16.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -66,7 +66,8 @@ internal sealed class PermalinkPlaybackStateStore
         IReadOnlyList<PermalinkPlaybackPlanStore.PlaybackPlanEntry> entries,
         int queueOrdinal,
         bool complete,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool clientHeldLease = true)
     {
         if (string.IsNullOrWhiteSpace(playbackSessionId)
             || entries.Count == 0
@@ -104,7 +105,8 @@ internal sealed class PermalinkPlaybackStateStore
                     queueOrdinal,
                     entries.Count,
                     complete,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    clientHeldLease).ConfigureAwait(false);
             }
 
             return await StartSessionAsync(
@@ -117,7 +119,8 @@ internal sealed class PermalinkPlaybackStateStore
                 queueOrdinal,
                 entries.Count,
                 complete,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                clientHeldLease).ConfigureAwait(false);
         }
         finally
         {
@@ -135,7 +138,8 @@ internal sealed class PermalinkPlaybackStateStore
         int queueOrdinal,
         int queueCount,
         bool complete,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool clientHeldLease)
     {
         var consumption = await PermalinkPlaybackDocumentStore.ReadAsync<PlaybackConsumedDocument>(
             Path.Combine(root, "consumed.json"),
@@ -160,7 +164,8 @@ internal sealed class PermalinkPlaybackStateStore
             root,
             plan,
             queueOrdinal,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            clientHeldLease).ConfigureAwait(false);
         await CompleteIfRequestedAsync(
             root,
             handle,
@@ -182,7 +187,8 @@ internal sealed class PermalinkPlaybackStateStore
         int queueOrdinal,
         int queueCount,
         bool complete,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool clientHeldLease)
     {
         if (queueOrdinal != 0)
         {
@@ -195,11 +201,13 @@ internal sealed class PermalinkPlaybackStateStore
             root,
             plan,
             queueOrdinal,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            clientHeldLease).ConfigureAwait(false);
         await _documents.PublishAsync(
             Path.Combine(root, "ready.json"),
             ready,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            durable: clientHeldLease).ConfigureAwait(false);
         var consumption = new PlaybackConsumedDocument(
             playbackSessionId,
             userId,

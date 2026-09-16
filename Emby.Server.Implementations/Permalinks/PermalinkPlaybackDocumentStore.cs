@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-30, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-30, 2026-09-08, 2026-09-09, 2026-09-16.
 using System;
 using System.IO;
 using System.Linq;
@@ -72,15 +72,25 @@ internal sealed class PermalinkPlaybackDocumentStore
     public async Task PublishAsync<T>(
         string path,
         T document,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool durable = true)
     {
         var bytes = CanonicalJson.Serialize(document);
         if (!File.Exists(path))
         {
             try
             {
-                await _fileSystem.PublishImmutableAsync(path, bytes, cancellationToken)
-                    .ConfigureAwait(false);
+                if (durable)
+                {
+                    await _fileSystem.PublishImmutableAsync(path, bytes, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await _fileSystem.PublishUnflushedAsync(path, bytes, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
                 return;
             }
             catch (PermalinkException exception) when (exception.Code == "publish-exclusive")

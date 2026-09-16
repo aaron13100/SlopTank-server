@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-09-08, 2026-09-09, 2026-09-16.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -41,12 +41,14 @@ public interface IPermalinkResolutionService
     /// <param name="lease">The details lease.</param>
     /// <param name="userId">The authenticated user identifier.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
+    /// <param name="clientHeldLease">False when the exchanged token never leaves the server, allowing unflushed publication.</param>
     /// <returns>The replacement playback envelope.</returns>
     Task<PermalinkCandidateEnvelope> ExchangePlaybackLeaseAsync(
         string handle,
         string lease,
         Guid userId,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool clientHeldLease = true);
 
     /// <summary>
     /// Consumes a details lease, publishes its playback lease, and redeems the
@@ -77,6 +79,7 @@ public interface IPermalinkResolutionService
     /// <param name="complete">Whether the final queue entry has completed.</param>
     /// <param name="userId">The authenticated user identifier.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
+    /// <param name="clientHeldLease">False when the token never leaves the server, allowing unflushed publication.</param>
     /// <returns>The immutable playback snapshot.</returns>
     Task<PermalinkPlaybackSnapshot> RedeemPlaybackAsync(
         string handle,
@@ -85,5 +88,6 @@ public interface IPermalinkResolutionService
         int queueOrdinal,
         bool complete,
         Guid userId,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool clientHeldLease = true);
 }

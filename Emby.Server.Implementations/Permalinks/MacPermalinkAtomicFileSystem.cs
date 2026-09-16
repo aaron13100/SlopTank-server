@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-09-09, 2026-09-16.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -253,9 +253,27 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
     }
 
     /// <inheritdoc />
-    public async Task PublishImmutableAsync(
+    public Task PublishImmutableAsync(
         string destination,
         ReadOnlyMemory<byte> contents,
+        CancellationToken cancellationToken)
+    {
+        return PublishCoreAsync(destination, contents, flush: true, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task PublishUnflushedAsync(
+        string destination,
+        ReadOnlyMemory<byte> contents,
+        CancellationToken cancellationToken)
+    {
+        return PublishCoreAsync(destination, contents, flush: false, cancellationToken);
+    }
+
+    private async Task PublishCoreAsync(
+        string destination,
+        ReadOnlyMemory<byte> contents,
+        bool flush,
         CancellationToken cancellationToken)
     {
         _mountPolicy.EnsureAdmitted(destination);
@@ -276,15 +294,23 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
                              FileAccess.Write,
                              FileShare.None,
                              4096,
-                             FileOptions.Asynchronous | FileOptions.WriteThrough))
+                             flush
+                                 ? FileOptions.Asynchronous | FileOptions.WriteThrough
+                                 : FileOptions.Asynchronous))
             {
                 await stream.WriteAsync(contents, cancellationToken).ConfigureAwait(false);
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-                FullSyncDescriptor(stream.SafeFileHandle.DangerousGetHandle().ToInt32(), temporary);
+                if (flush)
+                {
+                    FullSyncDescriptor(stream.SafeFileHandle.DangerousGetHandle().ToInt32(), temporary);
+                }
             }
 
             RenameExclusivePath(temporary, destination);
-            SyncDirectory(Path.GetDirectoryName(destination)!);
+            if (flush)
+            {
+                SyncDirectory(Path.GetDirectoryName(destination)!);
+            }
         }
         finally
         {

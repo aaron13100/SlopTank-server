@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-03, 2026-09-02, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-03, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-16.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -130,7 +130,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         string handle,
         string lease,
         Guid userId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool clientHeldLease = true)
     {
         var document = await _leases.ConsumeAsync(
             handle,
@@ -149,7 +150,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
             "playback",
             userId,
             cancellationToken,
-            handle).ConfigureAwait(false);
+            handle,
+            durable: clientHeldLease).ConfigureAwait(false);
         await _playback.RecoverAsync(cancellationToken).ConfigureAwait(false);
         await _playbackDocuments.PublishLeaseAsync(envelope.Handle, cancellationToken)
             .ConfigureAwait(false);
@@ -163,7 +165,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         int queueOrdinal,
         bool complete,
         Guid userId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool clientHeldLease = true)
     {
         await _playback.RecoverAsync(cancellationToken).ConfigureAwait(false);
         var continuation = _playback.IsActiveSession(handle, playbackSessionId, userId);
@@ -187,7 +190,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
             entries,
             queueOrdinal,
             complete,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            clientHeldLease).ConfigureAwait(false);
         if (!continuation)
         {
             await _leases.MarkPlaybackConsumedAsync(document, cancellationToken)
@@ -206,11 +210,15 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         Guid userId,
         CancellationToken cancellationToken)
     {
+        // The exchanged playback lease never leaves the server on this path (the
+        // snapshot carries no token), so its documents tier down to unflushed while
+        // every client-visible document stays durable.
         var playbackCandidate = await ExchangePlaybackLeaseAsync(
             handle,
             lease,
             userId,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            clientHeldLease: false).ConfigureAwait(false);
         return await RedeemPlaybackAsync(
             playbackCandidate.Handle,
             playbackCandidate.Lease,
@@ -218,7 +226,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
             queueOrdinal,
             complete,
             userId,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            clientHeldLease: false).ConfigureAwait(false);
     }
 
     private async Task<VerifiedCandidate> VerifyAsync(

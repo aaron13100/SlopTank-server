@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-30, 2026-09-02, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-30, 2026-09-02, 2026-09-09, 2026-09-16.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -69,7 +69,8 @@ internal sealed class PermalinkPlaybackPlanStore
         string root,
         FrozenPlaybackPlan plan,
         int ordinal,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool clientHeldLease = true)
     {
         if (ordinal > 0
             && !File.Exists(Path.Combine(
@@ -103,7 +104,8 @@ internal sealed class PermalinkPlaybackPlanStore
             entry.ItemId,
             VerifyEntry(entry),
             _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture));
-        await _documents.PublishAsync(path, ready, cancellationToken).ConfigureAwait(false);
+        await _documents.PublishAsync(path, ready, cancellationToken, durable: clientHeldLease)
+            .ConfigureAwait(false);
         return ready;
     }
 

@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-14, 2026-09-18.
 using System;
 using System.ComponentModel.DataAnnotations;
 using System.Diagnostics.CodeAnalysis;

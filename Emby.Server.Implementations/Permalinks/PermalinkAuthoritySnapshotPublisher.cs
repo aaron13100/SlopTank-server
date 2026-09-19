@@ -48,6 +48,10 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IDisposable
                 .ConfigureAwait(false);
             var metadata = await AllocateGenerationAsync(source, cancellationToken)
                 .ConfigureAwait(false);
+            await using var pinned = (SqliteTransaction)await source.BeginTransactionAsync(
+                cancellationToken).ConfigureAwait(false);
+            await PinGenerationAsync(source, pinned, metadata, cancellationToken)
+                .ConfigureAwait(false);
             var directoryName = $"g-{metadata.Generation.ToString(CultureInfo.InvariantCulture)}-{Guid.NewGuid():N}";
             var temporary = Path.Combine(_snapshotRoot, $".tmp-{directoryName}");
             var published = Path.Combine(_snapshotRoot, directoryName);
@@ -61,6 +65,9 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IDisposable
                     source.BackupDatabase(target);
                 }
 
+                await VerifyCopiedGenerationAsync(database, metadata, cancellationToken)
+                    .ConfigureAwait(false);
+
                 var digest = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(
                     database, cancellationToken).ConfigureAwait(false)));
                 var manifest = metadata with
@@ -72,11 +79,18 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IDisposable
                     Path.Combine(temporary, "manifest.json"),
                     JsonSerializer.Serialize(manifest) + "\n",
                     cancellationToken).ConfigureAwait(false);
+                PermalinkSnapshotDurability.FlushFile(database);
+                PermalinkSnapshotDurability.FlushFile(Path.Combine(temporary, "manifest.json"));
+                PermalinkSnapshotDurability.FlushDirectory(temporary);
                 Directory.Move(temporary, published);
+                MakePublishedGenerationImmutable(published);
+                PermalinkSnapshotDurability.FlushDirectory(_snapshotRoot);
                 var next = Path.Combine(_snapshotRoot, "CURRENT.new");
                 await File.WriteAllTextAsync(next, directoryName + "\n", cancellationToken)
                     .ConfigureAwait(false);
+                PermalinkSnapshotDurability.FlushFile(next);
                 File.Move(next, Path.Combine(_snapshotRoot, "CURRENT"), overwrite: true);
+                PermalinkSnapshotDurability.FlushDirectory(_snapshotRoot);
                 return manifest;
             }
             catch
@@ -104,6 +118,82 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IDisposable
         finally
         {
             _publicationLock.Release();
+        }
+    }
+
+    private static void MakePublishedGenerationImmutable(string published)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            File.SetAttributes(
+                Path.Combine(published, "authority.db"),
+                FileAttributes.ReadOnly);
+            File.SetAttributes(
+                Path.Combine(published, "manifest.json"),
+                FileAttributes.ReadOnly);
+            return;
+        }
+
+        File.SetUnixFileMode(
+            Path.Combine(published, "authority.db"),
+            UnixFileMode.UserRead | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+        File.SetUnixFileMode(
+            Path.Combine(published, "manifest.json"),
+            UnixFileMode.UserRead | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+        File.SetUnixFileMode(
+            published,
+            UnixFileMode.UserRead | UnixFileMode.UserExecute
+                | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+    }
+
+    private static async Task PinGenerationAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        PermalinkAuthorityGeneration expected,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT authority_id, schema_epoch, content_epoch, journal_counter, created_at
+              FROM SnapshotMetadata WHERE generation = $generation
+            """;
+        command.Parameters.AddWithValue("$generation", expected.Generation);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            || reader.GetString(0) != expected.AuthorityId
+            || reader.GetInt64(1) != expected.SchemaEpoch
+            || reader.GetInt64(2) != expected.ContentEpoch
+            || reader.GetInt64(3) != expected.JournalCounter
+            || reader.GetString(4) != expected.CreatedAt)
+        {
+            throw new InvalidDataException("snapshot metadata changed before the pinned read");
+        }
+    }
+
+    private static async Task VerifyCopiedGenerationAsync(
+        string database,
+        PermalinkAuthorityGeneration expected,
+        CancellationToken cancellationToken)
+    {
+        await using var copy = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Pooling=False");
+        await copy.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = copy.CreateCommand();
+        command.CommandText = """
+            SELECT authority_id, schema_epoch, content_epoch, journal_counter, created_at
+              FROM SnapshotMetadata WHERE generation = $generation
+            """;
+        command.Parameters.AddWithValue("$generation", expected.Generation);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            || reader.GetString(0) != expected.AuthorityId
+            || reader.GetInt64(1) != expected.SchemaEpoch
+            || reader.GetInt64(2) != expected.ContentEpoch
+            || reader.GetInt64(3) != expected.JournalCounter
+            || reader.GetString(4) != expected.CreatedAt)
+        {
+            throw new InvalidDataException("copied snapshot metadata does not match its generation");
         }
     }
 

@@ -13,7 +13,7 @@ using Microsoft.Extensions.Configuration;
 namespace Emby.Server.Implementations.Permalinks;
 
 /// <summary>Publishes immutable, manifest-bound public authority snapshots.</summary>
-internal sealed class PermalinkAuthoritySnapshotPublisher : IDisposable
+internal sealed class PermalinkAuthoritySnapshotPublisher : IPermalinkAuthorityGenerationOracle, IDisposable
 {
     private readonly PermalinkAuthorityStore _authority;
     private readonly TimeProvider _timeProvider;
@@ -32,6 +32,35 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IDisposable
     }
 
     public void Dispose() => _publicationLock.Dispose();
+
+    /// <inheritdoc />
+    public async Task<PermalinkAuthorityGenerationInfo> GetGenerationAsync(
+        CancellationToken cancellationToken)
+    {
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT authority_sequence, content_epoch, journal_counter,
+                   COALESCE((SELECT MAX(generation) FROM SnapshotMetadata), 0)
+              FROM AuthorityCounters WHERE singleton = 1
+            """;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Corrupt,
+                "authority-counters-missing",
+                "The permalink authority counter row is missing.");
+        }
+
+        return new PermalinkAuthorityGenerationInfo(
+            reader.GetInt64(0),
+            reader.GetInt64(1),
+            reader.GetInt64(2),
+            reader.GetInt64(3),
+            PermalinkAuthoritySchema.SupportedProtocolEpoch);
+    }
 
     /// <summary>Publishes one database/manifest pair and atomically advances CURRENT.</summary>
     /// <param name="cancellationToken">The cancellation token.</param>
@@ -207,15 +236,28 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IDisposable
         var authorityId = authorityDocument.RootElement.GetProperty("authority_id").GetString()
             ?? throw new InvalidDataException("authority.json lacks authority_id");
         var created = _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture);
+        await using var counters = connection.CreateCommand();
+        counters.CommandText = "SELECT content_epoch, journal_counter FROM AuthorityCounters WHERE singleton = 1";
+        await using var counterReader = await counters.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await counterReader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidDataException("authority counter row is missing");
+        }
+
+        var contentEpoch = counterReader.GetInt64(0);
+        var journalCounter = counterReader.GetInt64(1);
+        await counterReader.DisposeAsync().ConfigureAwait(false);
         await using var insert = connection.CreateCommand();
         insert.CommandText = """
             INSERT INTO SnapshotMetadata
                 (authority_id, schema_epoch, content_epoch, journal_counter, created_at)
-            VALUES ($authority, $schema, 0, 0, $created);
+            VALUES ($authority, $schema, $content, $journal, $created);
             SELECT last_insert_rowid();
             """;
         insert.Parameters.AddWithValue("$authority", authorityId);
         insert.Parameters.AddWithValue("$schema", PermalinkAuthoritySchema.SupportedProtocolEpoch);
+        insert.Parameters.AddWithValue("$content", contentEpoch);
+        insert.Parameters.AddWithValue("$journal", journalCounter);
         insert.Parameters.AddWithValue("$created", created);
         var generation = Convert.ToInt64(
             await insert.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
@@ -224,8 +266,8 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IDisposable
             generation,
             authorityId,
             PermalinkAuthoritySchema.SupportedProtocolEpoch,
-            0,
-            0,
+            contentEpoch,
+            journalCounter,
             created,
             0,
             string.Empty);

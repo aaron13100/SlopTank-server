@@ -89,6 +89,17 @@ internal static class PermalinkAuthoritySchema
                 enforcement_enabled INTEGER NOT NULL DEFAULT 0
                     CHECK(enforcement_enabled IN (0, 1)));
             INSERT OR IGNORE INTO AuthorityWriteProtection VALUES (1, 0);
+            CREATE TABLE IF NOT EXISTS AuthorityCounters (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                authority_sequence INTEGER NOT NULL CHECK(authority_sequence >= 0),
+                content_epoch INTEGER NOT NULL CHECK(content_epoch >= 0),
+                journal_counter INTEGER NOT NULL CHECK(journal_counter >= 0));
+            INSERT OR IGNORE INTO AuthorityCounters VALUES (1, 0, 0, 0);
+            CREATE TRIGGER IF NOT EXISTS protect_authority_counters_update
+            BEFORE UPDATE ON AuthorityCounters BEGIN
+                SELECT CASE WHEN authority_counter_write() != 1
+                    THEN RAISE(ABORT, 'permalink-counter-write') END;
+            END;
             CREATE TABLE IF NOT EXISTS AuthorityWriteAuthorizations (
                 nonce TEXT PRIMARY KEY, operation_id TEXT NOT NULL,
                 table_name TEXT NOT NULL, verb TEXT NOT NULL,
@@ -255,6 +266,28 @@ internal static class PermalinkAuthoritySchema
                     END;
                     """;
                 _ = await trigger.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        foreach (var table in tables.Select(entry => entry.Table).Where(table => table != "SnapshotMetadata"))
+        {
+            var journalIncrement = table is "OperationDecisions" or "PathOperationDecisions"
+                ? "journal_counter + 1"
+                : "journal_counter";
+            foreach (var verb in new[] { "INSERT", "UPDATE", "DELETE" })
+            {
+                await using var counter = connection.CreateCommand();
+                counter.CommandText = $"""
+                    CREATE TRIGGER IF NOT EXISTS count_{table.ToLowerInvariant()}_{verb.ToLowerInvariant()}
+                    AFTER {verb} ON {table} BEGIN
+                        UPDATE AuthorityCounters SET
+                            authority_sequence = authority_sequence + 1,
+                            content_epoch = content_epoch + 1,
+                            journal_counter = {journalIncrement}
+                        WHERE singleton = 1;
+                    END;
+                    """;
+                _ = await counter.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
         }
     }

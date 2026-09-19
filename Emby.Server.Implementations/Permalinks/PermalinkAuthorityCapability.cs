@@ -17,6 +17,7 @@ internal sealed class PermalinkAuthorityCapability
     /// <param name="connection">The newly opened server connection.</param>
     public void Register(SqliteConnection connection)
     {
+        connection.CreateFunction("authority_counter_write", () => 1L);
         connection.CreateFunction<string, string, string, string, long>(
             "authority_capability",
             (table, verb, primaryKey, presentedMac) =>

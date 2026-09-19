@@ -575,6 +575,8 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IPermalinkAuthorityRootProvider, ConfigurationPermalinkAuthorityRootProvider>();
             serviceCollection.AddSingleton<PermalinkAuthorityStore>();
             serviceCollection.AddSingleton<PermalinkAuthoritySnapshotPublisher>();
+            serviceCollection.AddSingleton<IPermalinkAuthorityGenerationOracle>(provider =>
+                provider.GetRequiredService<PermalinkAuthoritySnapshotPublisher>());
             serviceCollection.AddSingleton<PermalinkTransitionStore>();
             serviceCollection.AddSingleton<PermalinkBindingIndex>();
             serviceCollection.AddSingleton<PermalinkCapsuleStore>();

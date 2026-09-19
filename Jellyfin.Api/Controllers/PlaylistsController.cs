@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -537,7 +538,7 @@ public class PlaylistsController : BaseJellyfinApiController
             return Forbid();
         }
 
-        var user = _userManager.GetUserById(callingUserId);
+        var user = _userManager.GetUserOrDefault(callingUserId);
         var items = playlist.GetManageableItems().Where(i => i.Item2.IsVisible(user)).ToArray();
         var count = items.Length;
         if (startIndex.HasValue)

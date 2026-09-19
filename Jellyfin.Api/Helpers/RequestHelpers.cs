@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -82,6 +83,27 @@ public static class RequestHelpers
         }
 
         return userId.Value;
+    }
+
+    /// <summary>
+    /// Looks up a user by id, tolerating an empty id instead of throwing.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="IUserManager.GetUserById"/> throws <see cref="ArgumentException"/> for
+    /// <see cref="Guid.Empty"/>. <see cref="GetUserId"/> legitimately returns
+    /// <see cref="Guid.Empty"/> for an API-key-authenticated request that specifies no
+    /// <c>userId</c> query parameter, since there is no session user to fall back to. Any
+    /// controller that resolves a user id this way (or via an equivalent claims fallback,
+    /// e.g. <c>userId ?? User.GetUserId()</c>) must look the user up through this helper
+    /// instead of calling <see cref="IUserManager.GetUserById"/> directly, so a missing user
+    /// is a normal "not found" outcome rather than an unhandled exception.
+    /// </remarks>
+    /// <param name="userManager">The user manager.</param>
+    /// <param name="userId">The resolved user id, which may be <see cref="Guid.Empty"/>.</param>
+    /// <returns>The user, or <c>null</c> if <paramref name="userId"/> is empty or no such user exists.</returns>
+    internal static User? GetUserOrDefault(this IUserManager userManager, Guid userId)
+    {
+        return userId.IsEmpty() ? null : userManager.GetUserById(userId);
     }
 
     /// <summary>

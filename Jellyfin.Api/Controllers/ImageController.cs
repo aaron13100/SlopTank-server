@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -104,7 +105,7 @@ public class ImageController : BaseJellyfinApiController
         [FromQuery] Guid? userId)
     {
         var requestUserId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(requestUserId);
+        var user = _userManager.GetUserOrDefault(requestUserId);
         if (user is null)
         {
             return NotFound();
@@ -204,7 +205,7 @@ public class ImageController : BaseJellyfinApiController
         [FromQuery] Guid? userId)
     {
         var requestUserId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(requestUserId);
+        var user = _userManager.GetUserOrDefault(requestUserId);
         if (user is null)
         {
             return NotFound();

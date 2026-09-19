@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -90,7 +91,7 @@ public class TvShowsController : BaseJellyfinApiController
         [FromQuery] bool enableResumable = true,
         [FromQuery] bool enableRewatching = false)
     {
-        var user = _userManager.GetUserById(RequestHelpers.GetUserId(User, userId));
+        var user = _userManager.GetUserOrDefault(RequestHelpers.GetUserId(User, userId));
         if (user is null)
         {
             return NotFound();

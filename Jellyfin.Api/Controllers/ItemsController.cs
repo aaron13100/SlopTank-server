@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-09-09, 2026-09-19.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -950,7 +950,7 @@ public class ItemsController : BaseJellyfinApiController
         [FromQuery] bool excludeActiveSessions = false)
     {
         var requestUserId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(requestUserId);
+        var user = _userManager.GetUserOrDefault(requestUserId);
         if (user is null)
         {
             return NotFound();
@@ -1090,7 +1090,7 @@ public class ItemsController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId)
     {
         var requestUserId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(requestUserId);
+        var user = _userManager.GetUserOrDefault(requestUserId);
         if (user is null)
         {
             return NotFound();
@@ -1147,7 +1147,7 @@ public class ItemsController : BaseJellyfinApiController
         [FromBody, Required] UpdateUserItemDataDto userDataDto)
     {
         var requestUserId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(requestUserId);
+        var user = _userManager.GetUserOrDefault(requestUserId);
         if (user is null)
         {
             return NotFound();

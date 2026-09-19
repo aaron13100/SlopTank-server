@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-14, 2026-09-18.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-14, 2026-09-18, 2026-09-19.
 using System;
 using System.ComponentModel.DataAnnotations;
 using System.Diagnostics.CodeAnalysis;
@@ -81,7 +81,7 @@ public class PlaystateController : BaseJellyfinApiController
         [FromQuery, ModelBinder(typeof(LegacyDateTimeModelBinder))] DateTime? datePlayed)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value);
+        var user = _userManager.GetUserOrDefault(userId.Value);
         if (user is null)
         {
             return NotFound();
@@ -147,7 +147,7 @@ public class PlaystateController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value);
+        var user = _userManager.GetUserOrDefault(userId.Value);
         if (user is null)
         {
             return NotFound();
@@ -218,7 +218,7 @@ public class PlaystateController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value);
+        var user = _userManager.GetUserOrDefault(userId.Value);
         if (user is null)
         {
             return NotFound();

@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -80,7 +81,7 @@ public class UserLibraryController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value);
+        var user = _userManager.GetUserOrDefault(userId.Value);
         if (user is null)
         {
             return NotFound();
@@ -128,7 +129,7 @@ public class UserLibraryController : BaseJellyfinApiController
     public ActionResult<BaseItemDto> GetRootFolder([FromQuery] Guid? userId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value);
+        var user = _userManager.GetUserOrDefault(userId.Value);
         if (user is null)
         {
             return NotFound();
@@ -167,7 +168,7 @@ public class UserLibraryController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value);
+        var user = _userManager.GetUserOrDefault(userId.Value);
         if (user is null)
         {
             return NotFound();
@@ -219,7 +220,7 @@ public class UserLibraryController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value);
+        var user = _userManager.GetUserOrDefault(userId.Value);
         if (user is null)
         {
             return NotFound();
@@ -267,7 +268,7 @@ public class UserLibraryController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value);
+        var user = _userManager.GetUserOrDefault(userId.Value);
         if (user is null)
         {
             return NotFound();
@@ -315,7 +316,7 @@ public class UserLibraryController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value);
+        var user = _userManager.GetUserOrDefault(userId.Value);
         if (user is null)
         {
             return NotFound();
@@ -365,7 +366,7 @@ public class UserLibraryController : BaseJellyfinApiController
         [FromQuery] bool? likes)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value);
+        var user = _userManager.GetUserOrDefault(userId.Value);
         if (user is null)
         {
             return NotFound();
@@ -414,7 +415,7 @@ public class UserLibraryController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value);
+        var user = _userManager.GetUserOrDefault(userId.Value);
         if (user is null)
         {
             return NotFound();
@@ -464,7 +465,7 @@ public class UserLibraryController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value);
+        var user = _userManager.GetUserOrDefault(userId.Value);
         if (user is null)
         {
             return NotFound();
@@ -534,7 +535,7 @@ public class UserLibraryController : BaseJellyfinApiController
         [FromQuery] bool groupItems = true)
     {
         var requestUserId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(requestUserId);
+        var user = _userManager.GetUserOrDefault(requestUserId);
         if (user is null)
         {
             return NotFound();

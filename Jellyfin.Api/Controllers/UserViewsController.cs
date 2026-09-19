@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -71,7 +72,7 @@ public class UserViewsController : BaseJellyfinApiController
         [FromQuery] bool includeHidden = false)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value) ?? throw new ResourceNotFoundException();
+        var user = _userManager.GetUserOrDefault(userId.Value) ?? throw new ResourceNotFoundException();
 
         var query = new UserViewQuery { User = user, IncludeHidden = includeHidden };
 
@@ -131,7 +132,7 @@ public class UserViewsController : BaseJellyfinApiController
     public ActionResult<IEnumerable<SpecialViewOptionDto>> GetGroupingOptions([FromQuery] Guid? userId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = _userManager.GetUserById(userId.Value);
+        var user = _userManager.GetUserOrDefault(userId.Value);
         if (user is null)
         {
             return NotFound();

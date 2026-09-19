@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -277,7 +278,7 @@ public class UserController : BaseJellyfinApiController
         [FromBody, Required] UpdateUserPassword request)
     {
         var requestUserId = userId ?? User.GetUserId();
-        var user = _userManager.GetUserById(requestUserId);
+        var user = _userManager.GetUserOrDefault(requestUserId);
         if (user is null)
         {
             return NotFound();
@@ -358,7 +359,7 @@ public class UserController : BaseJellyfinApiController
         [FromBody, Required] UserDto updateUser)
     {
         var requestUserId = userId ?? User.GetUserId();
-        var user = _userManager.GetUserById(requestUserId);
+        var user = _userManager.GetUserOrDefault(requestUserId);
         if (user is null)
         {
             return NotFound();
@@ -473,7 +474,7 @@ public class UserController : BaseJellyfinApiController
         [FromBody, Required] UserConfiguration userConfig)
     {
         var requestUserId = userId ?? User.GetUserId();
-        var user = _userManager.GetUserById(requestUserId);
+        var user = _userManager.GetUserOrDefault(requestUserId);
         if (user is null)
         {
             return NotFound();

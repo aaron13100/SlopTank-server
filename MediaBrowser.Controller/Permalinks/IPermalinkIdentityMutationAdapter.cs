@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-19.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -12,6 +12,16 @@ namespace MediaBrowser.Controller.Permalinks;
 /// </summary>
 public interface IPermalinkIdentityMutationAdapter
 {
+    /// <summary>
+    /// Returns whether an already-resolved scan child is provably identical at every
+    /// permalink-bearing boundary and its persisted content digest still matches the
+    /// filesystem change token.
+    /// </summary>
+    /// <param name="currentItem">The item currently persisted in the library.</param>
+    /// <param name="resolvedItem">The item resolved by the current scan.</param>
+    /// <returns>True only when durable evidence proves identity work is redundant.</returns>
+    bool CanSkipScanReplacement(BaseItem currentItem, BaseItem resolvedItem);
+
     /// <summary>
     /// Executes one mutation after all protected items have durable prepared state.
     /// </summary>

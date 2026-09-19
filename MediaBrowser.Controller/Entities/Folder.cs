@@ -463,6 +463,23 @@ namespace MediaBrowser.Controller.Entities
                     {
                         validChildren.Add(currentChild);
 
+                        if (PermalinkIdentityMutationAdapter.CanSkipScanReplacement(currentChild, child))
+                        {
+                            if (currentChild.UpdateFromResolvedItem(child) > ItemUpdateType.None)
+                            {
+                                await currentChild.UpdateToRepositoryAsync(
+                                    ItemUpdateType.MetadataImport,
+                                    cancellationToken).ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                await LibraryManager.UpdateImagesAsync(currentChild).ConfigureAwait(false);
+                            }
+
+                            accessibleChildren.Add(currentChild);
+                            continue;
+                        }
+
                         var childUpdated = await TryExecutePermalinkChildMutationAsync(
                             currentChild,
                             () => PermalinkIdentityMutationAdapter.ExecuteAsync(

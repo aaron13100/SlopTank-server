@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-09, 2026-09-19.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -22,17 +22,36 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
     private readonly PermalinkBindingIndex _bindings;
     private readonly PermalinkPendingIdentityMutation _pending;
     private readonly ILibraryManager _libraryManager;
+    private readonly PermalinkEvidence _evidence;
 
     public PermalinkIdentityMutationAdapter(
         IPermalinkMutationCoordinator coordinator,
         PermalinkBindingIndex bindings,
         PermalinkPendingIdentityMutation pending,
-        ILibraryManager libraryManager)
+        ILibraryManager libraryManager,
+        PermalinkEvidence evidence)
     {
         _coordinator = coordinator;
         _bindings = bindings;
         _pending = pending;
         _libraryManager = libraryManager;
+        _evidence = evidence;
+    }
+
+    /// <inheritdoc />
+    public bool CanSkipScanReplacement(BaseItem currentItem, BaseItem resolvedItem)
+    {
+        ArgumentNullException.ThrowIfNull(currentItem);
+        ArgumentNullException.ThrowIfNull(resolvedItem);
+
+        return string.Equals(currentItem.Path, resolvedItem.Path, StringComparison.Ordinal)
+            && currentItem.GetBaseItemKind() == resolvedItem.GetBaseItemKind()
+            && currentItem.ProviderIds.Count == resolvedItem.ProviderIds.Count
+            && currentItem.ProviderIds.All(pair =>
+                resolvedItem.ProviderIds.TryGetValue(pair.Key, out var value)
+                && string.Equals(pair.Value, value, StringComparison.Ordinal))
+            && !string.IsNullOrEmpty(currentItem.Path)
+            && _evidence.IsContentDigestKnown(currentItem.Path);
     }
 
     /// <inheritdoc />

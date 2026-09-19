@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-19.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -186,19 +186,43 @@ namespace MediaBrowser.Providers.Manager
             }
 
             var updateType = ItemUpdateType.None;
-            await _identityMutationAdapter.ExecuteAsync(
-                [item],
-                new PermalinkIdentityMutationRequest(
-                    ClassifyIdentityMutation(item, options),
-                    options.SearchResult?.ProviderIds),
-                async (_, ambientCancellationToken) =>
-                {
-                    updateType = await service.RefreshMetadata(
-                        item,
-                        options,
-                        ambientCancellationToken).ConfigureAwait(false);
-                },
-                cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await _identityMutationAdapter.ExecuteAsync(
+                    [item],
+                    new PermalinkIdentityMutationRequest(
+                        ClassifyIdentityMutation(item, options),
+                        options.SearchResult?.ProviderIds),
+                    async (_, ambientCancellationToken) =>
+                    {
+                        updateType = await service.RefreshMetadata(
+                            item,
+                            options,
+                            ambientCancellationToken).ConfigureAwait(false);
+                    },
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (PermalinkException exception)
+            {
+                // Sibling of the delete-endpoint fix (2026-09-11 F1 incident):
+                // this call site had no guard at all, so a metadata refresh of
+                // a fenced item (a scheduled task, an on-demand Person
+                // refresh on item view, or a queued "Refresh Metadata" click)
+                // threw unhandled. A refresh does not need a verified content
+                // head either: skip it the same way a fenced scan child is
+                // skipped, and let the next successful reconciliation pick it
+                // back up.
+                _logger.LogWarning(
+                    exception,
+                    "Skipping metadata refresh for {ItemId} ({ItemName}) at {ItemPath} because permalink operation {OperationId} fenced it with {PermalinkCode}",
+                    item.Id,
+                    item.Name,
+                    item.Path,
+                    exception.OperationId,
+                    exception.Code);
+                return ItemUpdateType.None;
+            }
+
             return updateType;
         }
 

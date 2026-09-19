@@ -606,6 +606,8 @@ namespace MediaBrowser.Controller.Entities
                         if (item.IsFileProtocol)
                         {
                             Logger.LogDebug("Removed item: {Path}", item.Path);
+                            // Keep deletion state changes inside the child fence so a skipped
+                            // permalink conflict leaves this item retained for the next scan.
                             var deletionOutcome = await TryExecutePermalinkChildMutationAsync(
                                 item,
                                 () =>

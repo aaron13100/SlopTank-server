@@ -23,6 +23,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly TimeProvider _timeProvider;
     private readonly IPermalinkAuthorityRootProvider _rootProvider;
+    private readonly PermalinkAuthorityCapability _capability = new();
     private readonly SemaphoreSlim _provisionLock = new(1, 1);
 
     /// <summary>
@@ -475,12 +476,69 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         _lastOpenedDatabasePath = databasePath;
         var connection = new SqliteConnection($"Data Source={databasePath};Pooling=True");
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        _capability.Register(connection);
         await using var command = connection.CreateCommand();
         command.CommandText = OperatingSystem.IsMacOS()
             ? "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON;"
             : "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;";
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         return connection;
+    }
+
+    /// <summary>Begins one exact protected-table write scope.</summary>
+    /// <param name="connection">The server-owned authority connection.</param>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <param name="table">The exact protected table name.</param>
+    /// <param name="verb">The exact SQL write verb.</param>
+    /// <param name="primaryKey">The canonical primary-key text.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The capability scope, which removes its authorization on disposal.</returns>
+    internal async Task<PermalinkAuthorityWriteScope> BeginAuthorizedWriteAsync(
+        SqliteConnection connection,
+        Guid operationId,
+        string table,
+        string verb,
+        string primaryKey,
+        CancellationToken cancellationToken)
+    {
+        var scope = _capability.Begin(
+            connection,
+            operationId,
+            table,
+            verb,
+            primaryKey,
+            PermalinkAuthoritySchema.SupportedProtocolEpoch);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO AuthorityWriteAuthorizations
+                (nonce, operation_id, table_name, verb, primary_key, epoch, mac, created_at)
+            VALUES ($nonce, $operation, $table, $verb, $key, $epoch, $mac, $created)
+            """;
+        command.Parameters.AddWithValue("$nonce", scope.Nonce);
+        command.Parameters.AddWithValue("$operation", operationId.ToString("D"));
+        command.Parameters.AddWithValue("$table", table);
+        command.Parameters.AddWithValue("$verb", verb);
+        command.Parameters.AddWithValue("$key", primaryKey);
+        command.Parameters.AddWithValue("$epoch", PermalinkAuthoritySchema.SupportedProtocolEpoch);
+        command.Parameters.AddWithValue("$mac", scope.Mac);
+        command.Parameters.AddWithValue("$created", UtcNow());
+        try
+        {
+            _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            scope.AddRelease(() =>
+            {
+                using var cleanup = connection.CreateCommand();
+                cleanup.CommandText = "DELETE FROM AuthorityWriteAuthorizations WHERE nonce = $nonce";
+                cleanup.Parameters.AddWithValue("$nonce", scope.Nonce);
+                _ = cleanup.ExecuteNonQuery();
+            });
+            return scope;
+        }
+        catch
+        {
+            scope.Dispose();
+            throw;
+        }
     }
 
     /// <summary>

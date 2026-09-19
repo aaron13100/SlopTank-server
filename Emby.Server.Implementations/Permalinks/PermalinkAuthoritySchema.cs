@@ -89,6 +89,12 @@ internal static class PermalinkAuthoritySchema
                 enforcement_enabled INTEGER NOT NULL DEFAULT 0
                     CHECK(enforcement_enabled IN (0, 1)));
             INSERT OR IGNORE INTO AuthorityWriteProtection VALUES (1, 0);
+            CREATE TABLE IF NOT EXISTS AuthorityWriteAuthorizations (
+                nonce TEXT PRIMARY KEY, operation_id TEXT NOT NULL,
+                table_name TEXT NOT NULL, verb TEXT NOT NULL,
+                primary_key TEXT NOT NULL, epoch INTEGER NOT NULL,
+                mac TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(table_name, verb, primary_key));
             CREATE TABLE IF NOT EXISTS AnchorTokenCapsules (
                 anchor_token TEXT PRIMARY KEY, capsule_id TEXT NOT NULL,
                 binding_id TEXT NOT NULL, root_path TEXT NOT NULL,
@@ -199,6 +205,58 @@ internal static class PermalinkAuthoritySchema
             END;
             """;
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await InstallWriteProtectionAsync(connection, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task InstallWriteProtectionAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var tables = new (string Table, string Key)[]
+        {
+            ("AuthorityProtocolState", "CAST(NEW.singleton AS TEXT)"),
+            ("SnapshotMetadata", "CAST(NEW.generation AS TEXT)"),
+            ("AnchorTokenCapsules", "NEW.anchor_token"),
+            ("PermalinkIssuances", "NEW.PermalinkId"),
+            ("FirstAliasClaims", "NEW.capsule_id"),
+            ("PermalinkBindingCapsuleOverrides", "NEW.PermalinkId || char(0) || NEW.ItemId"),
+            ("ContentTransitionClaims", "NEW.capsule_id || char(0) || NEW.predecessor"),
+            ("OperationDecisions", "NEW.operation_id || char(0) || NEW.capsule_id || char(0) || NEW.predecessor"),
+            ("PathOperationDecisions", "NEW.operation_id || char(0) || NEW.capsule_id || char(0) || NEW.binding_id || char(0) || NEW.predecessor"),
+            ("MutationClaims", "NEW.capsule_id || char(0) || NEW.predecessor_root"),
+            ("CanonicalTransitionClaims", "NEW.domain || char(0) || NEW.capsule_id || char(0) || NEW.binding_key || char(0) || NEW.predecessor_event_id"),
+            ("LegacyPredecessorMap", "NEW.capsule_id || char(0) || NEW.predecessor_root"),
+            ("PermalinkBindings", "NEW.PermalinkId || char(0) || NEW.ItemId"),
+            ("PermalinkPendingMigration", "NEW.name"),
+            ("PermalinkOperationArchiveCandidates", "NEW.operation_id")
+        };
+        foreach (var (table, newKey) in tables)
+        {
+            foreach (var verb in new[] { "INSERT", "UPDATE", "DELETE" })
+            {
+                if (table == "PermalinkIssuances" && verb is "UPDATE" or "DELETE")
+                {
+                    continue;
+                }
+
+                var key = verb == "DELETE" ? newKey.Replace("NEW.", "OLD.", StringComparison.Ordinal) : newKey;
+                await using var trigger = connection.CreateCommand();
+                trigger.CommandText = $"""
+                    CREATE TRIGGER IF NOT EXISTS protect_{table.ToLowerInvariant()}_{verb.ToLowerInvariant()}
+                    BEFORE {verb} ON {table}
+                    WHEN (SELECT enforcement_enabled FROM AuthorityWriteProtection WHERE singleton = 1) = 1
+                    BEGIN
+                        SELECT CASE WHEN authority_capability(
+                            '{table}', '{verb}', {key},
+                            COALESCE((SELECT mac FROM AuthorityWriteAuthorizations
+                                WHERE table_name = '{table}' AND verb = '{verb}'
+                                  AND primary_key = {key}), '')) != 1
+                            THEN RAISE(ABORT, 'permalink-protected-write') END;
+                    END;
+                    """;
+                _ = await trigger.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     /// <summary>

@@ -131,7 +131,7 @@ public class UserController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult<UserDto> GetUserById([FromRoute, Required] Guid userId)
     {
-        var user = _userManager.GetUserById(userId);
+        var user = _userManager.GetUserOrDefault(userId);
 
         if (user is null)
         {
@@ -155,7 +155,7 @@ public class UserController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult> DeleteUser([FromRoute, Required] Guid userId)
     {
-        var user = _userManager.GetUserById(userId);
+        var user = _userManager.GetUserOrDefault(userId);
         if (user is null)
         {
             return NotFound();
@@ -186,7 +186,7 @@ public class UserController : BaseJellyfinApiController
         [FromRoute, Required] Guid userId,
         [FromQuery, Required] string pw)
     {
-        var user = _userManager.GetUserById(userId);
+        var user = _userManager.GetUserOrDefault(userId);
 
         if (user is null)
         {
@@ -419,7 +419,7 @@ public class UserController : BaseJellyfinApiController
         [FromRoute, Required] Guid userId,
         [FromBody, Required] UserPolicy newPolicy)
     {
-        var user = _userManager.GetUserById(userId);
+        var user = _userManager.GetUserOrDefault(userId);
         if (user is null)
         {
             return NotFound();

@@ -98,7 +98,7 @@ public class PlaystateController : BaseJellyfinApiController
         var dto = UpdatePlayedStatus(user, item, true, datePlayed);
         foreach (var additionalUserInfo in session.AdditionalUsers)
         {
-            var additionalUser = _userManager.GetUserById(additionalUserInfo.UserId);
+            var additionalUser = _userManager.GetUserOrDefault(additionalUserInfo.UserId);
             if (additionalUser is null)
             {
                 return NotFound();
@@ -164,7 +164,7 @@ public class PlaystateController : BaseJellyfinApiController
         var dto = UpdatePlayedStatus(user, item, false, null);
         foreach (var additionalUserInfo in session.AdditionalUsers)
         {
-            var additionalUser = _userManager.GetUserById(additionalUserInfo.UserId);
+            var additionalUser = _userManager.GetUserOrDefault(additionalUserInfo.UserId);
             if (additionalUser is null)
             {
                 return NotFound();

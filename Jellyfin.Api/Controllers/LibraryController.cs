@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-18.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-18, 2026-09-19.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -374,6 +374,15 @@ public class LibraryController : BaseJellyfinApiController
     {
         var userId = User.GetUserId();
         var isApiKey = User.GetIsApiKey();
+        // The remaining branch (userId.IsEmpty() && !isApiKey) looks unguarded but is unreachable:
+        // this action uses plain [Authorize], which maps to the default authorization policy's sole
+        // DefaultAuthorizationRequirement. DefaultAuthorizationHandler.HandleRequirementAsync returns
+        // without calling context.Succeed() whenever "!isApiKey && userId.IsEmpty()", so that exact
+        // combination never satisfies the policy and the request is rejected before this action runs.
+        // Verified live: a request with no token, or a token that resolves to no device/api key (so
+        // isApiKey stays false and userId resolves empty), gets 401/403 upstream; a real caller (device
+        // token or api key) always yields either a non-empty userId or isApiKey == true by the time
+        // this line runs. See Jellyfin.Api/Auth/DefaultAuthorizationPolicy/DefaultAuthorizationHandler.cs.
         var user = userId.IsEmpty() && isApiKey
             ? null
             : _userManager.GetUserById(userId);

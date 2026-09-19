@@ -1,8 +1,9 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19.
 using System;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using MediaBrowser.Controller.Permalinks;
 using Microsoft.Data.Sqlite;
 
 namespace Emby.Server.Implementations.Permalinks;
@@ -12,6 +13,50 @@ namespace Emby.Server.Implementations.Permalinks;
 /// </summary>
 internal static class PermalinkAuthoritySchema
 {
+    /// <summary>The newest authority protocol this binary can safely open.</summary>
+    internal const long SupportedProtocolEpoch = 1;
+
+    /// <summary>
+    /// Refuses an authority created by a newer binary before this binary can
+    /// expose HTTP, scans, or scheduled work against state it cannot interpret.
+    /// An authority predating the protocol row is epoch zero and remains
+    /// readable by the compatibility release.
+    /// </summary>
+    /// <param name="connection">The open authority connection.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous validation.</returns>
+    public static async Task ValidateProtocolEpochAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var table = connection.CreateCommand();
+        table.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'AuthorityProtocolState'";
+        if (await table.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null)
+        {
+            return;
+        }
+
+        await using var epoch = connection.CreateCommand();
+        epoch.CommandText = "SELECT protocol_epoch FROM AuthorityProtocolState WHERE singleton = 1";
+        var value = await epoch.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        if (value is null || value is DBNull)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Corrupt,
+                "authority-protocol-missing",
+                "The permalink authority protocol row is missing.");
+        }
+
+        var observed = Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture);
+        if (observed > SupportedProtocolEpoch)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.VersionRefused,
+                "authority-protocol-newer",
+                $"The permalink authority protocol epoch {observed} is newer than supported epoch {SupportedProtocolEpoch}.");
+        }
+    }
+
     /// <summary>
     /// Creates the append-only authority and derived binding tables.
     /// </summary>
@@ -24,6 +69,14 @@ internal static class PermalinkAuthoritySchema
     {
         await using var command = connection.CreateCommand();
         command.CommandText = """
+            CREATE TABLE IF NOT EXISTS AuthorityProtocolState (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                protocol_epoch INTEGER NOT NULL CHECK(protocol_epoch >= 0),
+                irreversible_floor INTEGER NOT NULL DEFAULT 0 CHECK(irreversible_floor IN (0, 1)),
+                updated_at TEXT NOT NULL);
+            INSERT OR IGNORE INTO AuthorityProtocolState
+                (singleton, protocol_epoch, irreversible_floor, updated_at)
+            VALUES (1, 1, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
             CREATE TABLE IF NOT EXISTS AnchorTokenCapsules (
                 anchor_token TEXT PRIMARY KEY, capsule_id TEXT NOT NULL,
                 binding_id TEXT NOT NULL, root_path TEXT NOT NULL,

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-09-03, 2026-09-09, 2026-09-10, 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-09-03, 2026-09-09, 2026-09-10, 2026-09-19, 2026-10-07.
 using System;
 using System.Globalization;
 using System.IO;
@@ -316,7 +316,13 @@ internal sealed class PermalinkAuthorityStore : IDisposable
             }
 
             await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await PermalinkAuthoritySchema.ValidateProtocolEpochAsync(
+                connection,
+                cancellationToken).ConfigureAwait(false);
             await PermalinkAuthoritySchema.ApplyAsync(connection, cancellationToken).ConfigureAwait(false);
+            await PermalinkAuthoritySchema.ValidateProtocolEpochAsync(
+                connection,
+                cancellationToken).ConfigureAwait(false);
             _provisioned = true;
         }
         catch (PermalinkException)

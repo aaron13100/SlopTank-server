@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-07-31, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-07-31, 2026-09-08, 2026-09-09, 2026-09-19.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -185,7 +185,9 @@ public sealed class PermalinkResolutionController : BaseJellyfinApiController
         {
             return Problem(
                 detail: exception.Message,
-                statusCode: exception.Kind == PermalinkErrorKind.Unavailable
+                statusCode: exception.Kind is PermalinkErrorKind.Unavailable
+                    or PermalinkErrorKind.Corrupt
+                    or PermalinkErrorKind.VersionRefused
                     ? StatusCodes.Status503ServiceUnavailable
                     : StatusCodes.Status409Conflict,
                 title: exception.Code);

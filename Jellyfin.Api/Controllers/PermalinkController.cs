@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-31, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-31, 2026-09-09, 2026-09-19.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -83,6 +83,8 @@ public sealed class PermalinkController : BaseJellyfinApiController
             {
                 PermalinkErrorKind.Ineligible => StatusCodes.Status400BadRequest,
                 PermalinkErrorKind.Conflict => StatusCodes.Status409Conflict,
+                PermalinkErrorKind.Corrupt => StatusCodes.Status503ServiceUnavailable,
+                PermalinkErrorKind.VersionRefused => StatusCodes.Status503ServiceUnavailable,
                 PermalinkErrorKind.Unavailable => StatusCodes.Status503ServiceUnavailable,
                 _ => StatusCodes.Status500InternalServerError
             };

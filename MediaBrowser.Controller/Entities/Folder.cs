@@ -463,7 +463,10 @@ namespace MediaBrowser.Controller.Entities
                     {
                         validChildren.Add(currentChild);
 
-                        if (PermalinkIdentityMutationAdapter.CanSkipScanReplacement(currentChild, child))
+                        if (await PermalinkIdentityMutationAdapter.CanSkipScanReplacementAsync(
+                                currentChild,
+                                child,
+                                cancellationToken).ConfigureAwait(false))
                         {
                             if (currentChild.UpdateFromResolvedItem(child) > ItemUpdateType.None)
                             {

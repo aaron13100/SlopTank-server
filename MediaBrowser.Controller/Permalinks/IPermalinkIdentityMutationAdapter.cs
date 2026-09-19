@@ -19,8 +19,12 @@ public interface IPermalinkIdentityMutationAdapter
     /// </summary>
     /// <param name="currentItem">The item currently persisted in the library.</param>
     /// <param name="resolvedItem">The item resolved by the current scan.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>True only when durable evidence proves identity work is redundant.</returns>
-    bool CanSkipScanReplacement(BaseItem currentItem, BaseItem resolvedItem);
+    Task<bool> CanSkipScanReplacementAsync(
+        BaseItem currentItem,
+        BaseItem resolvedItem,
+        CancellationToken cancellationToken);
 
     /// <summary>
     /// Executes one mutation after all protected items have durable prepared state.

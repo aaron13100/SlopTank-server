@@ -39,12 +39,15 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
     }
 
     /// <inheritdoc />
-    public bool CanSkipScanReplacement(BaseItem currentItem, BaseItem resolvedItem)
+    public async Task<bool> CanSkipScanReplacementAsync(
+        BaseItem currentItem,
+        BaseItem resolvedItem,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(currentItem);
         ArgumentNullException.ThrowIfNull(resolvedItem);
 
-        return string.Equals(currentItem.Path, resolvedItem.Path, StringComparison.Ordinal)
+        var hasKnownMatchingIdentity = string.Equals(currentItem.Path, resolvedItem.Path, StringComparison.Ordinal)
             && currentItem.GetBaseItemKind() == resolvedItem.GetBaseItemKind()
             && currentItem.ProviderIds.Count == resolvedItem.ProviderIds.Count
             && currentItem.ProviderIds.All(pair =>
@@ -52,6 +55,12 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
                 && string.Equals(pair.Value, value, StringComparison.Ordinal))
             && !string.IsNullOrEmpty(currentItem.Path)
             && _evidence.IsContentDigestKnown(currentItem.Path);
+        if (!hasKnownMatchingIdentity)
+        {
+            return false;
+        }
+
+        return await _pending.FindPendingAsync(currentItem.Id, cancellationToken).ConfigureAwait(false) is null;
     }
 
     /// <inheritdoc />

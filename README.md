@@ -1,4 +1,4 @@
-<!-- SlopTank modification notice: added or changed by SlopTank on 2026-07-22, 2026-09-08, 2026-09-09. -->
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-07-22, 2026-09-08, 2026-09-09, 2026-09-19. -->
 <h1 align="center">SlopTank Server</h1>
 <h3 align="center">A customized media server based on <a href="https://jellyfin.org">Jellyfin</a></h3>
 
@@ -65,6 +65,26 @@ repository over HTTPS:
 ```bash
 git clone https://github.com/aaron13100/SlopTank-server.git
 ```
+
+### Installing the local notice hook
+
+SlopTank tracks a short modification notice in every changed source file.
+Install the repository-managed pre-commit hook after cloning so a staged file
+cannot lose its notice before it reaches review:
+
+```bash
+cd SlopTank-server
+git config core.hooksPath .githooks
+export SLOPTANK_MEDIA_ROOT=/path/to/mediaserver
+```
+
+The hook runs the staged check from
+`$SLOPTANK_MEDIA_ROOT/tools/check-gpl-modified-file-notices.py`. In the usual
+checkout layout, where `SlopTank-server` is next to `mediaserver`, the
+`SLOPTANK_MEDIA_ROOT` setting can be omitted. The hook does not replace the
+promotion audit, which checks the committed tree. `git commit --no-verify`
+remains available for emergencies; the promotion audit is the backstop for a
+bypassed local hook.
 
 ### Installing the Web Client
 

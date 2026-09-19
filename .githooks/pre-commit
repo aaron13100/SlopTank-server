@@ -1,0 +1,15 @@
+#!/bin/sh
+# SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
+set -eu
+
+repository_root=$(git rev-parse --show-toplevel)
+media_root=${SLOPTANK_MEDIA_ROOT:-$(CDPATH= cd -- "$repository_root/.." && pwd -P)}
+checker="$media_root/tools/check-gpl-modified-file-notices.py"
+
+if [ ! -f "$checker" ]; then
+    printf '%s\n' "SlopTank notice hook: checker not found at $checker" >&2
+    printf '%s\n' "Set SLOPTANK_MEDIA_ROOT to the mediaserver checkout." >&2
+    exit 1
+fi
+
+exec python3 "$checker" check --repository server --staged

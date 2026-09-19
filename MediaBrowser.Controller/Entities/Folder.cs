@@ -606,10 +606,23 @@ namespace MediaBrowser.Controller.Entities
                         if (item.IsFileProtocol)
                         {
                             Logger.LogDebug("Removed item: {Path}", item.Path);
-
-                            actuallyRemoved.Add(item);
-                            item.SetParent(null);
-                            LibraryManager.DeleteItem(item, new DeleteOptions { DeleteFileLocation = false }, this, false);
+                            var deletionOutcome = await TryExecutePermalinkChildMutationAsync(
+                                item,
+                                () =>
+                                {
+                                    actuallyRemoved.Add(item);
+                                    item.SetParent(null);
+                                    LibraryManager.DeleteItem(
+                                        item,
+                                        new DeleteOptions { DeleteFileLocation = false },
+                                        this,
+                                        false);
+                                    return Task.CompletedTask;
+                                }).ConfigureAwait(false);
+                            if (deletionOutcome == PermalinkChildMutationOutcome.SkippedConflict)
+                            {
+                                permalinkConflictsSkipped++;
+                            }
                         }
                     }
                 }

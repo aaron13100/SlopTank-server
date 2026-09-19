@@ -104,9 +104,9 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// </summary>
     internal bool IsConfigured => !string.IsNullOrWhiteSpace(_rootProvider.AuthorityRoot);
 
-    private string AuthorityRoot => Path.Combine(Root, ".sloptank", "permalinks");
+    internal string AuthorityRoot => Path.Combine(Root, ".sloptank", "permalinks");
 
-    private string DatabasePath => Path.Combine(AuthorityRoot, "authority.db");
+    internal string DatabasePath => Path.Combine(AuthorityRoot, "authority.db");
 
     internal string IssuedRoot => Path.Combine(AuthorityRoot, "issued");
 

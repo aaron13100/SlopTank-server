@@ -77,6 +77,18 @@ internal static class PermalinkAuthoritySchema
             INSERT OR IGNORE INTO AuthorityProtocolState
                 (singleton, protocol_epoch, irreversible_floor, updated_at)
             VALUES (1, 1, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            CREATE TABLE IF NOT EXISTS SnapshotMetadata (
+                generation INTEGER PRIMARY KEY AUTOINCREMENT,
+                authority_id TEXT NOT NULL,
+                schema_epoch INTEGER NOT NULL,
+                content_epoch INTEGER NOT NULL,
+                journal_counter INTEGER NOT NULL,
+                created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS AuthorityWriteProtection (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                enforcement_enabled INTEGER NOT NULL DEFAULT 0
+                    CHECK(enforcement_enabled IN (0, 1)));
+            INSERT OR IGNORE INTO AuthorityWriteProtection VALUES (1, 0);
             CREATE TABLE IF NOT EXISTS AnchorTokenCapsules (
                 anchor_token TEXT PRIMARY KEY, capsule_id TEXT NOT NULL,
                 binding_id TEXT NOT NULL, root_path TEXT NOT NULL,
@@ -175,6 +187,16 @@ internal static class PermalinkAuthoritySchema
             -- fails outright on this host.
             CREATE INDEX IF NOT EXISTS IX_FirstAliasClaims_PermalinkId
                 ON FirstAliasClaims(permalink_id);
+            CREATE TRIGGER IF NOT EXISTS protect_permalink_issuances_update
+            BEFORE UPDATE ON PermalinkIssuances BEGIN
+                SELECT CASE WHEN (SELECT enforcement_enabled FROM AuthorityWriteProtection WHERE singleton = 1) = 1
+                    THEN RAISE(ABORT, 'permalink-protected-immutable') END;
+            END;
+            CREATE TRIGGER IF NOT EXISTS protect_permalink_issuances_delete
+            BEFORE DELETE ON PermalinkIssuances BEGIN
+                SELECT CASE WHEN (SELECT enforcement_enabled FROM AuthorityWriteProtection WHERE singleton = 1) = 1
+                    THEN RAISE(ABORT, 'permalink-protected-immutable') END;
+            END;
             """;
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }

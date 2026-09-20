@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -515,15 +515,23 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     /// Whether this is a deletion of an item whose content is already gone.
     /// </summary>
     /// <remarks>
-    /// Deliberately narrow. Only a deletion may proceed without content
+    /// Deliberately narrow. Only a removal may proceed without content
     /// evidence: every other mutation kind is asserting something about the
     /// item's content and must still be made to prove it. An unreachable file
     /// under any other kind stays an error.
+    ///
+    /// "Removal" includes a deletion request that
+    /// <see cref="PermalinkIdentityMutationAdapter.ResolveEffectiveKind"/>
+    /// reclassified as "promotion": deleting a primary that still has a live
+    /// alternate version does not stop being a removal of THIS item's content
+    /// just because the adapter also promotes a sibling to replace it. The
+    /// item passed in here is always the one being prepared, so a promotion's
+    /// vanished-content check still applies to the vanishing primary and not
+    /// to the (unrelated, still-present) alternate being promoted.
     /// </remarks>
     private static bool IsDeletionOfVanishedContent(string kind, BaseItem item)
     {
-        if (!string.Equals(kind, "deletion", StringComparison.Ordinal)
-            || string.IsNullOrEmpty(item.Path))
+        if (!IsRemovalKind(kind) || string.IsNullOrEmpty(item.Path))
         {
             return false;
         }
@@ -535,25 +543,52 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     }
 
     /// <summary>
-    /// Runs the identity ensure for a deletion, tolerating the one fence that
-    /// must not block a deletion: present bytes that no longer match the
-    /// recorded capsule (content-mismatch, content-unreachable). Deletion does
+    /// Whether <paramref name="kind"/> represents an item leaving the
+    /// library, either as a literal "deletion" or as the "promotion" a
+    /// deletion becomes when <see cref="PermalinkIdentityMutationAdapter"/>
+    /// reclassifies it to promote a live alternate version in the deleted
+    /// primary's place.
+    /// </summary>
+    /// <param name="kind">The effective mutation kind.</param>
+    /// <returns><see langword="true"/> when the kind is a removal.</returns>
+    private static bool IsRemovalKind(string kind)
+    {
+        return string.Equals(kind, "deletion", StringComparison.Ordinal)
+            || string.Equals(kind, "promotion", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Runs the identity ensure for a removal, tolerating the one fence that
+    /// must not block it: present bytes that no longer match the recorded
+    /// capsule (content-mismatch, content-unreachable). A removal does
     /// not need a verified content head -- the content is leaving -- so that
     /// fence, which (correctly) blocks re-encodes and metadata edits, routes
-    /// the deletion onto the authority-recorded identity instead of failing
+    /// the removal onto the authority-recorded identity instead of failing
     /// it. Every other failure propagates.
+    ///
+    /// This also covers the "promotion" a deletion becomes when the deleted
+    /// primary has a live alternate version (see
+    /// <see cref="IsDeletionOfVanishedContent"/>): production measured this
+    /// exact case (InuYasha, 2026-09-11 -> 2026-09-20) where the vanishing
+    /// primary's own identity ensure threw content-unreachable, but this
+    /// method's gate checked only the literal string "deletion" -- so a
+    /// promotion-reclassified removal fell through to the un-tolerant branch
+    /// below and the exception escaped uncaught. Folder.cs's own fence caught
+    /// it at the scan level and kept the scan alive, but the item was left
+    /// permanently skipped rather than actually removed, because this method
+    /// never got the chance to route it onto the authority-recorded identity.
     /// </summary>
     /// <param name="request">The mutation request, for the kind.</param>
-    /// <param name="item">The item being deleted.</param>
+    /// <param name="item">The item being removed.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>The ensured identity for non-deletions and healthy deletions;
-    /// null when this deletion must take the authority-recorded route.</returns>
+    /// <returns>The ensured identity for non-removals and healthy removals;
+    /// null when this removal must take the authority-recorded route.</returns>
     private async Task<PermalinkResponse?> TryEnsureIdentityForDeletionAsync(
         PermalinkMutationPrepareRequest request,
         BaseItem item,
         CancellationToken cancellationToken)
     {
-        if (!string.Equals(request.Kind, "deletion", StringComparison.Ordinal))
+        if (!IsRemovalKind(request.Kind))
         {
             return await _manager.EnsurePermalinkIdsAsync(item, cancellationToken)
                 .ConfigureAwait(false);

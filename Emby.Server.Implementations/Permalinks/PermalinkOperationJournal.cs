@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-05, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-20.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -63,6 +63,13 @@ internal sealed class PermalinkOperationJournal : IDisposable
         "Permalinks:OperationJournalArchiveMaximumOperationsPerPass";
 
     /// <summary>
+    /// The hard ceiling on terminal operation candidates whose content scratch one startup pass
+    /// may inspect and reclaim.
+    /// </summary>
+    public const string OperationScratchReclaimMaximumOperationsPerPassKey =
+        "Permalinks:OperationScratchReclaimMaximumOperationsPerPass";
+
+    /// <summary>
     /// How long the pending-check meter waits before it calls a run of lookups
     /// finished and logs its totals.
     ///
@@ -81,6 +88,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
     private readonly long _pendingMigrationFaultAfterDirectories;
     private readonly TimeSpan _operationJournalRetention;
     private readonly int _operationJournalArchiveMaximumOperationsPerPass;
+    private readonly int _operationScratchReclaimMaximumOperationsPerPass;
     private readonly SemaphoreSlim _pendingIndexLock = new(1, 1);
     private Dictionary<Guid, PermalinkOperationDocument>? _pendingOperations;
     private int _runLookups;
@@ -126,6 +134,17 @@ internal sealed class PermalinkOperationJournal : IDisposable
                 PermalinkErrorKind.Unavailable,
                 "operation-journal-archive-limit-invalid",
                 $"{OperationJournalArchiveMaximumOperationsPerPassKey} must be between 1 and 10000.");
+        }
+
+        _operationScratchReclaimMaximumOperationsPerPass = configuration.GetValue(
+            OperationScratchReclaimMaximumOperationsPerPassKey,
+            100);
+        if (_operationScratchReclaimMaximumOperationsPerPass is <= 0 or > 10_000)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "operation-scratch-reclaim-limit-invalid",
+                $"{OperationScratchReclaimMaximumOperationsPerPassKey} must be between 1 and 10000.");
         }
 
         if (!_pendingIndexEnabled)
@@ -271,11 +290,16 @@ internal sealed class PermalinkOperationJournal : IDisposable
                 PermalinkErrorKind.Unavailable,
                 "operation-root-missing",
                 $"Operation '{operation.OperationId}' has no content filesystem root.");
+        return GetContentOperationPath(operation.OperationId, root);
+    }
+
+    private static string GetContentOperationPath(Guid operationId, string root)
+    {
         return Path.Combine(
-            root,
+            Path.GetFullPath(root),
             ".sloptank",
             "permalink-operations",
-            operation.OperationId.ToString("D"));
+            operationId.ToString("D"));
     }
 
     public async Task<PermalinkOperationDocument?> ReadAsync(
@@ -376,6 +400,27 @@ internal sealed class PermalinkOperationJournal : IDisposable
             Path.Combine(GetActiveOperationPath(operationId), phase.Name + ".json"),
             CanonicalJson.Serialize(document),
             cancellationToken).ConfigureAwait(false);
+        if (phase.Disposition == PermalinkPhaseDisposition.Terminal)
+        {
+            try
+            {
+                await TryReclaimTerminalScratchAsync(operationId, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                    or UnauthorizedAccessException
+                    or PermalinkException
+                    or System.Text.Json.JsonException)
+            {
+                _logger.LogError(
+                    exception,
+                    "Could not reclaim terminal permalink scratch for operation {OperationId}; "
+                    + "its staging remains retained for the bounded startup sweep.",
+                    operationId);
+            }
+        }
+
         if (phase.FencesItem)
         {
             return;
@@ -1101,6 +1146,260 @@ internal sealed class PermalinkOperationJournal : IDisposable
     }
 
     /// <summary>
+    /// Reclaims terminal operation staging left by an interrupted process, with a hard startup
+    /// bound. Quarantine is deliberately not part of this pass because it is recovery evidence.
+    /// </summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>Counts describing the bounded reclaim pass.</returns>
+    public async Task<PermalinkOperationScratchReclaimResult> ReclaimTerminalOperationScratchAsync(
+        CancellationToken cancellationToken)
+    {
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        var candidates = await ReadTerminalOperationCandidatesAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var examined = 0;
+        var reclaimed = 0;
+        var retained = 0;
+        var failed = 0;
+        foreach (var candidate in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            examined++;
+            if (!Guid.TryParseExact(candidate.OperationId, "D", out var operationId)
+                || !string.Equals(
+                    candidate.OperationId,
+                    operationId.ToString("D"),
+                    StringComparison.Ordinal))
+            {
+                failed++;
+                _logger.LogError(
+                    "Refusing invalid terminal scratch candidate '{OperationId}'.",
+                    candidate.OperationId);
+                continue;
+            }
+
+            try
+            {
+                if (await TryReclaimTerminalScratchAsync(operationId, cancellationToken)
+                        .ConfigureAwait(false))
+                {
+                    reclaimed++;
+                }
+                else
+                {
+                    retained++;
+                }
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                    or UnauthorizedAccessException
+                    or PermalinkException
+                    or System.Text.Json.JsonException)
+            {
+                failed++;
+                _logger.LogError(
+                    exception,
+                    "Could not reclaim terminal permalink scratch for operation {OperationId}; "
+                    + "its staging remains retained.",
+                    operationId);
+            }
+        }
+
+        return new PermalinkOperationScratchReclaimResult(
+            examined,
+            reclaimed,
+            retained,
+            failed,
+            _operationScratchReclaimMaximumOperationsPerPass);
+    }
+
+    private async Task<bool> TryReclaimTerminalScratchAsync(
+        Guid operationId,
+        CancellationToken cancellationToken)
+    {
+        var operation = await ReadAsync(operationId, cancellationToken).ConfigureAwait(false);
+        if (operation is null || GetTerminalPhase(operationId) is null)
+        {
+            return false;
+        }
+
+        var roots = operation.Bundle is null
+            ? Array.Empty<string>()
+            : new[]
+            {
+                operation.Bundle.ContentRootPath,
+                operation.Bundle.DestinationRootPath
+            }
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Select(path => Path.GetFullPath(path!))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+        foreach (var root in roots)
+        {
+            if (!TryReclaimOperationRoot(operationId, root))
+            {
+                _logger.LogWarning(
+                    "Retaining terminal permalink scratch for operation {OperationId} under "
+                    + "{Root}: the bounded staging shape was linked, invalid, or unreadable.",
+                    operationId,
+                    root);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private bool TryReclaimOperationRoot(Guid operationId, string contentRoot)
+    {
+        var operationRoot = GetContentOperationPath(operationId, contentRoot);
+        if (HasLinkedPath(operationRoot, contentRoot))
+        {
+            return false;
+        }
+
+        foreach (var directoryName in new[] { "staging", "staging-tree" })
+        {
+            var staging = Path.Combine(operationRoot, directoryName);
+            if (!TryDeleteScratchTree(staging, operationRoot))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryDeleteScratchTree(string directory, string boundary)
+    {
+        if (HasLinkedPath(directory, boundary))
+        {
+            return false;
+        }
+
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(directory);
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return true;
+        }
+
+        if ((attributes & FileAttributes.ReparsePoint) != 0 || !Directory.Exists(directory))
+        {
+            return false;
+        }
+
+        var files = new List<string>();
+        var directories = new List<string>();
+        var nodes = 0;
+        CollectScratchTree(directory, boundary, files, directories, ref nodes);
+        foreach (var file in files)
+        {
+            File.Delete(file);
+        }
+
+        foreach (var child in directories)
+        {
+            Directory.Delete(child, recursive: false);
+        }
+
+        Directory.Delete(directory, recursive: false);
+        return true;
+    }
+
+    private static void CollectScratchTree(
+        string directory,
+        string boundary,
+        ICollection<string> files,
+        ICollection<string> directories,
+        ref int nodes)
+    {
+        foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+        {
+            if (++nodes > 10_000 || HasLinkedPath(entry, boundary))
+            {
+                throw new IOException($"Unsafe operation scratch entry '{entry}'.");
+            }
+
+            if (Directory.Exists(entry))
+            {
+                CollectScratchTree(entry, boundary, files, directories, ref nodes);
+                directories.Add(entry);
+            }
+            else if (File.Exists(entry))
+            {
+                files.Add(entry);
+            }
+            else
+            {
+                throw new IOException($"Unreadable operation scratch entry '{entry}'.");
+            }
+        }
+    }
+
+    private static bool HasLinkedPath(string path, string boundary)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var fullBoundary = Path.GetFullPath(boundary);
+        if (!fullPath.Equals(fullBoundary, StringComparison.Ordinal)
+            && !fullPath.StartsWith(
+                fullBoundary + Path.DirectorySeparatorChar,
+                StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var current = fullPath;
+        while (true)
+        {
+            if (IsSymbolicLink(current))
+            {
+                return true;
+            }
+
+            if (current.Equals(fullBoundary, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            current = Path.GetDirectoryName(current)
+                ?? throw new IOException($"Operation scratch path '{fullPath}' has no boundary.");
+        }
+    }
+
+    private async Task<IReadOnlyList<ArchiveCandidate>> ReadTerminalOperationCandidatesAsync(
+        CancellationToken cancellationToken)
+    {
+        var result = new List<ArchiveCandidate>();
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT operation_id, terminal_phase, terminal_at, attempts
+              FROM PermalinkOperationArchiveCandidates
+             ORDER BY created_at, operation_id
+             LIMIT $maximum;
+            """;
+        command.Parameters.AddWithValue(
+            "$maximum",
+            _operationScratchReclaimMaximumOperationsPerPass);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            result.Add(new ArchiveCandidate(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetInt64(3)));
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Builds the pending index now and returns the operations it holds.
     ///
     /// The index is otherwise built lazily by the first caller, which puts a
@@ -1210,6 +1509,15 @@ internal sealed class PermalinkOperationJournal : IDisposable
                     + "is not declared.",
                     operationId,
                     candidate.TerminalPhase);
+                await DeferArchiveCandidateAsync(candidate, now, cancellationToken)
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            if (!await TryReclaimTerminalScratchAsync(operationId, cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                retained++;
                 await DeferArchiveCandidateAsync(candidate, now, cancellationToken)
                     .ConfigureAwait(false);
                 continue;

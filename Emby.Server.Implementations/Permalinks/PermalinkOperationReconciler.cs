@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-09, 2026-09-10.
+// SlopTank modification notice: added or changed by SlopTank on 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-09, 2026-09-10, 2026-09-20.
 using System;
 using System.Diagnostics;
 using System.Globalization;
@@ -101,6 +101,17 @@ internal sealed class PermalinkOperationReconciler : IHostedService
             cancellationToken.ThrowIfCancellationRequested();
             await ReconcileAsync(operationId, now, cancellationToken).ConfigureAwait(false);
         }
+
+        var scratch = await _journal.ReclaimTerminalOperationScratchAsync(cancellationToken)
+            .ConfigureAwait(false);
+        _logger.LogInformation(
+            "Permalink terminal scratch reclaim: {Examined} candidates examined, {Reclaimed} "
+            + "reclaimed, {Retained} retained, {Failed} failed, maximum {Maximum} per startup pass.",
+            scratch.Examined,
+            scratch.Reclaimed,
+            scratch.Retained,
+            scratch.Failed,
+            scratch.MaximumOperationsPerPass);
 
         // The generic host awaits this method before the server accepts a
         // request, so whatever it costs is added to every restart, and the walk

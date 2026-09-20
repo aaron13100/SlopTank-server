@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-09, 2026-09-19.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-09, 2026-09-19, 2026-09-20.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -47,15 +47,23 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         ArgumentNullException.ThrowIfNull(currentItem);
         ArgumentNullException.ThrowIfNull(resolvedItem);
 
-        var hasKnownMatchingIdentity = string.Equals(currentItem.Path, resolvedItem.Path, StringComparison.Ordinal)
+        // A raw filesystem resolve can only ever carry provider ids literally encoded in the
+        // path (e.g. "[tmdbid-1234]"); identification-sourced ids (NFO, remote search, manual
+        // edit) never round-trip through it, so the resolved set is empty for the vast majority
+        // of a real library. Absence on the resolved side is therefore not evidence of change:
+        // the persisted item is allowed to carry ids the resolve could never reproduce. What
+        // WOULD be evidence of change is a provider id the resolve DID produce that disagrees
+        // with (or is entirely missing from) the persisted item, so the comparison is
+        // non-contradiction over the resolved side, not set equality. An empty resolved set
+        // contradicts nothing and must skip.
+        var hasNoIdentityContradiction = string.Equals(currentItem.Path, resolvedItem.Path, StringComparison.Ordinal)
             && currentItem.GetBaseItemKind() == resolvedItem.GetBaseItemKind()
-            && currentItem.ProviderIds.Count == resolvedItem.ProviderIds.Count
-            && currentItem.ProviderIds.All(pair =>
-                resolvedItem.ProviderIds.TryGetValue(pair.Key, out var value)
+            && resolvedItem.ProviderIds.All(pair =>
+                currentItem.ProviderIds.TryGetValue(pair.Key, out var value)
                 && string.Equals(pair.Value, value, StringComparison.Ordinal))
             && !string.IsNullOrEmpty(currentItem.Path)
             && _evidence.IsContentDigestKnown(currentItem.Path);
-        if (!hasKnownMatchingIdentity)
+        if (!hasNoIdentityContradiction)
         {
             return false;
         }

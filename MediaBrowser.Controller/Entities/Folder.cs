@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-30, 2026-09-04, 2026-09-09, 2026-09-19.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-30, 2026-09-04, 2026-09-09, 2026-09-19, 2026-09-20.
 #nullable disable
 
 #pragma warning disable CA1002, CA1721, CA1819, CS1591
@@ -489,7 +489,12 @@ namespace MediaBrowser.Controller.Entities
                                 [currentChild],
                                 new PermalinkIdentityMutationRequest(
                                     "scan-replacement",
-                                    child.ProviderIds,
+                                    // currentChild, not child: child is the raw filesystem
+                                    // resolve and can never carry identification-sourced
+                                    // provider ids, so using it here recorded an empty desired
+                                    // assignment on every scan-replacement prepare document
+                                    // for an identified item.
+                                    currentChild.ProviderIds,
                                     child.GetBaseItemKind().ToString()),
                                 async (_, ambientCancellationToken) =>
                                 {

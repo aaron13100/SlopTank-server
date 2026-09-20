@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-20.
 using System.Collections.Generic;
 using CommandLine;
 using Emby.Server.Implementations;
@@ -79,6 +80,22 @@ namespace Jellyfin.Server
         /// </summary>
         [Option("restore-archive", Required = false, HelpText = "Path to a Jellyfin backup archive to restore from")]
         public string? RestoreArchive { get; set; }
+
+        /// <summary>
+        /// Gets or sets a comma-separated list of terminal permalink operation ids to reclaim.
+        /// </summary>
+        [Option(
+            "permalink-reclaim-terminal-scratch",
+            Required = false,
+            HelpText = "Run one-shot terminal permalink scratch maintenance for comma-separated operation ids.")]
+        public string? PermalinkReclaimTerminalScratch { get; set; }
+
+        /// <summary>Gets or sets the authority root for one-shot permalink maintenance.</summary>
+        [Option(
+            "permalink-authority-root",
+            Required = false,
+            HelpText = "Authority root used by one-shot permalink maintenance.")]
+        public string? PermalinkAuthorityRoot { get; set; }
 
         /// <summary>
         /// Gets or sets the mode of operation the server should perform when started.

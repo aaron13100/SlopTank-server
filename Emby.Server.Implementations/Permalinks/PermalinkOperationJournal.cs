@@ -1213,6 +1213,60 @@ internal sealed class PermalinkOperationJournal : IDisposable
             _operationScratchReclaimMaximumOperationsPerPass);
     }
 
+    /// <summary>
+    /// Reclaims explicitly selected terminal operation scratch during a maintenance invocation.
+    /// </summary>
+    /// <param name="operationIds">The exact operation ids selected by the operator.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>Counts describing the selected maintenance pass.</returns>
+    public async Task<PermalinkOperationScratchReclaimResult> ReclaimTerminalOperationScratchAsync(
+        IReadOnlyCollection<Guid> operationIds,
+        CancellationToken cancellationToken)
+    {
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        var examined = 0;
+        var reclaimed = 0;
+        var retained = 0;
+        var failed = 0;
+        foreach (var operationId in operationIds.Distinct().OrderBy(id => id))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            examined++;
+            try
+            {
+                if (await TryReclaimTerminalScratchAsync(operationId, cancellationToken)
+                        .ConfigureAwait(false))
+                {
+                    reclaimed++;
+                }
+                else
+                {
+                    retained++;
+                }
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                    or UnauthorizedAccessException
+                    or PermalinkException
+                    or System.Text.Json.JsonException)
+            {
+                failed++;
+                _logger.LogError(
+                    exception,
+                    "Could not reclaim selected terminal permalink scratch for operation {OperationId}; "
+                    + "its staging remains retained.",
+                    operationId);
+            }
+        }
+
+        return new PermalinkOperationScratchReclaimResult(
+            examined,
+            reclaimed,
+            retained,
+            failed,
+            operationIds.Count);
+    }
+
     private async Task<bool> TryReclaimTerminalScratchAsync(
         Guid operationId,
         CancellationToken cancellationToken)

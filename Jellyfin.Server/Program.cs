@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-20.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -10,6 +11,7 @@ using System.Threading.Tasks;
 using CommandLine;
 using Emby.Server.Implementations;
 using Emby.Server.Implementations.Configuration;
+using Emby.Server.Implementations.Permalinks;
 using Emby.Server.Implementations.Serialization;
 using Jellyfin.Database.Implementations;
 using Jellyfin.Server.Extensions;
@@ -83,6 +85,12 @@ namespace Jellyfin.Server
 
         private static async Task StartApp(StartupOptions options)
         {
+            if (options.PermalinkReclaimTerminalScratch is not null)
+            {
+                await RunPermalinkScratchMaintenanceAsync(options).ConfigureAwait(false);
+                return;
+            }
+
             _restoreFromBackup = options.RestoreArchive;
             _startTimestamp = Stopwatch.GetTimestamp();
             ServerApplicationPaths appPaths = StartupHelpers.CreateApplicationPaths(options);
@@ -154,6 +162,49 @@ namespace Jellyfin.Server
             } while (_restartOnShutdown);
 
             _setupServer.Dispose();
+        }
+
+        private static async Task RunPermalinkScratchMaintenanceAsync(StartupOptions options)
+        {
+            var authorityRoot = options.PermalinkAuthorityRoot
+                ?? Environment.GetEnvironmentVariable("JELLYFIN_Permalinks__AuthorityRoot");
+            if (string.IsNullOrWhiteSpace(authorityRoot))
+            {
+                throw new InvalidOperationException(
+                    "One-shot permalink maintenance requires --permalink-authority-root or "
+                    + "JELLYFIN_Permalinks__AuthorityRoot.");
+            }
+
+            var operationText = options.PermalinkReclaimTerminalScratch
+                ?? throw new InvalidOperationException(
+                    "One-shot permalink maintenance requires operation ids.");
+            var operationIds = operationText
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(value => Guid.TryParseExact(value, "D", out var operationId)
+                    ? operationId
+                    : throw new InvalidOperationException(
+                        $"Invalid terminal permalink operation id '{value}'."))
+                .Distinct()
+                .ToArray();
+            if (operationIds.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    "One-shot permalink maintenance requires at least one operation id.");
+            }
+
+            var result = await PermalinkOperationMaintenance.ReclaimTerminalScratchAsync(
+                    authorityRoot,
+                    operationIds)
+                .ConfigureAwait(false);
+            Console.WriteLine(
+                "Permalink terminal scratch maintenance: "
+                + $"{result.Examined} examined, {result.Reclaimed} reclaimed, "
+                + $"{result.Retained} retained, {result.Failed} failed, "
+                + $"maximum {result.MaximumOperationsPerPass}.");
+            if (result.Retained != 0 || result.Failed != 0)
+            {
+                Environment.ExitCode = 2;
+            }
         }
 
         private static async Task StartServer(IServerApplicationPaths appPaths, StartupOptions options, IConfiguration startupConfig)

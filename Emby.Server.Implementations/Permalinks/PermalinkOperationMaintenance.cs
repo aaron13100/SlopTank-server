@@ -31,6 +31,7 @@ public static class PermalinkOperationMaintenance
         {
             throw new ArgumentException("At least one operation id is required.", nameof(operationIds));
         }
+
         if (operationIds.Count > 10_000)
         {
             throw new ArgumentOutOfRangeException(

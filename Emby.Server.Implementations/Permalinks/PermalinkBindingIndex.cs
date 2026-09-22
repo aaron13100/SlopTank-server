@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-09-03, 2026-09-07, 2026-09-08, 2026-09-09, 2026-09-10.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-09-03, 2026-09-07, 2026-09-08, 2026-09-09, 2026-09-10, 2026-09-22.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -58,6 +58,19 @@ internal sealed class PermalinkBindingIndex
         // SQLite is already the contended resource. The two statements do not
         // need to be atomic with each other -- a bind interrupted between them
         // is repaired by the next ensure, which rewrites both.
+        //
+        // The DO UPDATE carries a change guard, so an unchanged re-bind writes
+        // nothing at all. Measured 2026-09-21 (log_20260921.log): 755 ensures
+        // executed for 54 unique items, and the unconditional refresh of
+        // VerifiedToken/VerifiedAt plus the same-value path update below were
+        // 50.8 s of committed WAL + FULL-fsync writes per day that recorded
+        // no change, while serializing every concurrent ensure behind the
+        // write lock (the metadata-save hang of the sibling task). Neither
+        // column has a reader: they are audit stamps of the last real
+        // verification, so leaving them at the last actual change is the
+        // honest value. A missing row still INSERTs and a changed ContentRoot
+        // still rewrites both statements, which preserves the
+        // interrupted-bind repair property above.
         command.CommandText = """
             INSERT INTO PermalinkBindings
                 (PermalinkId, ItemId, ContentRoot, VerifiedToken, VerifiedAt, CreatedAt)
@@ -66,6 +79,7 @@ internal sealed class PermalinkBindingIndex
                 ContentRoot = excluded.ContentRoot,
                 VerifiedToken = excluded.VerifiedToken,
                 VerifiedAt = excluded.VerifiedAt
+             WHERE PermalinkBindings.ContentRoot <> excluded.ContentRoot
             """;
         var now = _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture);
         command.Parameters.AddWithValue("$id", permalinkId);
@@ -98,6 +112,8 @@ internal sealed class PermalinkBindingIndex
         // resolver reads as licence to skip its "is this alias still active for
         // this item" check.
         command.Parameters.AddWithValue("$capsule", capsuleId.ToString("D"));
+        // Same change-guard as the binding upsert: a multi-claim alias whose
+        // override already names this capsule must not re-commit the row.
         command.CommandText = """
             INSERT INTO PermalinkBindingCapsuleOverrides
                 (PermalinkId, ItemId, capsule_id, created_at)
@@ -106,6 +122,7 @@ internal sealed class PermalinkBindingIndex
                      WHERE permalink_id = $id) > 1
             ON CONFLICT(PermalinkId, ItemId) DO UPDATE SET
                 capsule_id = excluded.capsule_id
+             WHERE PermalinkBindingCapsuleOverrides.capsule_id <> excluded.capsule_id
             """;
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
@@ -136,14 +153,43 @@ internal sealed class PermalinkBindingIndex
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
             .ConfigureAwait(false);
         await using var command = connection.CreateCommand();
+        // The change guard keeps an unchanged ensure from re-committing the
+        // identical path value (a WAL append + FULL fsync on the contended
+        // authority volume, per the BindAsync measurement note). Zero rows
+        // then means either "already current" or "unknown anchor"; the SELECT
+        // below keeps the original fail-closed contract for the second case
+        // without paying a write for the first.
         command.CommandText = """
             UPDATE AnchorTokenCapsules
                SET current_path = $path
              WHERE anchor_token = $token
+               AND current_path <> $path
             """;
         command.Parameters.AddWithValue("$path", currentPath);
         command.Parameters.AddWithValue("$token", anchorToken);
-        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+        var updated = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        if (updated == 1)
+        {
+            return;
+        }
+
+        if (updated > 1)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "anchor-path-missing",
+                $"Cannot advance current path for unknown anchor '{anchorToken}'.");
+        }
+
+        command.CommandText = """
+            SELECT 1
+              FROM AnchorTokenCapsules
+             WHERE anchor_token = $token
+             LIMIT 1
+            """;
+        command.Parameters.Clear();
+        command.Parameters.AddWithValue("$token", anchorToken);
+        if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null)
         {
             throw new PermalinkException(
                 PermalinkErrorKind.Conflict,

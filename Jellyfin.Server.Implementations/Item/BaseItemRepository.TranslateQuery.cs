@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-09-09, 2026-09-23.
 #pragma warning disable RS0030 // Do not use banned APIs
 #pragma warning disable CA1304 // Specify CultureInfo
 #pragma warning disable CA1309 // Use ordinal string comparison
@@ -185,7 +185,22 @@ public sealed partial class BaseItemRepository
             else
             {
                 var likeSearchTerm = $"%{originalSearchTerm}%";
-                baseQuery = baseQuery.Where(e => e.CleanName!.Contains(cleanedSearchTerm) || (e.OriginalTitle != null && EF.Functions.Like(e.OriginalTitle, likeSearchTerm)));
+
+                // Second, looser tier: whitespace/punctuation-insensitive. GetCleanValue already
+                // lowercases, strips diacritics/punctuation, and collapses runs of whitespace, but a
+                // query with a stray, missing, or misplaced space inside a word (e.g. "wood jo b" or
+                // "woodjob" for "Wood Job") still fails a plain Contains against CleanName. Comparing
+                // both sides with every space removed catches that without touching CleanName's stored
+                // form or affecting the ordinary comparisons above, which the relevance order still
+                // ranks strictly ahead of this tier (OrderMapper.MapSearchRelevanceOrder). Mirrored
+                // onto OriginalTitle too, so a title reachable only through its original-language name
+                // gets the same tolerance as one reachable through CleanName.
+                var collapsedSearchTerm = cleanedSearchTerm.RemoveCleanValueSpacing();
+                baseQuery = baseQuery.Where(e =>
+                    e.CleanName!.Contains(cleanedSearchTerm)
+                    || (e.OriginalTitle != null && EF.Functions.Like(e.OriginalTitle, likeSearchTerm))
+                    || e.CleanName!.Replace(" ", string.Empty).Contains(collapsedSearchTerm)
+                    || (e.OriginalTitle != null && e.OriginalTitle.ToLower().Replace(" ", string.Empty).Contains(collapsedSearchTerm)));
             }
         }
 

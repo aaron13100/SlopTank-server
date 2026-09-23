@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-23.
 #pragma warning disable RS0030 // Do not use banned APIs
 #pragma warning disable CA1304 // Specify CultureInfo
 #pragma warning disable CA1311 // Specify a culture or use an invariant version
@@ -80,14 +81,23 @@ public static class OrderMapper
 
     /// <summary>
     /// Creates an expression to order search results by match quality.
-    /// Prioritizes: exact match (0) > prefix match with word boundary (1) > prefix match (2) > contains (3).
+    /// Prioritizes: exact match (0) > prefix match with word boundary (1) > prefix match (2) >
+    /// contains (3) on the ordinary (punctuation/whitespace-collapsed) clean value, all ranked
+    /// strictly ahead of a match found only once whitespace inside the clean value is removed
+    /// entirely (4) -- the looser, whitespace/punctuation-insensitive tier that
+    /// BaseItemRepository.TranslateQuery's SearchTerm predicate also matches on.
     /// Considers both CleanName and OriginalTitle for matching.
     /// </summary>
     /// <param name="searchTerm">The search term to match against.</param>
     /// <returns>An expression that returns an integer representing match quality (lower is better).</returns>
     public static Expression<Func<BaseItemEntity, int>> MapSearchRelevanceOrder(string searchTerm)
     {
-        var cleanSearchTerm = GetCleanValue(searchTerm);
+        // Use the same clean-value normalization the SearchTerm WHERE predicate and the stored
+        // CleanName column use (StringExtensions.GetCleanValue), instead of a second, divergent
+        // scheme: a duplicate here that only lowercased and stripped diacritics never matched
+        // CleanName for a punctuated or irregularly-spaced query, so it could never reach the
+        // exact/prefix buckets below for those titles.
+        var cleanSearchTerm = searchTerm.GetCleanValue();
         var searchPrefix = cleanSearchTerm + " ";
         var originalSearchLower = searchTerm.ToLowerInvariant();
         var originalSearchPrefix = originalSearchLower + " ";
@@ -97,16 +107,10 @@ public static class OrderMapper
             // Prefix match with word boundary
             (e.CleanName!.StartsWith(searchPrefix) || (e.OriginalTitle != null && e.OriginalTitle.ToLower().StartsWith(originalSearchPrefix))) ? 1 :
             // Prefix match
-            (e.CleanName!.StartsWith(cleanSearchTerm) || (e.OriginalTitle != null && e.OriginalTitle.ToLower().StartsWith(originalSearchLower))) ? 2 : 3;
-    }
-
-    private static string GetCleanValue(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return value;
-        }
-
-        return value.RemoveDiacritics().ToLowerInvariant();
+            (e.CleanName!.StartsWith(cleanSearchTerm) || (e.OriginalTitle != null && e.OriginalTitle.ToLower().StartsWith(originalSearchLower))) ? 2 :
+            // Contains match on the ordinary clean value
+            (e.CleanName!.Contains(cleanSearchTerm) || (e.OriginalTitle != null && e.OriginalTitle.ToLower().Contains(originalSearchLower))) ? 3 :
+            // Anything else that reached ORDER BY only matched the looser, whitespace-removed tier.
+            4;
     }
 }

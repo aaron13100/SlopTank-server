@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-23.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -172,6 +173,22 @@ namespace Jellyfin.Extensions
             cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim();
 
             return cleaned;
+        }
+
+        /// <summary>
+        /// Further reduces a value already normalized by <see cref="GetCleanValue"/> to a
+        /// whitespace-insensitive form by removing every remaining space, so titles and search
+        /// terms that differ only in how spacing is applied inside the string (missing, extra,
+        /// or misplaced spaces, e.g. "wood job" vs "wood jo b" vs "woodjob") compare equal. This is
+        /// the second, looser search tier: it must only ever be consulted after the ordinary
+        /// <see cref="GetCleanValue"/> comparison fails, so an exact/prefix/contains match on the
+        /// ordinary clean value always ranks above a match found only through this reduction.
+        /// </summary>
+        /// <param name="cleanValue">A value already passed through <see cref="GetCleanValue"/>.</param>
+        /// <returns>The value with all spaces removed, or the original if null/empty.</returns>
+        public static string RemoveCleanValueSpacing(this string cleanValue)
+        {
+            return string.IsNullOrEmpty(cleanValue) ? cleanValue : cleanValue.Replace(" ", string.Empty, StringComparison.Ordinal);
         }
     }
 }

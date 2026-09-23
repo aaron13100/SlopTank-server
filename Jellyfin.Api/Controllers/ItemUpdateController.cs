@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-23.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -86,6 +86,14 @@ public class ItemUpdateController : BaseJellyfinApiController
             return NotFound();
         }
 
+        // Computed before the mutation so the identity request states whether
+        // the edit cascades into descendants: the LockData rewrite below is
+        // the only branch that touches recursive children, and the durable
+        // descendant fencing must cover exactly that case rather than every
+        // folder edit.
+        var newLockData = request.LockData ?? false;
+        var isLockedChanged = item.IsLocked != newLockData;
+
         try
         {
             await _identityMutationAdapter.ExecuteAsync(
@@ -93,8 +101,9 @@ public class ItemUpdateController : BaseJellyfinApiController
                 new PermalinkIdentityMutationRequest(
                     "manual-metadata",
                     request.ProviderIds,
-                    request.Type == default ? null : request.Type.ToString()),
-                async (_, _) => await ApplyItemUpdateAsync(item, request).ConfigureAwait(false),
+                    request.Type == default ? null : request.Type.ToString(),
+                    CascadeToDescendants: isLockedChanged),
+                async (_, _) => await ApplyItemUpdateAsync(item, request, isLockedChanged).ConfigureAwait(false),
                 CancellationToken.None).ConfigureAwait(false);
             return NoContent();
         }
@@ -107,10 +116,9 @@ public class ItemUpdateController : BaseJellyfinApiController
         }
     }
 
-    private async Task ApplyItemUpdateAsync(BaseItem item, BaseItemDto request)
+    private async Task ApplyItemUpdateAsync(BaseItem item, BaseItemDto request, bool isLockedChanged)
     {
         var newLockData = request.LockData ?? false;
-        var isLockedChanged = item.IsLocked != newLockData;
         var series = item as Series;
         var displayOrderChanged = series is not null && !string.Equals(
             series.DisplayOrder ?? string.Empty,

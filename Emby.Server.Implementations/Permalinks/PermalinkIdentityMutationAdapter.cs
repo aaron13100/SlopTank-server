@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-09, 2026-09-19, 2026-09-20.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-23.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -326,7 +326,14 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
             .Where(value => value is not null)
             .DistinctBy(value => value.Id)
             .ToList();
-        if (request.Kind is "deletion" or "manual-metadata")
+        // A manual-metadata edit only rewrites descendants when its body says
+        // so (the LockData cascade is the only such branch), and the request
+        // carries that fact from the caller. Preparing every bound descendant
+        // unconditionally made the HTTP response wait on one durable prepare,
+        // ensure, and commit per episode of the edited folder, which is the
+        // never-ending-spinner latency measured on 2026-09-21/23.
+        if (request.Kind == "deletion"
+            || (request.Kind == "manual-metadata" && request.CascadeToDescendants))
         {
             expanded.AddRange(items
                 .OfType<Folder>()

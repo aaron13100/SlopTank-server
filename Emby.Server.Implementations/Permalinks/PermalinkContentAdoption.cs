@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-14.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-14, 2026-09-23.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -107,9 +107,7 @@ internal sealed class PermalinkContentAdoption
         Guid operationId,
         CancellationToken cancellationToken)
     {
-        var binding = ResolveSoleBinding(
-            item,
-            await _bindings.FindItemBindingsAsync(item.Id, cancellationToken).ConfigureAwait(false));
+        var capsuleId = await ResolveCapsuleIdAsync(item, cancellationToken).ConfigureAwait(false);
         if (await _journal.HasPendingAsync(item.Id, cancellationToken).ConfigureAwait(false))
         {
             throw Conflict(
@@ -118,11 +116,11 @@ internal sealed class PermalinkContentAdoption
         }
 
         var reservation = await _authority.FindByCapsuleAsync(
-            binding.CapsuleId,
+            capsuleId,
             cancellationToken).ConfigureAwait(false)
             ?? throw Conflict(
                 "capsule-missing",
-                $"Protected capsule '{binding.CapsuleId}' is unknown.");
+                $"Protected capsule '{capsuleId}' is unknown.");
         var liveAnchor = _fileSystem.ReadAnchorToken(item.Path);
         if (liveAnchor is null
             || !string.Equals(liveAnchor, reservation.AnchorToken, StringComparison.Ordinal))
@@ -214,7 +212,7 @@ internal sealed class PermalinkContentAdoption
         _evidence.InvalidateContentDigest(item.Path);
         await WriteJournalRecordAsync(
             item,
-            binding,
+            capsuleId,
             request,
             operationId,
             observed.ContentRoot,
@@ -246,7 +244,7 @@ internal sealed class PermalinkContentAdoption
     /// logged and left fenced. Auditable where every other operation is.
     /// </remarks>
     /// <param name="item">The adopted library item.</param>
-    /// <param name="binding">The sole capsule binding adopted against.</param>
+    /// <param name="capsuleId">The sole capsule adopted against.</param>
     /// <param name="request">The administrator-confirmed adoption evidence.</param>
     /// <param name="operationId">The derived adoption operation identifier.</param>
     /// <param name="observedContentRoot">The adopted live content root.</param>
@@ -254,7 +252,7 @@ internal sealed class PermalinkContentAdoption
     /// <returns>A task representing the asynchronous operation.</returns>
     private async Task WriteJournalRecordAsync(
         BaseItem item,
-        PermalinkResolutionBinding binding,
+        Guid capsuleId,
         PermalinkContentAdoptionRequest request,
         Guid operationId,
         string observedContentRoot,
@@ -264,7 +262,7 @@ internal sealed class PermalinkContentAdoption
         var operation = new PermalinkOperationDocument(
             operationId,
             item.Id,
-            binding.CapsuleId,
+            capsuleId,
             "adoption",
             item.Path,
             null,
@@ -293,13 +291,49 @@ internal sealed class PermalinkContentAdoption
     }
 
     /// <summary>
-    /// Picks the one binding an adoption runs against.
+    /// Picks the one capsule an adoption runs against.
     /// </summary>
     /// <remarks>
     /// Same contract as PermalinkMutationCoordinator.ResolveVanishedContentBinding:
     /// an item with several aliases must agree on the capsule, or the inconsistency
     /// is reported rather than resolved by choosing arbitrarily.
     /// </remarks>
+    private async Task<Guid> ResolveCapsuleIdAsync(
+        BaseItem item,
+        CancellationToken cancellationToken)
+    {
+        var bindings = await _bindings.FindItemBindingsAsync(item.Id, cancellationToken)
+            .ConfigureAwait(false);
+        if (bindings.Count > 0)
+        {
+            return ResolveSoleBinding(item, bindings).CapsuleId;
+        }
+
+        // A leaf seeded by an aggregate ensure (a series ensure walks its
+        // seasons with publishAlias false) carries a capsule and an anchor
+        // but no alias or binding row. The fence still refuses its ensure,
+        // the ensure is the only writer of bindings, and the binding index
+        // has no rebuild pass -- so an already-fenced seeded leaf can stay
+        // unbound forever while its content drifts, which is exactly the
+        // state this service exists to resolve (production 2026-09-21, The
+        // Pitt Season 02). The live anchor token the fence itself trusts is
+        // the discovery here: the authority's anchor election is unique per
+        // capsule, and every adoption check after this (anchor agreement,
+        // predecessor root, observed root, confirmation phrase) still
+        // applies unchanged.
+        var liveAnchor = _fileSystem.ReadAnchorToken(item.Path);
+        if (liveAnchor is not null
+            && await _authority.FindByAnchorAsync(liveAnchor, cancellationToken)
+                .ConfigureAwait(false) is { } anchored)
+        {
+            return anchored.CapsuleId;
+        }
+
+        throw Conflict(
+            "binding-missing",
+            $"Item '{item.Id}' has no durable binding to adopt against.");
+    }
+
     private static PermalinkResolutionBinding ResolveSoleBinding(
         BaseItem item,
         IReadOnlyList<PermalinkResolutionBinding> bindings)

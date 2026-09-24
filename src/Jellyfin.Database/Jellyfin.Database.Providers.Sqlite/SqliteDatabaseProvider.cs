@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-24.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -88,7 +89,8 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
                 GetOption(customOptions, "journalsizelimit", int.Parse, () => 134_217_728),
                 GetOption(customOptions, "tempstoremode", int.Parse, () => 2),
                 GetOption(customOptions, "syncmode", int.Parse, () => 1),
-                customOptions?.Where(e => e.Key.StartsWith("#PRAGMA:", StringComparison.OrdinalIgnoreCase)).ToDictionary(e => e.Key["#PRAGMA:".Length..], e => e.Value) ?? []));
+                customOptions?.Where(e => e.Key.StartsWith("#PRAGMA:", StringComparison.OrdinalIgnoreCase)).ToDictionary(e => e.Key["#PRAGMA:".Length..], e => e.Value) ?? []),
+                new SqlitePooledHandleGuardInterceptor(_logger));
 
         var enableSensitiveDataLogging = GetOption(customOptions, "EnableSensitiveDataLogging", e => e.Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase), () => false);
         if (enableSensitiveDataLogging)

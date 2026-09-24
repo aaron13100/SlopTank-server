@@ -58,9 +58,20 @@ namespace Jellyfin.Database.Providers.Sqlite;
 /// helper survives neutralization, the close-with-active-statement sequence
 /// fails there with the gate error again.
 /// </para>
+/// <para>
+/// This interceptor is only safe while (a) no entity property in the EF model maps a
+/// decimal CLR type and (b) no LINQ query translates to the regexp or ef_* helpers it
+/// deletes. PooledHandleGuardModelAssumptionsTests in the unit test suite guards both:
+/// it asserts the model has no decimal properties (with a negative control proving that
+/// check can fail) and demonstrates, with a throwaway regexp-translated query, the exact
+/// SqliteException a real query would hit if assumption (b) ever stopped holding. Revisit
+/// this interceptor if either test starts failing.
+/// </para>
 /// </remarks>
 public sealed class SqlitePooledHandleGuardInterceptor : DbConnectionInterceptor
 {
+    private const string CollationName = "EF_DECIMAL";
+
     private static readonly (string Name, int Arity)[] _functions =
     [
         ("regexp", 2),
@@ -75,8 +86,6 @@ public sealed class SqlitePooledHandleGuardInterceptor : DbConnectionInterceptor
         ("ef_min", 1),
         ("ef_sum", 1)
     ];
-
-    private const string CollationName = "EF_DECIMAL";
 
     private static readonly string[] _trackedDictionaries = ["_collations", "_functions", "_aggregates"];
 

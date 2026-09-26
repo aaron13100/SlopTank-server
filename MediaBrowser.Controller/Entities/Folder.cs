@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-30, 2026-09-04, 2026-09-09, 2026-09-19, 2026-09-20.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-30, 2026-09-04, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-26.
 #nullable disable
 
 #pragma warning disable CA1002, CA1721, CA1819, CS1591
@@ -513,6 +513,14 @@ namespace MediaBrowser.Controller.Entities
                         if (childUpdated == PermalinkChildMutationOutcome.SkippedConflict)
                         {
                             permalinkConflictsSkipped++;
+                            if (currentChild is Folder)
+                            {
+                                // The fenced mutation stays skipped, but a fenced
+                                // aggregate must still be traversed: its descendants
+                                // carry the repair the fence is waiting for, and
+                                // omitting it here strands them forever.
+                                accessibleChildren.Add(currentChild);
+                            }
                         }
                         else
                         {

@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-27.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -17,14 +18,30 @@ public class DotIgnoreIgnoreRule : IResolverIgnoreRule
 {
     private static readonly bool IsWindows = OperatingSystem.IsWindows();
 
+    // Coarsest mtime granularity among supported file systems (FAT: 2s; HFS+: 1s).
+    // A parse made sooner than this after the file's mtime may have raced a
+    // same-length edit that left mtime unchanged, so it is not trusted yet.
+    private static readonly TimeSpan MtimeGranularity = TimeSpan.FromSeconds(2);
+
     private readonly FastConcurrentLru<string, IgnoreFileCacheEntry> _directoryCache;
     private readonly FastConcurrentLru<string, ParsedIgnoreCacheEntry> _rulesCache;
+    private readonly TimeProvider _timeProvider;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DotIgnoreIgnoreRule"/> class.
     /// </summary>
     public DotIgnoreIgnoreRule()
+        : this(TimeProvider.System)
     {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="DotIgnoreIgnoreRule"/> class.
+    /// </summary>
+    /// <param name="timeProvider">Clock used to decide when a cached parse can be trusted.</param>
+    public DotIgnoreIgnoreRule(TimeProvider timeProvider)
+    {
+        _timeProvider = timeProvider;
         var cacheSize = Math.Max(100, Environment.ProcessorCount * 100);
         _directoryCache = new FastConcurrentLru<string, IgnoreFileCacheEntry>(
             Environment.ProcessorCount,
@@ -230,7 +247,9 @@ public class DotIgnoreIgnoreRule : IResolverIgnoreRule
         // Check cache
         if (_rulesCache.TryGet(key, out var cached))
         {
-            if (cached.FileLastModified == lastModified && cached.FileLength == fileLength)
+            if (cached.FileLastModified == lastModified
+                && cached.FileLength == fileLength
+                && cached.ParsedAtUtc - lastModified >= MtimeGranularity)
             {
                 return cached;
             }
@@ -240,12 +259,12 @@ public class DotIgnoreIgnoreRule : IResolverIgnoreRule
         }
 
         // Parse the file
-        var parsedEntry = ParseIgnoreFile(ignoreFile, lastModified, fileLength);
+        var parsedEntry = ParseIgnoreFile(ignoreFile, lastModified, fileLength, _timeProvider.GetUtcNow().UtcDateTime);
         _rulesCache.AddOrUpdate(key, parsedEntry);
         return parsedEntry;
     }
 
-    private static ParsedIgnoreCacheEntry ParseIgnoreFile(FileInfo ignoreFile, DateTime lastModified, long fileLength)
+    private static ParsedIgnoreCacheEntry ParseIgnoreFile(FileInfo ignoreFile, DateTime lastModified, long fileLength, DateTime parsedAtUtc)
     {
         if (ignoreFile.LinkTarget is null && fileLength == 0)
         {
@@ -254,6 +273,7 @@ public class DotIgnoreIgnoreRule : IResolverIgnoreRule
                 Rules = new Ignore.Ignore(),
                 FileLastModified = lastModified,
                 FileLength = fileLength,
+                ParsedAtUtc = parsedAtUtc,
                 IsEmpty = true
             };
         }
@@ -267,6 +287,7 @@ public class DotIgnoreIgnoreRule : IResolverIgnoreRule
                 Rules = new Ignore.Ignore(),
                 FileLastModified = lastModified,
                 FileLength = fileLength,
+                ParsedAtUtc = parsedAtUtc,
                 IsEmpty = true
             };
         }
@@ -279,6 +300,7 @@ public class DotIgnoreIgnoreRule : IResolverIgnoreRule
                 Rules = new Ignore.Ignore(),
                 FileLastModified = lastModified,
                 FileLength = fileLength,
+                ParsedAtUtc = parsedAtUtc,
                 IsEmpty = true
             };
         }
@@ -306,6 +328,7 @@ public class DotIgnoreIgnoreRule : IResolverIgnoreRule
             Rules = ignore,
             FileLastModified = lastModified,
             FileLength = fileLength,
+            ParsedAtUtc = parsedAtUtc,
             IsEmpty = validRulesAdded == 0
         };
     }
@@ -333,6 +356,8 @@ public class DotIgnoreIgnoreRule : IResolverIgnoreRule
         public required DateTime FileLastModified { get; init; }
 
         public required long FileLength { get; init; }
+
+        public required DateTime ParsedAtUtc { get; init; }
 
         public required bool IsEmpty { get; init; }
     }

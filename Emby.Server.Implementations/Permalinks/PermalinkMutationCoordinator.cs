@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20, 2026-09-27.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -484,8 +484,16 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         Guid operationId,
         CancellationToken cancellationToken)
     {
-        return await _journal.ReadAsync(operationId, cancellationToken).ConfigureAwait(false)
+        var operation = await _journal.ReadAsync(operationId, cancellationToken).ConfigureAwait(false)
             ?? throw Conflict("operation-missing", $"Operation '{operationId}' does not exist.");
+        if (string.Equals(operation.Kind, "removal", StringComparison.Ordinal))
+        {
+            throw Conflict(
+                "removal-operation-route",
+                $"Operation '{operationId}' must use the removal endpoint.");
+        }
+
+        return operation;
     }
 
     private BaseItem RequireItem(Guid itemId)

@@ -19,17 +19,20 @@ internal sealed class PermalinkRemovalEvidenceVerifier
 {
     private readonly ILibraryManager _libraryManager;
     private readonly PermalinkEvidence _evidence;
+    private readonly PermalinkCapsuleStore _capsules;
     private readonly PermalinkBindingIndex _bindings;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
 
     public PermalinkRemovalEvidenceVerifier(
         ILibraryManager libraryManager,
         PermalinkEvidence evidence,
+        PermalinkCapsuleStore capsules,
         PermalinkBindingIndex bindings,
         IPermalinkAtomicFileSystem fileSystem)
     {
         _libraryManager = libraryManager;
         _evidence = evidence;
+        _capsules = capsules;
         _bindings = bindings;
         _fileSystem = fileSystem;
     }
@@ -53,7 +56,15 @@ internal sealed class PermalinkRemovalEvidenceVerifier
         var destinationState = GetPathState(request.DestinationPath);
         var sourceCompanionEntries = EnumerateCompanionEntries(source.Path);
         var destinationCompanionEntries = EnumerateCompanionEntries(request.DestinationPath);
-        var attachedAtDestination = sourceState == PermalinkRemovalPathState.Missing
+        var preservedCapsuleOnlySource = sourceState == PermalinkRemovalPathState.Occupied
+            && sourceCompanionEntries.Count == 0
+            && await IsPreservedCapsuleOnlySourceAsync(
+                source.Path,
+                sourceBinding.CapsuleId,
+                source.GetType().Name,
+                cancellationToken).ConfigureAwait(false);
+        var attachedAtDestination = (sourceState == PermalinkRemovalPathState.Missing
+                || preservedCapsuleOnlySource)
             && sourceCompanionEntries.Count == 0
             && destinationState == PermalinkRemovalPathState.Regular;
         var ordinaryPrepare = sourceState == PermalinkRemovalPathState.Regular
@@ -64,7 +75,7 @@ internal sealed class PermalinkRemovalEvidenceVerifier
             throw Conflict(
                 "removal-file-state",
                 "Prepare requires either a complete source with an empty destination, "
-                + "or an exact already-moved destination with an empty source.");
+                + "or an exact already-moved destination with an empty or preserved-capsule-only source.");
         }
 
         var frozenPath = attachedAtDestination ? request.DestinationPath : source.Path;
@@ -218,6 +229,18 @@ internal sealed class PermalinkRemovalEvidenceVerifier
         var intent = operation.Removal!;
         var entries = EnumerateCompanionEntries(mainPath);
         var mainState = GetPathState(mainPath);
+        if (string.Equals(mainPath, operation.SourcePath, StringComparison.Ordinal)
+            && entries.Count == 0
+            && operation.OldIdentity is { } oldIdentity
+            && await IsPreservedCapsuleOnlySourceAsync(
+                mainPath,
+                operation.CapsuleId,
+                oldIdentity.ItemKind,
+                cancellationToken).ConfigureAwait(false))
+        {
+            return PermalinkRemovalGroupState.Empty;
+        }
+
         if (mainState == PermalinkRemovalPathState.Missing && entries.Count == 0)
         {
             return PermalinkRemovalGroupState.Empty;
@@ -283,6 +306,98 @@ internal sealed class PermalinkRemovalEvidenceVerifier
         }
 
         return PermalinkRemovalGroupState.Complete;
+    }
+
+    private async Task<bool> IsPreservedCapsuleOnlySourceAsync(
+        string sourcePath,
+        Guid capsuleId,
+        string itemKind,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(itemKind))
+        {
+            return false;
+        }
+
+        try
+        {
+            var sourceAttributes = File.GetAttributes(sourcePath);
+            if ((sourceAttributes & FileAttributes.Directory) == 0
+                || (sourceAttributes & FileAttributes.ReparsePoint) != 0)
+            {
+                return false;
+            }
+
+            var capsulePath = Path.Combine(
+                sourcePath,
+                "." + itemKind.ToLowerInvariant() + ".sloptank-permalink");
+            var sourceEntries = Directory.EnumerateFileSystemEntries(sourcePath).ToArray();
+            if (sourceEntries.Length != 1
+                || !string.Equals(sourceEntries[0], capsulePath, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var capsuleAttributes = File.GetAttributes(capsulePath);
+            if ((capsuleAttributes & FileAttributes.Directory) == 0
+                || (capsuleAttributes & FileAttributes.ReparsePoint) != 0)
+            {
+                return false;
+            }
+
+            var headerPath = Path.Combine(capsulePath, "capsule.json");
+            var eventsPath = Path.Combine(capsulePath, "events");
+            var capsuleEntries = Directory.EnumerateFileSystemEntries(capsulePath).ToArray();
+            if (capsuleEntries.Length != 2
+                || !capsuleEntries.Contains(headerPath, StringComparer.Ordinal)
+                || !capsuleEntries.Contains(eventsPath, StringComparer.Ordinal)
+                || GetPathState(headerPath) != PermalinkRemovalPathState.Regular)
+            {
+                return false;
+            }
+
+            var eventAttributes = File.GetAttributes(eventsPath);
+            if ((eventAttributes & FileAttributes.Directory) == 0
+                || (eventAttributes & FileAttributes.ReparsePoint) != 0)
+            {
+                return false;
+            }
+
+            var eventEntries = Directory.EnumerateFileSystemEntries(eventsPath).ToArray();
+            if (eventEntries.Length == 0
+                || eventEntries.Any(path => GetPathState(path) != PermalinkRemovalPathState.Regular
+                    || !string.Equals(Path.GetExtension(path), ".json", StringComparison.Ordinal)))
+            {
+                return false;
+            }
+
+            _ = await _capsules.ReadValidatedAsync(
+                capsulePath,
+                capsuleId,
+                itemKind,
+                cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+        catch (PermalinkException)
+        {
+            return false;
+        }
     }
 
     private async Task<IReadOnlyList<PermalinkRemovalCompanion>> FreezeCompanionsAsync(

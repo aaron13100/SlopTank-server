@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-27.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -172,6 +172,42 @@ public sealed class PermalinkEvidence
         catch (IOException exception)
         {
             throw Unreachable(mainPath, exception);
+        }
+    }
+
+    /// <summary>Computes canonical evidence for one exact media file without a live library item.</summary>
+    /// <param name="path">The exact media path.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The canonical single-file evidence.</returns>
+    internal async Task<PermalinkEvidenceResult> ComputeSingleFileAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var leaf = await HashFileAsync(
+                "media",
+                "main",
+                relativePath: null,
+                path,
+                cancellationToken).ConfigureAwait(false);
+            return Build([leaf]);
+        }
+        catch (FileNotFoundException exception)
+        {
+            throw Unreachable(path, exception);
+        }
+        catch (DirectoryNotFoundException exception)
+        {
+            throw Unreachable(path, exception);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            throw Unreachable(path, exception);
+        }
+        catch (IOException exception)
+        {
+            throw Unreachable(path, exception);
         }
     }
 

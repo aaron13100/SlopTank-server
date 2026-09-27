@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-09-03, 2026-09-07, 2026-09-08, 2026-09-09, 2026-09-10, 2026-09-22.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-09-03, 2026-09-07, 2026-09-08, 2026-09-09, 2026-09-10, 2026-09-22, 2026-09-27.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -380,6 +380,170 @@ internal sealed class PermalinkBindingIndex
     }
 
     /// <summary>
+    /// Atomically publishes one frozen removal alias set, or recognizes its exact replay.
+    /// </summary>
+    /// <remarks>
+    /// The caller freezes aliases before the external move. This method therefore never
+    /// discovers work from mutable current rows: every alias must be wholly on the source
+    /// or wholly in the requested terminal assignment. Mixed or third-party state refuses.
+    /// </remarks>
+    /// <param name="sourceItemId">The exact item leaving the library.</param>
+    /// <param name="survivorItemId">The optional proven survivor.</param>
+    /// <param name="survivorCapsuleId">The survivor's frozen verified capsule.</param>
+    /// <param name="survivorContentRoot">The survivor's frozen verified content root.</param>
+    /// <param name="sourceAliases">The exact sorted alias set frozen at prepare.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    public async Task ApplyRemovalBindingsAsync(
+        Guid sourceItemId,
+        Guid? survivorItemId,
+        Guid? survivorCapsuleId,
+        string? survivorContentRoot,
+        IReadOnlyList<string> sourceAliases,
+        CancellationToken cancellationToken)
+    {
+        var aliases = sourceAliases
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(value => value, StringComparer.Ordinal)
+            .ToArray();
+        if (aliases.Length == 0 || aliases.Length != sourceAliases.Count)
+        {
+            throw Conflict("removal-alias-set", "Removal alias set is empty or contains duplicates.");
+        }
+
+        if (survivorItemId.HasValue != survivorCapsuleId.HasValue
+            || survivorItemId.HasValue != !string.IsNullOrEmpty(survivorContentRoot))
+        {
+            throw Conflict("removal-survivor-state", "Removal survivor state is incomplete.");
+        }
+
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection
+            .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.Parameters.AddWithValue("$source", sourceItemId.ToString("D"));
+        if (survivorItemId is { } targetId)
+        {
+            command.Parameters.AddWithValue("$target", targetId.ToString("D"));
+        }
+
+        var unpublished = true;
+        var published = true;
+        for (var index = 0; index < aliases.Length; index++)
+        {
+            command.Parameters.AddWithValue("$alias", aliases[index]);
+            command.CommandText = "SELECT ItemId FROM PermalinkBindings WHERE PermalinkId = $alias ORDER BY ItemId";
+            var itemIds = new List<Guid>();
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    itemIds.Add(Guid.Parse(reader.GetString(0)));
+                }
+            }
+
+            var sourcePresent = itemIds.Contains(sourceItemId);
+            var onlyExpected = itemIds.All(value => value.Equals(sourceItemId)
+                || (survivorItemId.HasValue && value.Equals(survivorItemId.Value)));
+            var terminalPresent = survivorItemId is { } survivorId
+                ? itemIds.Count == 1 && itemIds[0].Equals(survivorId)
+                : itemIds.Count == 0;
+            unpublished &= sourcePresent && onlyExpected;
+            published &= terminalPresent;
+            command.Parameters.RemoveAt("$alias");
+        }
+
+        command.CommandText = "SELECT PermalinkId FROM PermalinkBindings WHERE ItemId = $source ORDER BY PermalinkId";
+        var currentSourceAliases = new List<string>();
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                currentSourceAliases.Add(reader.GetString(0));
+            }
+        }
+
+        if (published)
+        {
+            if (currentSourceAliases.Count != 0)
+            {
+                throw Conflict(
+                    "removal-alias-state",
+                    "Published removal retained an unexpected source alias.");
+            }
+
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (!unpublished || !currentSourceAliases.SequenceEqual(aliases, StringComparer.Ordinal))
+        {
+            throw Conflict(
+                "removal-alias-state",
+                "Prepared removal aliases are mixed, missing, or bound to an unexpected item.");
+        }
+
+        if (survivorItemId is { } target
+            && survivorCapsuleId is { } targetCapsule
+            && survivorContentRoot is { } targetRoot)
+        {
+            command.CommandText = """
+                SELECT 1
+                  FROM PermalinkBindings b
+                  JOIN FirstAliasClaims f ON f.permalink_id = b.PermalinkId
+                  LEFT JOIN PermalinkBindingCapsuleOverrides o
+                    ON o.PermalinkId = b.PermalinkId
+                   AND o.ItemId = b.ItemId
+                 WHERE b.ItemId = $target
+                   AND b.ContentRoot = $root
+                   AND COALESCE(o.capsule_id, f.capsule_id) = $capsule
+                 LIMIT 1
+                """;
+            command.Parameters.AddWithValue("$capsule", targetCapsule.ToString("D"));
+            command.Parameters.AddWithValue("$root", targetRoot);
+            if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null)
+            {
+                throw Conflict("removal-survivor-capsule", "Prepared survivor capsule is missing.");
+            }
+
+            var now = _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture);
+            command.Parameters.AddWithValue("$token", GenerateGuid().ToString("D"));
+            command.Parameters.AddWithValue("$created", now);
+            foreach (var alias in aliases)
+            {
+                command.Parameters.AddWithValue("$alias", alias);
+                command.CommandText = """
+                    INSERT INTO PermalinkBindings
+                        (PermalinkId, ItemId, ContentRoot, VerifiedToken, VerifiedAt, CreatedAt)
+                    VALUES ($alias, $target, $root, $token, $created, $created)
+                    ON CONFLICT(PermalinkId, ItemId) DO UPDATE SET
+                        ContentRoot = excluded.ContentRoot,
+                        VerifiedToken = excluded.VerifiedToken,
+                        VerifiedAt = excluded.VerifiedAt
+                    """;
+                _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                command.CommandText = """
+                    INSERT INTO PermalinkBindingCapsuleOverrides
+                        (PermalinkId, ItemId, capsule_id, created_at)
+                    VALUES ($alias, $target, $capsule, $created)
+                    ON CONFLICT(PermalinkId, ItemId) DO UPDATE SET capsule_id = excluded.capsule_id
+                    """;
+                _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                command.Parameters.RemoveAt("$alias");
+            }
+        }
+
+        command.CommandText = "DELETE FROM PermalinkBindingCapsuleOverrides WHERE ItemId = $source";
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        command.CommandText = "DELETE FROM PermalinkBindings WHERE ItemId = $source";
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Advances all derived aliases for one item after a controlled content commit.
     /// </summary>
     /// <param name="itemId">The Jellyfin item identifier.</param>
@@ -556,5 +720,10 @@ internal sealed class PermalinkBindingIndex
         Span<byte> bytes = stackalloc byte[16];
         RandomNumberGenerator.Fill(bytes);
         return new Guid(bytes);
+    }
+
+    private static PermalinkException Conflict(string code, string message)
+    {
+        return new PermalinkException(PermalinkErrorKind.Conflict, code, message);
     }
 }

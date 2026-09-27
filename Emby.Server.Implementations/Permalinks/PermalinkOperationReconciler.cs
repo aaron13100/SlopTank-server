@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-09, 2026-09-10, 2026-09-20.
+// SlopTank modification notice: added or changed by SlopTank on 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-09, 2026-09-10, 2026-09-20, 2026-09-27.
 using System;
 using System.Diagnostics;
 using System.Globalization;
@@ -22,6 +22,7 @@ internal sealed class PermalinkOperationReconciler : IHostedService
     private readonly PermalinkAuthorityStore _authority;
     private readonly PermalinkOperationJournal _journal;
     private readonly IPermalinkMutationCoordinator _coordinator;
+    private readonly IPermalinkRemovalCoordinator _removalCoordinator;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<PermalinkOperationReconciler> _logger;
     private readonly TimeSpan _abandonmentGracePeriod;
@@ -30,6 +31,7 @@ internal sealed class PermalinkOperationReconciler : IHostedService
         PermalinkAuthorityStore authority,
         PermalinkOperationJournal journal,
         IPermalinkMutationCoordinator coordinator,
+        IPermalinkRemovalCoordinator removalCoordinator,
         IConfiguration configuration,
         TimeProvider timeProvider,
         ILogger<PermalinkOperationReconciler> logger)
@@ -37,6 +39,7 @@ internal sealed class PermalinkOperationReconciler : IHostedService
         _authority = authority;
         _journal = journal;
         _coordinator = coordinator;
+        _removalCoordinator = removalCoordinator;
         _timeProvider = timeProvider;
         _logger = logger;
         _abandonmentGracePeriod = configuration.GetValue(
@@ -165,12 +168,15 @@ internal sealed class PermalinkOperationReconciler : IHostedService
                 return;
             }
 
-            var result = await _coordinator.RecoverAsync(operationId, cancellationToken)
-                .ConfigureAwait(false);
+            var state = string.Equals(operation.Kind, "removal", StringComparison.Ordinal)
+                ? (await _removalCoordinator.RecoverAsync(operationId, cancellationToken)
+                    .ConfigureAwait(false)).State
+                : (await _coordinator.RecoverAsync(operationId, cancellationToken)
+                    .ConfigureAwait(false)).State;
             _logger.LogInformation(
                 "Recovered permalink operation {OperationId} as {State} after {Age}.",
                 operationId,
-                result.State,
+                state,
                 now - createdAt);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)

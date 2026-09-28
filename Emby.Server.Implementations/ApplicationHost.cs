@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-27.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-27, 2026-09-28.
 #nullable disable
 
 #pragma warning disable CS1591
@@ -447,7 +447,12 @@ namespace Emby.Server.Implementations
 
             ConfigurationManager.AddParts(GetExports<IConfigurationFactory>());
 
-            NetManager = new NetworkManager(ConfigurationManager, _startupConfig, LoggerFactory.CreateLogger<NetworkManager>());
+            // The DI container never disposes an instance registration, and the
+            // network manager's static NetworkChange subscriptions would otherwise
+            // keep this whole host reachable after an in-process restart.
+            var networkManager = new NetworkManager(ConfigurationManager, _startupConfig, LoggerFactory.CreateLogger<NetworkManager>());
+            NetManager = networkManager;
+            _disposableParts.Add(networkManager);
 
             // Initialize runtime stat collection
             if (ConfigurationManager.Configuration.EnableMetrics)

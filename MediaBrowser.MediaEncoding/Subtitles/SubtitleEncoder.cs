@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-08-29, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-08-29, 2026-09-08, 2026-09-09, 2026-09-28.
 #pragma warning disable CS1591
 
 using System;
@@ -291,6 +291,21 @@ namespace MediaBrowser.MediaEncoding.Subtitles
         private static string FormatCacheMeta(long length, DateTime lastWriteUtc)
             => string.Create(CultureInfo.InvariantCulture, $"{length}:{lastWriteUtc.Ticks}");
 
+        /// <summary>A subtitle source's length and mtime, snapshotted before a cache is built from it.</summary>
+        private readonly record struct SubtitleCacheSource(string Path, long Length, DateTime LastWriteUtc, DateTime TakenAtUtc)
+        {
+            private static readonly TimeSpan CoarseMtimeSettling = TimeSpan.FromSeconds(2);
+
+            /// <summary>
+            /// Gets a value indicating whether the mtime identifies the content: true when it
+            /// carries sub-second precision, or when the snapshot was taken after the
+            /// whole-second mtime's ambiguity window closed.
+            /// </summary>
+            public bool IsSettled
+                => LastWriteUtc.Ticks % TimeSpan.TicksPerSecond != 0
+                    || TakenAtUtc >= LastWriteUtc + CoarseMtimeSettling;
+        }
+
         private bool IsCachedSubtitleFresh(string cachePath, string? sourcePath)
         {
             if (!File.Exists(cachePath))
@@ -329,22 +344,71 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             }
         }
 
-        private void WriteCacheMeta(string cachePath, string? sourcePath)
+        /// <summary>
+        /// Snapshots the source a cache is about to be built from. Taken before
+        /// extraction starts, so the record written afterwards can only ever
+        /// describe the source state the extraction actually read.
+        /// </summary>
+        /// <param name="sourcePath">The subtitle source, or null when there is none.</param>
+        /// <returns>The snapshot, or null when the source is absent or unreadable.</returns>
+        private SubtitleCacheSource? CaptureCacheSource(string? sourcePath)
         {
             if (string.IsNullOrEmpty(sourcePath))
             {
-                return;
+                return null;
             }
 
             try
             {
+                var takenAtUtc = DateTime.UtcNow;
                 var sourceInfo = _fileSystem.GetFileInfo(sourcePath);
-                if (!sourceInfo.Exists)
+                return sourceInfo.Exists
+                    ? new SubtitleCacheSource(sourcePath, sourceInfo.Length, sourceInfo.LastWriteTimeUtc, takenAtUtc)
+                    : null;
+            }
+            catch (IOException ex)
+            {
+                _logger.LogWarning(ex, "Failed to read subtitle source metadata for {SourcePath}", sourcePath);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Records the cache as built from <paramref name="source"/>, but only
+        /// when that record can be trusted later: the source must still match
+        /// the pre-extraction snapshot, and a whole-second mtime (HFS+) must
+        /// have settled before extraction began, since a same-length rewrite
+        /// inside that second leaves length and mtime unchanged. Otherwise any
+        /// earlier record is removed, so the next request rebuilds the cache.
+        /// </summary>
+        /// <param name="cachePath">The cache file just written.</param>
+        /// <param name="source">The snapshot taken before extraction.</param>
+        private void WriteCacheMeta(string cachePath, SubtitleCacheSource? source)
+        {
+            if (source is not { } before)
+            {
+                return;
+            }
+
+            var metaPath = GetCacheMetaPath(cachePath);
+            try
+            {
+                var sourceInfo = _fileSystem.GetFileInfo(before.Path);
+                var unchanged = sourceInfo.Exists
+                    && sourceInfo.Length == before.Length
+                    && sourceInfo.LastWriteTimeUtc == before.LastWriteUtc;
+                if (unchanged && before.IsSettled)
                 {
+                    File.WriteAllText(metaPath, FormatCacheMeta(before.Length, before.LastWriteUtc));
                     return;
                 }
 
-                File.WriteAllText(GetCacheMetaPath(cachePath), FormatCacheMeta(sourceInfo.Length, sourceInfo.LastWriteTimeUtc));
+                File.Delete(metaPath);
+                _logger.LogDebug(
+                    "Not recording subtitle cache {CachePath} as fresh: source {SourcePath} {Reason}",
+                    cachePath,
+                    before.Path,
+                    unchanged ? "was modified too recently for its mtime to identify its content" : "changed during extraction");
             }
             catch (IOException ex)
             {
@@ -389,13 +453,14 @@ namespace MediaBrowser.MediaEncoding.Subtitles
 
             var args = string.Format(CultureInfo.InvariantCulture, "-y {0} -i \"{1}\" -c:s srt \"{2}\"", encodingParam, inputPath, outputPath);
 
+            var source = CaptureCacheSource(inputPath);
             await ExtractSubtitlesForFile(
                 inputPath,
                 args,
                 [outputPath],
                 cancellationToken).ConfigureAwait(false);
 
-            WriteCacheMeta(outputPath, inputPath);
+            WriteCacheMeta(outputPath, source);
         }
 
         private string GetExtractableSubtitleFormat(MediaStream subtitleStream)
@@ -574,11 +639,12 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                         outputPath);
                 }
 
+                var source = CaptureCacheSource(mksFile);
                 await ExtractSubtitlesForFile(inputPath, args, outputPaths, cancellationToken).ConfigureAwait(false);
 
                 foreach (var outputPath in outputPaths)
                 {
-                    WriteCacheMeta(outputPath, mksFile);
+                    WriteCacheMeta(outputPath, source);
                 }
             }
         }
@@ -634,11 +700,12 @@ namespace MediaBrowser.MediaEncoding.Subtitles
 
             if (outputPaths.Count > 0)
             {
+                var source = CaptureCacheSource(mediaSource.Path);
                 await ExtractSubtitlesForFile(inputPath, args, outputPaths, cancellationToken).ConfigureAwait(false);
 
                 foreach (var outputPath in outputPaths)
                 {
-                    WriteCacheMeta(outputPath, mediaSource.Path);
+                    WriteCacheMeta(outputPath, source);
                 }
             }
         }

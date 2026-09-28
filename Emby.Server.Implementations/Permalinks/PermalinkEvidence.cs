@@ -426,17 +426,21 @@ public sealed class PermalinkEvidence
         CancellationToken cancellationToken)
     {
         var token = MacPermalinkContentIdentity.TryRead(path);
-        if (token is { } unsettled && unsettled.SettledAt - DateTimeOffset.UtcNow is { Ticks: > 0 } wait)
+        var readStartedAt = DateTimeOffset.UtcNow;
+
+        // Reading inside a coarse ctime's ambiguity window would yield a
+        // digest no token could ever authorize. Waiting out the window once
+        // costs at most a couple of seconds on a just-written file; re-reading
+        // it on every later request would cost the whole file. Loop rather than
+        // trust one delay: timers run on a millisecond tick clock, not the wall
+        // clock SettledAt is on, so a delay can end just short of it.
+        while (token is { } unsettled && !unsettled.CanAuthorizeDigestReadStartedAt(readStartedAt))
         {
-            // Reading inside a coarse ctime's ambiguity window would yield a
-            // digest no token could ever authorize. Waiting out the window
-            // once costs at most a couple of seconds on a just-written file;
-            // re-reading it on every later request would cost the whole file.
-            await Task.Delay(wait, cancellationToken).ConfigureAwait(false);
+            await Task.Delay(unsettled.SettledAt - readStartedAt + TimeSpan.FromMilliseconds(1), cancellationToken).ConfigureAwait(false);
             token = MacPermalinkContentIdentity.TryRead(path);
+            readStartedAt = DateTimeOffset.UtcNow;
         }
 
-        var readStartedAt = DateTimeOffset.UtcNow;
         _contentReads.RecordFullContentRead();
         await using var stream = new FileStream(
             path,

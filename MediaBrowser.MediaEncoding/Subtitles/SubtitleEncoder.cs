@@ -291,21 +291,6 @@ namespace MediaBrowser.MediaEncoding.Subtitles
         private static string FormatCacheMeta(long length, DateTime lastWriteUtc)
             => string.Create(CultureInfo.InvariantCulture, $"{length}:{lastWriteUtc.Ticks}");
 
-        /// <summary>A subtitle source's length and mtime, snapshotted before a cache is built from it.</summary>
-        private readonly record struct SubtitleCacheSource(string Path, long Length, DateTime LastWriteUtc, DateTime TakenAtUtc)
-        {
-            private static readonly TimeSpan CoarseMtimeSettling = TimeSpan.FromSeconds(2);
-
-            /// <summary>
-            /// Gets a value indicating whether the mtime identifies the content: true when it
-            /// carries sub-second precision, or when the snapshot was taken after the
-            /// whole-second mtime's ambiguity window closed.
-            /// </summary>
-            public bool IsSettled
-                => LastWriteUtc.Ticks % TimeSpan.TicksPerSecond != 0
-                    || TakenAtUtc >= LastWriteUtc + CoarseMtimeSettling;
-        }
-
         private bool IsCachedSubtitleFresh(string cachePath, string? sourcePath)
         {
             if (!File.Exists(cachePath))
@@ -1059,6 +1044,21 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             public string Format { get; init; }
 
             public bool IsExternal { get; init; }
+        }
+
+        /// <summary>A subtitle source's length and mtime, snapshotted before a cache is built from it.</summary>
+        private readonly record struct SubtitleCacheSource(string Path, long Length, DateTime LastWriteUtc, DateTime TakenAtUtc)
+        {
+            private static readonly TimeSpan CoarseMtimeSettling = TimeSpan.FromSeconds(2);
+
+            /// <summary>
+            /// Gets a value indicating whether the mtime identifies the content: true when it
+            /// carries sub-second precision, or when the snapshot was taken after the
+            /// whole-second mtime's ambiguity window closed.
+            /// </summary>
+            public bool IsSettled
+                => LastWriteUtc.Ticks % TimeSpan.TicksPerSecond != 0
+                    || TakenAtUtc >= LastWriteUtc + CoarseMtimeSettling;
         }
     }
 }

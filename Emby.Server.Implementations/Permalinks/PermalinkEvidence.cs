@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-27.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-27, 2026-09-28.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -113,7 +113,7 @@ public sealed class PermalinkEvidence
             return true;
         }
 
-        return _digestCache.TryRead(path, token, out _);
+        return _digestCache.TryRead(path, token, out _, out _);
     }
 
     /// <summary>
@@ -426,6 +426,17 @@ public sealed class PermalinkEvidence
         CancellationToken cancellationToken)
     {
         var token = MacPermalinkContentIdentity.TryRead(path);
+        if (token is { } unsettled && unsettled.SettledAt - DateTimeOffset.UtcNow is { Ticks: > 0 } wait)
+        {
+            // Reading inside a coarse ctime's ambiguity window would yield a
+            // digest no token could ever authorize. Waiting out the window
+            // once costs at most a couple of seconds on a just-written file;
+            // re-reading it on every later request would cost the whole file.
+            await Task.Delay(wait, cancellationToken).ConfigureAwait(false);
+            token = MacPermalinkContentIdentity.TryRead(path);
+        }
+
+        var readStartedAt = DateTimeOffset.UtcNow;
         _contentReads.RecordFullContentRead();
         await using var stream = new FileStream(
             path,
@@ -441,8 +452,8 @@ public sealed class PermalinkEvidence
         var tokenAfterRead = MacPermalinkContentIdentity.TryRead(path);
         if (token is { } beforeRead && tokenAfterRead is { } afterRead && beforeRead == afterRead)
         {
-            RememberContentDigest(path, new ContentDigestCacheEntry(afterRead, digest));
-            _digestCache.Write(path, afterRead, digest);
+            RememberContentDigest(path, new ContentDigestCacheEntry(afterRead, digest, readStartedAt));
+            _digestCache.Write(path, afterRead, digest, readStartedAt);
         }
         else
         {
@@ -476,12 +487,12 @@ public sealed class PermalinkEvidence
         {
             digest = cached.Digest;
         }
-        else if (_digestCache.TryRead(path, token, out var recorded))
+        else if (_digestCache.TryRead(path, token, out var recorded, out var capturedAt))
         {
             // The durable tier is what survives a restart. Promote its answer
             // into memory so later requests cost only a stat.
             digest = recorded;
-            RememberContentDigest(path, new ContentDigestCacheEntry(token, digest));
+            RememberContentDigest(path, new ContentDigestCacheEntry(token, digest, capturedAt));
         }
         else
         {
@@ -587,8 +598,12 @@ public sealed class PermalinkEvidence
     }
 
     /// <summary>One cached full-content digest, valid while the captured change token still matches.</summary>
-    private sealed record ContentDigestCacheEntry(MacPermalinkContentIdentityToken Token, string Digest)
+    private sealed record ContentDigestCacheEntry(
+        MacPermalinkContentIdentityToken Token,
+        string Digest,
+        DateTimeOffset CapturedAt)
     {
-        public bool MatchesToken(MacPermalinkContentIdentityToken current) => Token == current;
+        public bool MatchesToken(MacPermalinkContentIdentityToken current)
+            => Token == current && current.CanAuthorizeDigestReadStartedAt(CapturedAt);
     }
 }

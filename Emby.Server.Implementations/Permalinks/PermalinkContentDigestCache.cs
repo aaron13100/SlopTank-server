@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-02, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-28.
 using System;
 using System.Globalization;
 using System.IO;
@@ -93,10 +93,16 @@ internal sealed class PermalinkContentDigestCache
     /// <param name="path">The media path.</param>
     /// <param name="token">The change token read from that path just now.</param>
     /// <param name="digest">The recorded digest, when one matches.</param>
+    /// <param name="capturedAt">When the full-content read behind the matching digest began.</param>
     /// <returns>True when a usable digest was found.</returns>
-    public bool TryRead(string path, MacPermalinkContentIdentityToken token, out string digest)
+    public bool TryRead(
+        string path,
+        MacPermalinkContentIdentityToken token,
+        out string digest,
+        out DateTimeOffset capturedAt)
     {
         digest = string.Empty;
+        capturedAt = default;
         if (EntryPath(path) is not { } entryPath)
         {
             return false;
@@ -167,9 +173,11 @@ internal sealed class PermalinkContentDigestCache
             || !record.Matches(path, token)
             || !IsCanonicalDigest(record.Digest)
             || !IsCanonicalTimestamp(record.CreatedAt)
-            || !IsCanonicalTimestamp(record.UpdatedAt)
+            || !TryParseTimestamp(record.UpdatedAt, out capturedAt)
+            || !token.CanAuthorizeDigestReadStartedAt(capturedAt)
             || !string.Equals(record.RecordHash, ComputeRecordHash(record), StringComparison.Ordinal))
         {
+            capturedAt = default;
             return false;
         }
 
@@ -183,7 +191,12 @@ internal sealed class PermalinkContentDigestCache
     /// <param name="path">The media path.</param>
     /// <param name="token">The change token captured before the read.</param>
     /// <param name="digest">The full-content digest just computed.</param>
-    public void Write(string path, MacPermalinkContentIdentityToken token, string digest)
+    /// <param name="capturedAt">When the full-content read behind this digest began; tokens authorize a digest only from a read that started after their ctime settled.</param>
+    public void Write(
+        string path,
+        MacPermalinkContentIdentityToken token,
+        string digest,
+        DateTimeOffset capturedAt)
     {
         if (EntryPath(path) is not { } entryPath)
         {
@@ -198,7 +211,7 @@ internal sealed class PermalinkContentDigestCache
             return;
         }
 
-        var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+        var now = capturedAt.ToString("O", CultureInfo.InvariantCulture);
         var record = new PermalinkContentDigestRecord
         {
             Version = CurrentVersion,
@@ -380,6 +393,14 @@ internal sealed class PermalinkContentDigestCache
             CultureInfo.InvariantCulture,
             DateTimeStyles.None,
             out _);
+
+    private static bool TryParseTimestamp(string? value, out DateTimeOffset timestamp)
+        => DateTimeOffset.TryParseExact(
+            value,
+            "O",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None,
+            out timestamp);
 
     private static string ComputeRecordHash(PermalinkContentDigestRecord record)
     {

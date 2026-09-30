@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-03, 2026-09-07, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-03, 2026-09-07, 2026-09-09, 2026-09-30.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -73,11 +73,17 @@ internal sealed class PermalinkMutationBundleFactory
             }
 
             contentRoot ??= reservation.RootPath;
-            var capsulePath = await _capsules.PublishGenesisAsync(
-                reservation,
-                reservation.RootPath,
-                candidate.Path,
-                cancellationToken).ConfigureAwait(false);
+            // Vanished content (file gone, or a phantom shell in its place) has no
+            // path to publish a capsule beside: the authority already recorded the
+            // durable root-level capsule, so read that. Publishing here would
+            // manufacture a directory at the content path (the c200 phantom).
+            var capsulePath = PermalinkCapsuleShell.IsVanishedContent(candidate)
+                ? reservation.CapsulePath
+                : await _capsules.PublishGenesisAsync(
+                    reservation,
+                    reservation.RootPath,
+                    candidate.Path,
+                    cancellationToken).ConfigureAwait(false);
             var snapshot = await _capsules.ReadValidatedAsync(
                 capsulePath,
                 reservation.CapsuleId,
@@ -183,7 +189,7 @@ internal sealed class PermalinkMutationBundleFactory
         // Existence is tested rather than catching the read failure so that a
         // file which IS present but unreadable still fails loudly: "gone" and
         // "broken" must not collapse into one silent answer.
-        if (!File.Exists(item.Path) && !Directory.Exists(item.Path))
+        if (PermalinkCapsuleShell.IsVanishedContent(item))
         {
             return await _authority.FindByCurrentPathAsync(item.Path, cancellationToken)
                 .ConfigureAwait(false);
@@ -199,7 +205,7 @@ internal sealed class PermalinkMutationBundleFactory
         BaseItem item,
         string? destination)
     {
-        if (Directory.Exists(item.Path))
+        if (Directory.Exists(item.Path) && !PermalinkCapsuleShell.IsPhantomShell(item))
         {
             return Directory.EnumerateFiles(item.Path, "*", SearchOption.AllDirectories)
                 .Where(path => !Path.GetRelativePath(item.Path, path)

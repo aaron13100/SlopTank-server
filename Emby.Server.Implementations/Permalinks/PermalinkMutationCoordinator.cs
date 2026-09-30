@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20, 2026-09-27.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20, 2026-09-27, 2026-09-30.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -11,6 +11,7 @@ using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
+using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.Permalinks;
 
@@ -56,6 +57,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     private readonly PermalinkItemStateMutation _itemStateMutation;
     private readonly PermalinkContentAdoption _contentAdoption;
     private readonly TimeProvider _timeProvider;
+    private readonly ILogger<PermalinkMutationCoordinator> _logger;
     private readonly SemaphoreSlim[] _operationGates = Enumerable.Range(0, OperationGateCount)
         .Select(_ => new SemaphoreSlim(1, 1))
         .ToArray();
@@ -77,6 +79,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     /// <param name="itemStateMutation">The journal-only item-state mutation service.</param>
     /// <param name="contentAdoption">The elevated leaf content adoption service.</param>
     /// <param name="timeProvider">The time provider.</param>
+    /// <param name="logger">The logger.</param>
     public PermalinkMutationCoordinator(
         ILibraryManager libraryManager,
         IPermalinkManager manager,
@@ -91,8 +94,10 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         PermalinkPathMutation pathMutation,
         PermalinkItemStateMutation itemStateMutation,
         PermalinkContentAdoption contentAdoption,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        ILogger<PermalinkMutationCoordinator> logger)
     {
+        _logger = logger;
         _libraryManager = libraryManager;
         _manager = manager;
         _evidence = evidence;
@@ -126,8 +131,12 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             .ConfigureAwait(false);
         PermalinkResolutionBinding binding;
         string oldContentRoot;
-        var ensuredIdentity = await TryEnsureIdentityForDeletionAsync(request, item, cancellationToken)
-            .ConfigureAwait(false);
+        // A phantom shell's anchor is a random token no authority row knows, so the
+        // ensure step would fence the delete before the vanished route is reached.
+        var ensuredIdentity = PermalinkCapsuleShell.IsPhantomShell(item)
+            ? null
+            : await TryEnsureIdentityForDeletionAsync(request, item, cancellationToken)
+                .ConfigureAwait(false);
         if (IsDeletionOfVanishedContent(request.Kind, item)
             || ensuredIdentity is null)
         {
@@ -247,8 +256,14 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
 
         if (operation.Kind is "deletion" or "promotion" or "kind-reclassification")
         {
-            return await _itemStateMutation.CommitStateOnlyAsync(operation, cancellationToken)
+            var result = await _itemStateMutation.CommitStateOnlyAsync(operation, cancellationToken)
                 .ConfigureAwait(false);
+            if (operation.Kind is "deletion" or "promotion")
+            {
+                RemoveCapsuleShellDebris(operation.SourcePath);
+            }
+
+            return result;
         }
 
         var item = RequireItem(operation.ItemId);
@@ -539,15 +554,32 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     /// </remarks>
     private static bool IsDeletionOfVanishedContent(string kind, BaseItem item)
     {
-        if (!IsRemovalKind(kind) || string.IsNullOrEmpty(item.Path))
-        {
-            return false;
-        }
-
-        // Directory check included because Series/Season/BoxSet paths are
-        // folders; a present path of either shape means content is reachable
+        // Vanished means absent, or a capsule-shell phantom of a file-backed item
+        // (PermalinkCapsuleShell). A present file, or a directory of any other
+        // shape (Series/Season/BoxSet folders, DVD/BluRay), is reachable content
         // and the normal evidence route applies.
-        return !File.Exists(item.Path) && !Directory.Exists(item.Path);
+        return IsRemovalKind(kind) && PermalinkCapsuleShell.IsVanishedContent(item);
+    }
+
+    /// <summary>
+    /// Removes the now-meaningless shell left where a vanished file's path used to be.
+    /// </summary>
+    /// <param name="itemPath">The removed item's recorded path.</param>
+    private void RemoveCapsuleShellDebris(string? itemPath)
+    {
+        try
+        {
+            if (PermalinkCapsuleShell.TryRemove(itemPath))
+            {
+                _logger.LogInformation("Removed capsule-shell phantom at {Path}", itemPath);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // The deletion itself is already committed; leftover debris is
+            // re-detected and retried by the next sanctioned delete of this path.
+            _logger.LogWarning(exception, "Could not remove capsule-shell phantom at {Path}", itemPath);
+        }
     }
 
     /// <summary>

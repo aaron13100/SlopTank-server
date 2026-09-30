@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30.
 #pragma warning disable CS1591
 #pragma warning disable CA5394
 
@@ -630,6 +630,17 @@ namespace Emby.Server.Implementations.Library
 
         private void DeleteItemPath(BaseItem item, bool isRequiredForDelete, FileSystemMetadata fileSystemInfo)
         {
+            // A file-backed item whose path is a capsule-shell phantom (c200) is a
+            // directory the file-delete below cannot remove (File.Delete on a
+            // directory is access-denied). Remove the shell itself, and only when it
+            // holds nothing but its own capsule.
+            if (!fileSystemInfo.IsDirectory
+                && string.Equals(item.Path, fileSystemInfo.FullName, StringComparison.Ordinal)
+                && Permalinks.PermalinkCapsuleShell.IsPhantomShell(item))
+            {
+                Permalinks.PermalinkCapsuleShell.TryRemove(fileSystemInfo.FullName);
+            }
+
             if (Directory.Exists(fileSystemInfo.FullName) || File.Exists(fileSystemInfo.FullName))
             {
                 try

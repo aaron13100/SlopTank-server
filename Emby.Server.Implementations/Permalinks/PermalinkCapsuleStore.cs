@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-30.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -51,7 +51,12 @@ internal sealed class PermalinkCapsuleStore
 
         if (!Directory.Exists(itemPath))
         {
-            _fileSystem.CreateDirectoryDurable(itemPath);
+            // Never manufacture a directory at a content path: that is the capsule-shell
+            // phantom generator (c200). Absent content means refuse.
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "content-unreachable",
+                $"Permalink content is unreachable at '{itemPath}'.");
         }
 
         return Path.Combine(

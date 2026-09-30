@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-03, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-03, 2026-09-08, 2026-09-09, 2026-10-01.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
 
 namespace Emby.Server.Implementations.Permalinks;
@@ -20,6 +21,7 @@ public sealed class PermalinkManager : IPermalinkManager
 {
     private readonly IPermalinkStore _store;
     private readonly PermalinkEvidence _evidence;
+    private readonly ILibraryManager _libraryManager;
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _itemLocks = new();
 
     /// <summary>
@@ -27,10 +29,15 @@ public sealed class PermalinkManager : IPermalinkManager
     /// </summary>
     /// <param name="store">The store.</param>
     /// <param name="evidence">The evidence.</param>
-    public PermalinkManager(IPermalinkStore store, PermalinkEvidence evidence)
+    /// <param name="libraryManager">The library manager, used to enumerate local alternate versions.</param>
+    public PermalinkManager(
+        IPermalinkStore store,
+        PermalinkEvidence evidence,
+        ILibraryManager libraryManager)
     {
         _store = store;
         _evidence = evidence;
+        _libraryManager = libraryManager;
     }
 
     /// <inheritdoc />
@@ -154,7 +161,7 @@ public sealed class PermalinkManager : IPermalinkManager
                 cancellationToken).ConfigureAwait(false);
         }
 
-        foreach (var child in series.GetRecursiveChildren().Where(IsContentItem))
+        foreach (var child in EnumerateContentDescendants(series))
         {
             var state = await EnsureCoreAsync(
                 child,
@@ -174,7 +181,7 @@ public sealed class PermalinkManager : IPermalinkManager
         CancellationToken cancellationToken)
     {
         var descendants = new List<(BaseItem, PermalinkStoredState)>();
-        foreach (var child in season.GetRecursiveChildren().Where(IsContentItem))
+        foreach (var child in EnumerateContentDescendants(season))
         {
             var state = await EnsureCoreAsync(
                 child,
@@ -186,6 +193,41 @@ public sealed class PermalinkManager : IPermalinkManager
         }
 
         return _evidence.ComputeDescendantManifest(descendants);
+    }
+
+    /// <summary>
+    /// Enumerates the content items an aggregate's descendant manifest covers:
+    /// every content descendant plus every local alternate version of each.
+    /// The library query behind <c>GetRecursiveChildren</c> hides alternates
+    /// (they carry a primary version id), so a file that gains a better sibling
+    /// would otherwise drop out of the manifest and read as member replacement
+    /// instead of growth. Linked alternate versions are user-linked across
+    /// folders and are not members of the aggregate, so they stay excluded.
+    /// </summary>
+    /// <param name="aggregate">The Series or Season.</param>
+    /// <returns>Content items deduplicated by id, primaries before their alternates.</returns>
+    private List<BaseItem> EnumerateContentDescendants(Folder aggregate)
+    {
+        var result = new Dictionary<Guid, BaseItem>();
+        foreach (var child in aggregate.GetRecursiveChildren().Where(IsContentItem))
+        {
+            result[child.Id] = child;
+            if (child is not Video video)
+            {
+                continue;
+            }
+
+            foreach (var alternateId in _libraryManager.GetLocalAlternateVersionIds(video))
+            {
+                if (!result.ContainsKey(alternateId)
+                    && _libraryManager.GetItemById(alternateId) is Video alternate)
+                {
+                    result[alternate.Id] = alternate;
+                }
+            }
+        }
+
+        return result.Values.ToList();
     }
 
     private async Task<PermalinkEvidenceResult> ComputeBoxSetAsync(

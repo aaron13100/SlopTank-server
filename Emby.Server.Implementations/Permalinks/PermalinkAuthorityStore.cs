@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-09-03, 2026-09-09, 2026-09-10, 2026-09-19, 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-09-03, 2026-09-09, 2026-09-10, 2026-09-19, 2026-10-01, 2026-10-07.
 using System;
 using System.Globalization;
 using System.IO;
@@ -492,6 +492,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// <param name="verb">The exact SQL write verb.</param>
     /// <param name="primaryKey">The canonical primary-key text.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
+    /// <param name="transaction">The optional transaction that owns the authorization row.</param>
     /// <returns>The capability scope, which removes its authorization on disposal.</returns>
     internal async Task<PermalinkAuthorityWriteScope> BeginAuthorizedWriteAsync(
         SqliteConnection connection,
@@ -499,7 +500,8 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         string table,
         string verb,
         string primaryKey,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        SqliteTransaction? transaction = null)
     {
         var scope = _capability.Begin(
             connection,
@@ -509,6 +511,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
             primaryKey,
             PermalinkAuthoritySchema.SupportedProtocolEpoch);
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO AuthorityWriteAuthorizations
                 (nonce, operation_id, table_name, verb, primary_key, epoch, mac, created_at)
@@ -528,6 +531,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
             scope.AddRelease(() =>
             {
                 using var cleanup = connection.CreateCommand();
+                cleanup.Transaction = transaction;
                 cleanup.CommandText = "DELETE FROM AuthorityWriteAuthorizations WHERE nonce = $nonce";
                 cleanup.Parameters.AddWithValue("$nonce", scope.Nonce);
                 _ = cleanup.ExecuteNonQuery();

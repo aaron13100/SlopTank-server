@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01.
 using System;
 using System.Linq;
 using System.Threading;
@@ -89,6 +89,15 @@ internal static class PermalinkAuthoritySchema
                 enforcement_enabled INTEGER NOT NULL DEFAULT 0
                     CHECK(enforcement_enabled IN (0, 1)));
             INSERT OR IGNORE INTO AuthorityWriteProtection VALUES (1, 0);
+            CREATE TRIGGER IF NOT EXISTS protect_authority_write_protection_update
+            BEFORE UPDATE ON AuthorityWriteProtection BEGIN
+                SELECT CASE WHEN authority_counter_write() != 1
+                    THEN RAISE(ABORT, 'permalink-protection-control-write') END;
+            END;
+            CREATE TRIGGER IF NOT EXISTS protect_authority_write_protection_delete
+            BEFORE DELETE ON AuthorityWriteProtection BEGIN
+                SELECT RAISE(ABORT, 'permalink-protection-control-immutable');
+            END;
             CREATE TABLE IF NOT EXISTS AuthorityCounters (
                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
                 authority_sequence INTEGER NOT NULL CHECK(authority_sequence >= 0),
@@ -106,6 +115,41 @@ internal static class PermalinkAuthoritySchema
                 primary_key TEXT NOT NULL, epoch INTEGER NOT NULL,
                 mac TEXT NOT NULL, created_at TEXT NOT NULL,
                 UNIQUE(table_name, verb, primary_key));
+            CREATE TABLE IF NOT EXISTS PermalinkRootIdentities (
+                root_identity_id TEXT PRIMARY KEY,
+                generation INTEGER NOT NULL CHECK(generation > 0),
+                canonical_root TEXT NOT NULL,
+                attestation TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(canonical_root, generation));
+            CREATE TABLE IF NOT EXISTS PermalinkEvidenceRegistry (
+                registry_id TEXT PRIMARY KEY,
+                evidence_kind TEXT NOT NULL,
+                root_identity_id TEXT NOT NULL,
+                normalized_relative_path TEXT NOT NULL,
+                operation_id TEXT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
+            CREATE TABLE IF NOT EXISTS PermalinkWriterAdmissions (
+                admission_id TEXT PRIMARY KEY,
+                root_identity_id TEXT NOT NULL,
+                normalized_relative_path TEXT NOT NULL,
+                pinned_object_identity TEXT NOT NULL,
+                action TEXT NOT NULL,
+                snapshot_generation INTEGER NOT NULL,
+                authority_epoch INTEGER NOT NULL,
+                content_epoch INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('issued', 'started', 'completed', 'recovery-required')),
+                start_deadline_utc TEXT NOT NULL,
+                heartbeat_deadline_utc TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_PermalinkWriterAdmissions_ActivePath
+                ON PermalinkWriterAdmissions(root_identity_id, normalized_relative_path)
+                WHERE status IN ('issued', 'started', 'recovery-required');
             CREATE TABLE IF NOT EXISTS AnchorTokenCapsules (
                 anchor_token TEXT PRIMARY KEY, capsule_id TEXT NOT NULL,
                 binding_id TEXT NOT NULL, root_path TEXT NOT NULL,
@@ -216,7 +260,40 @@ internal static class PermalinkAuthoritySchema
             END;
             """;
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await InstallImmutableEvidenceAsync(connection, cancellationToken).ConfigureAwait(false);
         await InstallWriteProtectionAsync(connection, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task InstallImmutableEvidenceAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        string[] tables =
+        [
+            "SnapshotMetadata",
+            "PermalinkIssuances",
+            "FirstAliasClaims",
+            "ContentTransitionClaims",
+            "OperationDecisions",
+            "PathOperationDecisions",
+            "MutationClaims",
+            "CanonicalTransitionClaims",
+            "LegacyPredecessorMap"
+        ];
+        foreach (var table in tables)
+        {
+            foreach (var verb in new[] { "UPDATE", "DELETE" })
+            {
+                await using var trigger = connection.CreateCommand();
+                trigger.CommandText = $"""
+                    CREATE TRIGGER IF NOT EXISTS immutable_{table.ToLowerInvariant()}_{verb.ToLowerInvariant()}
+                    BEFORE {verb} ON {table} BEGIN
+                        SELECT RAISE(ABORT, 'permalink-immutable-evidence');
+                    END;
+                    """;
+                _ = await trigger.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     private static async Task InstallWriteProtectionAsync(
@@ -239,7 +316,10 @@ internal static class PermalinkAuthoritySchema
             ("LegacyPredecessorMap", "NEW.capsule_id || char(0) || NEW.predecessor_root"),
             ("PermalinkBindings", "NEW.PermalinkId || char(0) || NEW.ItemId"),
             ("PermalinkPendingMigration", "NEW.name"),
-            ("PermalinkOperationArchiveCandidates", "NEW.operation_id")
+            ("PermalinkOperationArchiveCandidates", "NEW.operation_id"),
+            ("PermalinkRootIdentities", "NEW.root_identity_id"),
+            ("PermalinkEvidenceRegistry", "NEW.registry_id"),
+            ("PermalinkWriterAdmissions", "NEW.admission_id")
         };
         foreach (var (table, newKey) in tables)
         {

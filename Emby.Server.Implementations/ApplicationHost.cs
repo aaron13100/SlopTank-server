@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-06, 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-09-27, 2026-09-28, 2026-10-01, 2026-10-04, 2026-10-06, 2026-10-07.
 #nullable disable
 
 #pragma warning disable CS1591
@@ -577,6 +577,9 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkAuthoritySnapshotPublisher>();
             serviceCollection.AddSingleton<IPermalinkAuthorityGenerationOracle>(provider =>
                 provider.GetRequiredService<PermalinkAuthoritySnapshotPublisher>());
+            serviceCollection.AddSingleton<PermalinkWriterAdmissionService>();
+            serviceCollection.AddSingleton<IPermalinkWriterAdmissionService>(provider =>
+                provider.GetRequiredService<PermalinkWriterAdmissionService>());
             serviceCollection.AddSingleton<PermalinkTransitionStore>();
             serviceCollection.AddSingleton<PermalinkBindingIndex>();
             serviceCollection.AddSingleton<PermalinkCapsuleStore>();

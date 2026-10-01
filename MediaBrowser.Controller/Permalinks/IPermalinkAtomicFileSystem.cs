@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-09-09, 2026-09-16.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-09-09, 2026-09-16, 2026-10-01.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,12 +11,21 @@ namespace MediaBrowser.Controller.Permalinks;
 public interface IPermalinkAtomicFileSystem
 {
     /// <summary>
-    /// Gets or durably creates the persistent random anchor token on a filesystem object.
+    /// Generates a fresh random anchor token without touching any filesystem object. The token
+    /// is written only by <see cref="AssignAnchorToken"/>, under a path lease and after an
+    /// anchor-intent registry row has committed.
+    /// </summary>
+    /// <returns>The new anchor token.</returns>
+    string NewAnchorToken();
+
+    /// <summary>
+    /// Removes the anchor token from a filesystem object only when it still equals the supplied
+    /// token (compare-and-remove), so an anchor some other writer installed is never destroyed.
     /// </summary>
     /// <param name="path">The filesystem object path.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>The persistent anchor token.</returns>
-    Task<string> GetOrCreateAnchorTokenAsync(string path, CancellationToken cancellationToken);
+    /// <param name="anchorToken">The token this caller wrote.</param>
+    /// <returns><see langword="true"/> when the anchor was removed.</returns>
+    bool RemoveAnchorTokenIfEquals(string path, string anchorToken);
 
     /// <summary>
     /// Reads an existing persistent anchor token without creating one.

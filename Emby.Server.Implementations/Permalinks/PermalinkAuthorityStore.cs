@@ -214,14 +214,33 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// <param name="candidate">The candidate.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task representing the asynchronous operation.</returns>
-    public async Task<PermalinkGenesisReservation> ReserveGenesisAsync(
+    public Task<PermalinkGenesisReservation> ReserveGenesisAsync(
         PermalinkGenesisCandidate candidate,
+        CancellationToken cancellationToken)
+        => ReserveGenesisAsync(candidate, null, cancellationToken);
+
+    /// <summary>
+    /// Atomically elects one genesis for a stable anchor, running per-key rechecks first inside
+    /// the same transaction so a refusal rolls the election back.
+    /// </summary>
+    /// <param name="candidate">The candidate.</param>
+    /// <param name="recheck">The recheck callback, or null for none.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    internal async Task<PermalinkGenesisReservation> ReserveGenesisAsync(
+        PermalinkGenesisCandidate candidate,
+        Func<SqliteConnection, SqliteTransaction, CancellationToken, Task>? recheck,
         CancellationToken cancellationToken)
     {
         await EnsureProvisionedAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = (SqliteTransaction)await connection
             .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        if (recheck is not null)
+        {
+            await recheck(connection, transaction, cancellationToken).ConfigureAwait(false);
+        }
+
         await using (var insert = connection.CreateCommand())
         {
             insert.Transaction = transaction;
@@ -275,6 +294,25 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         await reader.DisposeAsync().ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return reservation;
+    }
+
+    /// <summary>
+    /// Runs a callback inside its own authority transaction and commits it; a throw rolls back.
+    /// Used by Ensure when the capsule already exists, so the per-key rechecks still run.
+    /// </summary>
+    /// <param name="callback">The work to run inside the transaction.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the transaction.</returns>
+    internal async Task SettleAsync(
+        Func<SqliteConnection, SqliteTransaction, CancellationToken, Task> callback,
+        CancellationToken cancellationToken)
+    {
+        await EnsureProvisionedAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection
+            .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await callback(connection, transaction, cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task EnsureProvisionedAsync(CancellationToken cancellationToken)

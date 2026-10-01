@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-10-01.
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -23,6 +23,7 @@ internal sealed class PermalinkStore : IPermalinkStore
     private readonly PermalinkDocumentFactory _documents;
     private readonly PermalinkTransitionPublisher _publisher;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
+    private readonly PermalinkPathLeaseFactory _leases;
     private readonly ILogger<PermalinkStore> _logger;
     private readonly string[] _contentRoots;
 
@@ -36,6 +37,7 @@ internal sealed class PermalinkStore : IPermalinkStore
     /// <param name="documents">The documents.</param>
     /// <param name="publisher">The publisher.</param>
     /// <param name="fileSystem">The durable permalink filesystem.</param>
+    /// <param name="leases">The path lease factory.</param>
     /// <param name="logger">The logger, used for the per-step ensure timing.</param>
     /// <param name="configuration">The server configuration.</param>
     public PermalinkStore(
@@ -46,6 +48,7 @@ internal sealed class PermalinkStore : IPermalinkStore
         PermalinkDocumentFactory documents,
         PermalinkTransitionPublisher publisher,
         IPermalinkAtomicFileSystem fileSystem,
+        PermalinkPathLeaseFactory leases,
         ILogger<PermalinkStore> logger,
         IConfiguration configuration)
     {
@@ -56,6 +59,7 @@ internal sealed class PermalinkStore : IPermalinkStore
         _documents = documents;
         _publisher = publisher;
         _fileSystem = fileSystem;
+        _leases = leases;
         _logger = logger;
         _contentRoots = configuration.GetSection("Permalinks:ContentRoots")
             .GetChildren()
@@ -67,21 +71,22 @@ internal sealed class PermalinkStore : IPermalinkStore
     }
 
     /// <inheritdoc />
-    public async Task PrepareContentIdentityAsync(
+    public async Task<IPermalinkPathLease> BeginContentIdentityAsync(
         string path,
         string itemKind,
         CancellationToken cancellationToken)
     {
         await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
         EnsureReachableOrVirtualSeason(path, itemKind);
-        _ = ResolveRoot(path);
-        _ = await _fileSystem.GetOrCreateAnchorTokenAsync(path, cancellationToken)
+        var root = ResolveRoot(path);
+        return await _leases.BeginAsync(root, path, IsVirtualSeason(path, itemKind), cancellationToken)
             .ConfigureAwait(false);
     }
 
     /// <inheritdoc />
     public async Task<PermalinkStoredState> EnsureAsync(
         PermalinkStoreRequest request,
+        IPermalinkPathLease lease,
         CancellationToken cancellationToken)
     {
         // Temporary per-step timing. Seven hypotheses about where an ensure spends
@@ -98,9 +103,19 @@ internal sealed class PermalinkStore : IPermalinkStore
         stepWatch.Restart();
         EnsureReachableOrVirtualSeason(request.Path, request.ItemKind);
         var root = ResolveRoot(request.Path);
-        var anchorToken = await _fileSystem.GetOrCreateAnchorTokenAsync(
-            request.Path,
-            cancellationToken).ConfigureAwait(false);
+        var pathLease = lease as PermalinkPathLease
+            ?? throw Conflict("lease-invalid", "Ensure requires a lease from BeginContentIdentityAsync.");
+        if (!string.Equals(
+                pathLease.NormalizedRelativePath,
+                PermalinkPathKey.Normalize(root, request.Path),
+                StringComparison.Ordinal))
+        {
+            throw Conflict(
+                "lease-path-mismatch",
+                $"The lease covers '{pathLease.NormalizedRelativePath}', not '{request.Path}'.");
+        }
+
+        var anchorToken = pathLease.AnchorToken;
         tAnchor = stepWatch.ElapsedMilliseconds;
         stepWatch.Restart();
 
@@ -128,11 +143,14 @@ internal sealed class PermalinkStore : IPermalinkStore
                 request,
                 root,
                 anchorToken,
+                pathLease,
                 cancellationToken).ConfigureAwait(false);
         }
         else
         {
             ValidateAdoptionCandidate(reservation, request);
+            await _authority.SettleAsync(pathLease.RecheckAndCommitAsync, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         tReservation = stepWatch.ElapsedMilliseconds;
@@ -213,6 +231,7 @@ internal sealed class PermalinkStore : IPermalinkStore
         PermalinkStoreRequest request,
         string root,
         string anchorToken,
+        PermalinkPathLease lease,
         CancellationToken cancellationToken)
     {
         var issuance = request.PublishAlias && request.PreferredAlias is null
@@ -233,6 +252,7 @@ internal sealed class PermalinkStore : IPermalinkStore
             issuance);
         return await _authority.ReserveGenesisAsync(
             candidate,
+            lease.RecheckAndCommitAsync,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -243,10 +263,7 @@ internal sealed class PermalinkStore : IPermalinkStore
             return;
         }
 
-        if (itemKind == "Season"
-            && path.Contains(
-                $"{Path.DirectorySeparatorChar}permalink-virtual-seasons{Path.DirectorySeparatorChar}",
-                StringComparison.Ordinal))
+        if (IsVirtualSeason(path, itemKind))
         {
             _fileSystem.CreateDirectoryDurable(path);
             return;
@@ -257,6 +274,12 @@ internal sealed class PermalinkStore : IPermalinkStore
             "content-unreachable",
             $"Permalink content is unreachable at '{path}'.");
     }
+
+    private static bool IsVirtualSeason(string path, string itemKind)
+        => itemKind == "Season"
+            && path.Contains(
+                $"{Path.DirectorySeparatorChar}permalink-virtual-seasons{Path.DirectorySeparatorChar}",
+                StringComparison.Ordinal);
 
     private string ResolveRoot(string path)
     {

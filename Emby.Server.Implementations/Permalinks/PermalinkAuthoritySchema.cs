@@ -150,6 +150,43 @@ internal static class PermalinkAuthoritySchema
             CREATE UNIQUE INDEX IF NOT EXISTS IX_PermalinkWriterAdmissions_ActivePath
                 ON PermalinkWriterAdmissions(root_identity_id, normalized_relative_path)
                 WHERE status IN ('issued', 'started', 'recovery-required');
+            -- Path reservations (P6): one ACTIVE row per (root, path) key. Rows are never
+            -- deleted; a released or consumed row stays so MAX(generation) for the key
+            -- exposes an insert-then-release that happened inside an evidence gap.
+            CREATE TABLE IF NOT EXISTS PathReservations (
+                reservation_id TEXT PRIMARY KEY,
+                root_identity_id TEXT NOT NULL,
+                normalized_relative_path TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('restore', 'successor', 'path-mutation')),
+                operation_id TEXT NOT NULL,
+                capsule_id TEXT NULL,
+                status TEXT NOT NULL CHECK(status IN ('active', 'consumed', 'released')),
+                generation INTEGER NOT NULL CHECK(generation > 0),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_PathReservations_ActiveKey
+                ON PathReservations(root_identity_id, normalized_relative_path)
+                WHERE status = 'active';
+            CREATE INDEX IF NOT EXISTS IX_PathReservations_KeyGeneration
+                ON PathReservations(root_identity_id, normalized_relative_path, generation);
+            -- Pending supersession slots (P6): a detached capsule's anchor waiting for a
+            -- successor at the key. One pending slot per key; one slot per (capsule, anchor).
+            CREATE TABLE IF NOT EXISTS PendingSupersessionSlots (
+                slot_id TEXT PRIMARY KEY,
+                root_identity_id TEXT NOT NULL,
+                normalized_relative_path TEXT NOT NULL,
+                detached_capsule_id TEXT NOT NULL,
+                anchor_token TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending', 'consumed')),
+                consumed_by_operation_id TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(detached_capsule_id, anchor_token),
+                FOREIGN KEY(root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_PendingSupersessionSlots_PendingKey
+                ON PendingSupersessionSlots(root_identity_id, normalized_relative_path)
+                WHERE status = 'pending';
             CREATE TABLE IF NOT EXISTS AnchorTokenCapsules (
                 anchor_token TEXT PRIMARY KEY, capsule_id TEXT NOT NULL,
                 binding_id TEXT NOT NULL, root_path TEXT NOT NULL,
@@ -319,7 +356,9 @@ internal static class PermalinkAuthoritySchema
             ("PermalinkOperationArchiveCandidates", "NEW.operation_id"),
             ("PermalinkRootIdentities", "NEW.root_identity_id"),
             ("PermalinkEvidenceRegistry", "NEW.registry_id"),
-            ("PermalinkWriterAdmissions", "NEW.admission_id")
+            ("PermalinkWriterAdmissions", "NEW.admission_id"),
+            ("PathReservations", "NEW.reservation_id"),
+            ("PendingSupersessionSlots", "NEW.slot_id")
         };
         foreach (var (table, newKey) in tables)
         {

@@ -12,6 +12,7 @@ namespace Jellyfin.Api.Controllers;
 
 /// <summary>Authenticated external-writer admission endpoints.</summary>
 [Authorize(Policy = Policies.RequiresElevation)]
+[Route("")]
 public sealed class PermalinkWriterAdmissionController : BaseJellyfinApiController
 {
     private readonly IPermalinkWriterAdmissionService _admissions;
@@ -29,40 +30,60 @@ public sealed class PermalinkWriterAdmissionController : BaseJellyfinApiControll
     /// <returns>The issued admission.</returns>
     [HttpPost("Permalinks/Authority/WriterAdmissions")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<PermalinkWriterAdmission>> Issue(
+    public Task<ActionResult<PermalinkWriterAdmission>> Issue(
         [FromBody] PermalinkWriterAdmissionRequest request,
         CancellationToken cancellationToken)
-        => Ok(await _admissions.IssueAsync(request, cancellationToken).ConfigureAwait(false));
+        => ExecuteAsync(() => _admissions.IssueAsync(request, cancellationToken));
 
     /// <summary>Reads the current admission immediately before publication.</summary>
     /// <param name="admissionId">The admission identifier.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The current admission state.</returns>
     [HttpGet("Permalinks/Authority/WriterAdmissions/{admissionId:guid}")]
-    public async Task<ActionResult<PermalinkWriterAdmission>> Poll(Guid admissionId, CancellationToken cancellationToken)
-        => Ok(await _admissions.PollAsync(admissionId, cancellationToken).ConfigureAwait(false));
+    public Task<ActionResult<PermalinkWriterAdmission>> Poll(Guid admissionId, CancellationToken cancellationToken)
+        => ExecuteAsync(() => _admissions.PollAsync(admissionId, cancellationToken));
 
     /// <summary>Starts an issued admission.</summary>
     /// <param name="admissionId">The admission identifier.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The started admission state.</returns>
     [HttpPost("Permalinks/Authority/WriterAdmissions/{admissionId:guid}/Start")]
-    public async Task<ActionResult<PermalinkWriterAdmission>> Start(Guid admissionId, CancellationToken cancellationToken)
-        => Ok(await _admissions.StartAsync(admissionId, cancellationToken).ConfigureAwait(false));
+    public Task<ActionResult<PermalinkWriterAdmission>> Start(Guid admissionId, CancellationToken cancellationToken)
+        => ExecuteAsync(() => _admissions.StartAsync(admissionId, cancellationToken));
 
     /// <summary>Renews the active writer heartbeat.</summary>
     /// <param name="admissionId">The admission identifier.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The renewed admission state.</returns>
     [HttpPost("Permalinks/Authority/WriterAdmissions/{admissionId:guid}/Heartbeat")]
-    public async Task<ActionResult<PermalinkWriterAdmission>> Heartbeat(Guid admissionId, CancellationToken cancellationToken)
-        => Ok(await _admissions.HeartbeatAsync(admissionId, cancellationToken).ConfigureAwait(false));
+    public Task<ActionResult<PermalinkWriterAdmission>> Heartbeat(Guid admissionId, CancellationToken cancellationToken)
+        => ExecuteAsync(() => _admissions.HeartbeatAsync(admissionId, cancellationToken));
 
     /// <summary>Completes an active writer admission.</summary>
     /// <param name="admissionId">The admission identifier.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The terminal admission state.</returns>
     [HttpPost("Permalinks/Authority/WriterAdmissions/{admissionId:guid}/Complete")]
-    public async Task<ActionResult<PermalinkWriterAdmission>> Complete(Guid admissionId, CancellationToken cancellationToken)
-        => Ok(await _admissions.CompleteAsync(admissionId, cancellationToken).ConfigureAwait(false));
+    public Task<ActionResult<PermalinkWriterAdmission>> Complete(Guid admissionId, CancellationToken cancellationToken)
+        => ExecuteAsync(() => _admissions.CompleteAsync(admissionId, cancellationToken));
+
+    private async Task<ActionResult<PermalinkWriterAdmission>> ExecuteAsync(
+        Func<Task<PermalinkWriterAdmission>> action)
+    {
+        try
+        {
+            return Ok(await action().ConfigureAwait(false));
+        }
+        catch (PermalinkException exception)
+        {
+            return Problem(
+                detail: exception.Message,
+                statusCode: exception.Kind is PermalinkErrorKind.Unavailable
+                    or PermalinkErrorKind.Corrupt
+                    or PermalinkErrorKind.VersionRefused
+                    ? StatusCodes.Status503ServiceUnavailable
+                    : StatusCodes.Status409Conflict,
+                title: exception.Code);
+        }
+    }
 }

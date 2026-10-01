@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-01.
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common.Api;
@@ -11,6 +11,7 @@ namespace Jellyfin.Api.Controllers;
 
 /// <summary>Authenticated permalink authority freshness oracle.</summary>
 [Authorize(Policy = Policies.RequiresElevation)]
+[Route("")]
 public sealed class PermalinkAuthorityController : BaseJellyfinApiController
 {
     private readonly IPermalinkAuthorityGenerationOracle _oracle;

@@ -13,6 +13,7 @@ namespace Emby.Server.Implementations.Permalinks;
 /// <summary>Persists fail-closed, single-use external writer admissions.</summary>
 internal sealed class PermalinkWriterAdmissionService : IPermalinkWriterAdmissionService
 {
+    private const int SqliteUniqueConstraintExtendedCode = 2067;
     private static readonly TimeSpan StartLease = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan HeartbeatLease = TimeSpan.FromSeconds(15);
     private static readonly string[] AllowedActions = ["replace-media", "replace-path"];
@@ -26,13 +27,21 @@ internal sealed class PermalinkWriterAdmissionService : IPermalinkWriterAdmissio
     }
 
     /// <inheritdoc />
-    public async Task<PermalinkWriterAdmission> IssueAsync(
+    public Task<PermalinkWriterAdmission> IssueAsync(
         PermalinkWriterAdmissionRequest request,
         CancellationToken cancellationToken)
     {
         ValidateRequest(request);
+        return GuardStoreAsync(() => IssueCoreAsync(request, cancellationToken), cancellationToken);
+    }
+
+    private async Task<PermalinkWriterAdmission> IssueCoreAsync(
+        PermalinkWriterAdmissionRequest request,
+        CancellationToken cancellationToken)
+    {
         var now = _timeProvider.GetUtcNow();
         var admissionId = Guid.NewGuid();
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var (contentEpoch, latestGeneration) = await ReadFreshnessAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
@@ -79,7 +88,7 @@ internal sealed class PermalinkWriterAdmissionService : IPermalinkWriterAdmissio
                     throw Conflict("writer-admission-unknown-root", "The requested root identity is not registered.");
                 }
             }
-            catch (SqliteException exception) when (exception.SqliteErrorCode == 19)
+            catch (SqliteException exception) when (exception.SqliteExtendedErrorCode == SqliteUniqueConstraintExtendedCode)
             {
                 throw Conflict("writer-admission-path-reserved", "The canonical path already has an active writer reservation.", exception);
             }
@@ -113,12 +122,43 @@ internal sealed class PermalinkWriterAdmissionService : IPermalinkWriterAdmissio
     public Task<PermalinkWriterAdmission> CompleteAsync(Guid admissionId, CancellationToken cancellationToken)
         => TransitionAsync(admissionId, "complete", cancellationToken);
 
-    private async Task<PermalinkWriterAdmission> TransitionAsync(
+    private Task<PermalinkWriterAdmission> TransitionAsync(
+        Guid admissionId,
+        string operation,
+        CancellationToken cancellationToken)
+        => GuardStoreAsync(() => TransitionCoreAsync(admissionId, operation, cancellationToken), cancellationToken);
+
+    /// <summary>Converts any store or IO failure into a typed fail-closed error that keeps its cause.</summary>
+    private static async Task<PermalinkWriterAdmission> GuardStoreAsync(
+        Func<Task<PermalinkWriterAdmission>> action,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await action().ConfigureAwait(false);
+        }
+        catch (PermalinkException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is SqliteException or IOException or InvalidDataException or FormatException)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "writer-admission-store-failure",
+                $"The writer admission store failed closed ({exception.GetType().Name}: {exception.Message}).",
+                exception);
+        }
+    }
+
+    private async Task<PermalinkWriterAdmission> TransitionCoreAsync(
         Guid admissionId,
         string operation,
         CancellationToken cancellationToken)
     {
         var now = _timeProvider.GetUtcNow();
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var row = await ReadAsync(connection, transaction, admissionId, cancellationToken).ConfigureAwait(false)
@@ -252,7 +292,7 @@ internal sealed class PermalinkWriterAdmissionService : IPermalinkWriterAdmissio
             || string.IsNullOrWhiteSpace(request.NormalizedRelativePath)
             || Path.IsPathRooted(request.NormalizedRelativePath)
             || request.NormalizedRelativePath.Contains('\\', StringComparison.Ordinal)
-            || request.NormalizedRelativePath.StartsWith("/", StringComparison.Ordinal)
+            || request.NormalizedRelativePath.StartsWith('/')
             || request.NormalizedRelativePath.Split('/').Any(segment => segment is "." or ".." or ""))
         {
             throw Conflict("writer-admission-invalid", "The writer admission request is incomplete or not canonical-relative.");

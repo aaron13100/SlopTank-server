@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
 #pragma warning disable CA1068, CS1591
 
 using System;
@@ -7,6 +8,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Controller.Chapters;
 using MediaBrowser.Controller.Configuration;
@@ -74,7 +76,40 @@ namespace MediaBrowser.Providers.MediaInfo
             _mediaStreamRepository = mediaStreamRepository;
         }
 
+        /// <summary>
+        /// Probes a video and records the outcome on <see cref="BaseItem.IngestState"/>: Complete once the
+        /// streams are saved, ProbeFailed when the probe cannot produce them. A failure is logged with the
+        /// item path and rethrown, so the caller still sees it; the persisted state is what keeps the item
+        /// hidden from user-facing listings and queued for a retry on the next refresh.
+        /// </summary>
+        /// <typeparam name="T">The video type.</typeparam>
+        /// <param name="item">The item to probe.</param>
+        /// <param name="options">The refresh options.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns>The update type.</returns>
         public async Task<ItemUpdateType> ProbeVideo<T>(
+            T item,
+            MetadataRefreshOptions options,
+            CancellationToken cancellationToken)
+            where T : Video
+        {
+            try
+            {
+                return await ProbeVideoCore(item, options, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                item.IngestState = IngestState.ProbeFailed;
+                _logger.LogError(ex, "Probe failed for {Path}; item stays hidden (IngestState ProbeFailed) and is retried on the next refresh", item.Path);
+                throw;
+            }
+        }
+
+        private async Task<ItemUpdateType> ProbeVideoCore<T>(
             T item,
             MetadataRefreshOptions options,
             CancellationToken cancellationToken)
@@ -95,6 +130,7 @@ namespace MediaBrowser.Providers.MediaInfo
                     if (vobs.Count == 0)
                     {
                         _logger.LogError("No playable .vob files found in DVD structure, skipping FFprobe.");
+                        item.IngestState = IngestState.ProbeFailed;
                         return ItemUpdateType.MetadataImport;
                     }
 
@@ -128,6 +164,7 @@ namespace MediaBrowser.Providers.MediaInfo
                     if (blurayDiscInfo is null || blurayDiscInfo.Files.Length == 0)
                     {
                         _logger.LogError("No playable .m2ts files found in Blu-ray structure, skipping FFprobe.");
+                        item.IngestState = IngestState.ProbeFailed;
                         return ItemUpdateType.MetadataImport;
                     }
 
@@ -272,6 +309,9 @@ namespace MediaBrowser.Providers.MediaInfo
             _mediaStreamRepository.SaveMediaStreams(video.Id, mediaStreams, cancellationToken);
 
             _mediaAttachmentRepository.SaveMediaAttachments(video.Id, mediaAttachments, cancellationToken);
+
+            // The streams are persisted: from here the item is playable and may be listed.
+            video.IngestState = IngestState.Complete;
 
             if (options.MetadataRefreshMode == MetadataRefreshMode.FullRefresh
                 || options.MetadataRefreshMode == MetadataRefreshMode.Default)

@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
 #nullable disable
 
 #pragma warning disable CS1591, SA1401
@@ -136,6 +137,14 @@ namespace MediaBrowser.Controller.Entities
 
         [JsonIgnore]
         public bool IsVirtualItem { get; set; }
+
+        /// <summary>
+        /// Gets or sets how far this item has progressed through ingest. Persisted in its own column
+        /// (not the JSON blob). Anything other than Complete is hidden from user-facing listings.
+        /// </summary>
+        /// <value>The ingest state.</value>
+        [JsonIgnore]
+        public IngestState IngestState { get; set; }
 
         /// <summary>
         /// Gets or sets the album.

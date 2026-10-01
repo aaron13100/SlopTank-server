@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
 #pragma warning disable RS0030 // Do not use banned APIs
 #pragma warning disable CA1304 // Specify CultureInfo
 #pragma warning disable CA1311 // Specify a culture or use an invariant version
@@ -396,6 +397,26 @@ public sealed partial class BaseItemRepository
     }
 
     /// <summary>
+    /// Hides items whose media has not been probed (IngestState other than Complete) from user-scoped
+    /// queries. Queries without a user, and queries that set <see cref="InternalItemsQuery.IncludeIncompleteIngest"/>,
+    /// keep seeing every row, so a scan still finds its own Pending children and cannot duplicate them.
+    /// Applied by both TranslateQuery and ApplyAccessFiltering because several listings (counts, next-up,
+    /// descendants) reach the access filter without going through TranslateQuery.
+    /// </summary>
+    /// <param name="baseQuery">The query to filter.</param>
+    /// <param name="filter">The caller's filter.</param>
+    /// <returns>The query, restricted to Complete items when the caller is user-scoped.</returns>
+    private static IQueryable<BaseItemEntity> ApplyIngestVisibility(IQueryable<BaseItemEntity> baseQuery, InternalItemsQuery filter)
+    {
+        if (filter.User is null || filter.IncludeIncompleteIngest)
+        {
+            return baseQuery;
+        }
+
+        return baseQuery.Where(e => e.IngestState == IngestState.Complete);
+    }
+
+    /// <summary>
     /// Applies user access filtering to a query.
     /// Includes TopParentIds, parental rating, and tag filtering.
     /// </summary>
@@ -405,6 +426,8 @@ public sealed partial class BaseItemRepository
         IQueryable<BaseItemEntity> baseQuery,
         InternalItemsQuery filter)
     {
+        baseQuery = ApplyIngestVisibility(baseQuery, filter);
+
         // Apply TopParentIds filtering (library folder access)
         if (filter.TopParentIds.Length > 0)
         {

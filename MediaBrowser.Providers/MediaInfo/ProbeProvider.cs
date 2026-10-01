@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
 #nullable disable
 
 using System;
@@ -7,6 +8,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Emby.Naming.Common;
+using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Chapters;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
@@ -120,9 +122,41 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <inheritdoc />
         public int Order => 100;
 
+        /// <summary>
+        /// Gets a value indicating whether this provider probes the given item at all. This is the single
+        /// source of truth for "this item's media is probed after it is created": library creation uses it
+        /// to mark such items <see cref="IngestState.Pending"/> until the probe has run.
+        /// </summary>
+        /// <param name="item">The item.</param>
+        /// <returns><c>true</c> when a file-backed, non-virtual, probe-eligible item.</returns>
+        public static bool Supports(BaseItem item)
+        {
+            ArgumentNullException.ThrowIfNull(item);
+
+            if (item is not (Video or Audio))
+            {
+                return false;
+            }
+
+            if (item is Video video && (video.IsPlaceHolder || !video.IsCompleteMedia))
+            {
+                return false;
+            }
+
+            return !item.IsVirtualItem
+                && item.LocationType == LocationType.FileSystem
+                && item.IsFileProtocol;
+        }
+
         /// <inheritdoc />
         public bool HasChanged(BaseItem item, IDirectoryService directoryService)
         {
+            if (item.IngestState != IngestState.Complete)
+            {
+                _logger.LogDebug("Refreshing {ItemPath} because its media has not been probed (IngestState {State}).", item.Path, item.IngestState);
+                return true;
+            }
+
             var video = item as Video;
             if (video is null || video.VideoType == VideoType.VideoFile || video.VideoType == VideoType.Iso)
             {

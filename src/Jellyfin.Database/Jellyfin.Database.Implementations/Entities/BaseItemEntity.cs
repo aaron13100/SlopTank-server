@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
 #pragma warning disable CS1591 // Missing XML comment for publicly visible type or member
 #pragma warning disable CA2227 // Collection properties should be read only
 
@@ -109,6 +110,11 @@ public class BaseItemEntity
     public float? NormalizationGain { get; set; }
 
     public bool IsVirtualItem { get; set; }
+
+    /// <summary>
+    /// Gets or sets how far the item has progressed through ingest. Existing rows default to Complete.
+    /// </summary>
+    public Enums.IngestState IngestState { get; set; }
 
     public string? SeriesName { get; set; }
 

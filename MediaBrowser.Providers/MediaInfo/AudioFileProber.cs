@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -6,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ATL;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Controller.Chapters;
 using MediaBrowser.Controller.Entities;
@@ -89,6 +91,28 @@ namespace MediaBrowser.Providers.MediaInfo
             CancellationToken cancellationToken)
             where T : Audio
         {
+            try
+            {
+                return await ProbeCore(item, options, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                item.IngestState = IngestState.ProbeFailed;
+                _logger.LogError(ex, "Probe failed for {Path}; item stays hidden (IngestState ProbeFailed) and is retried on the next refresh", item.Path);
+                throw;
+            }
+        }
+
+        private async Task<ItemUpdateType> ProbeCore<T>(
+            T item,
+            MetadataRefreshOptions options,
+            CancellationToken cancellationToken)
+            where T : Audio
+        {
             var path = item.Path;
             var protocol = item.PathProtocol ?? MediaProtocol.File;
 
@@ -118,6 +142,8 @@ namespace MediaBrowser.Providers.MediaInfo
                 await FetchAsync(item, result, options, cancellationToken).ConfigureAwait(false);
             }
 
+            // Streams are saved (or a remote shortcut is deliberately not probed): the item may be listed.
+            item.IngestState = IngestState.Complete;
             return ItemUpdateType.MetadataImport;
         }
 

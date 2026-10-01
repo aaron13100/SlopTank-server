@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -73,6 +74,7 @@ public static class BaseItemMapper
         dto.LUFS = entity.LUFS;
         dto.NormalizationGain = entity.NormalizationGain;
         dto.IsVirtualItem = entity.IsVirtualItem;
+        dto.IngestState = entity.IngestState;
         dto.ExternalSeriesId = entity.ExternalSeriesId;
         dto.Tagline = entity.Tagline;
         dto.TotalBitrate = entity.TotalBitrate;
@@ -249,6 +251,7 @@ public static class BaseItemMapper
         entity.LUFS = dto.LUFS;
         entity.NormalizationGain = dto.NormalizationGain;
         entity.IsVirtualItem = dto.IsVirtualItem;
+        entity.IngestState = dto.IngestState;
         entity.ExternalSeriesId = dto.ExternalSeriesId;
         entity.Tagline = dto.Tagline;
         entity.TotalBitrate = dto.TotalBitrate;

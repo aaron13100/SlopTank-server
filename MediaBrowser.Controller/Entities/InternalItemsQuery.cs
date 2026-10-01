@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-09-09, 2026-10-01.
 #pragma warning disable CA1044, CA1819, CA2227, CS1591
 
 using System;
@@ -358,6 +358,15 @@ namespace MediaBrowser.Controller.Entities
         public bool? HasDeadParentId { get; set; }
 
         public bool? IsVirtualItem { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether a user-scoped query must also return items whose
+        /// ingest is not Complete (Pending or ProbeFailed). User-scoped queries hide those items by
+        /// default; internal callers that pass a <see cref="User"/> only for access filtering (scan,
+        /// delete, permalink bookkeeping) set this so they still see every persisted row. Queries
+        /// without a user always see every row regardless of this flag.
+        /// </summary>
+        public bool IncludeIncompleteIngest { get; set; }
 
         public Guid ParentId { get; set; }
 

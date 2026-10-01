@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
 #nullable disable
 
 #pragma warning disable CS1591
@@ -8,6 +9,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
@@ -107,6 +109,14 @@ namespace MediaBrowser.Providers.Manager
                 {
                     Logger.LogDebug("Refreshing {Type} {Item} because item.RequiresRefresh() returned true", typeof(TItemType).Name, item.Path ?? item.Name);
                 }
+            }
+
+            // An item whose media has not been probed (Pending, or ProbeFailed) is always due a refresh,
+            // so every scan retries the probe until it succeeds (c208).
+            if (!requiresRefresh && refreshOptions.MetadataRefreshMode != MetadataRefreshMode.None && item.IngestState != IngestState.Complete)
+            {
+                requiresRefresh = true;
+                Logger.LogDebug("Refreshing {Type} {Item} because its media has not been probed (IngestState {State})", typeof(TItemType).Name, item.Path ?? item.Name, item.IngestState);
             }
 
             if (refreshOptions.RemoveOldMetadata && refreshOptions.ReplaceAllImages)

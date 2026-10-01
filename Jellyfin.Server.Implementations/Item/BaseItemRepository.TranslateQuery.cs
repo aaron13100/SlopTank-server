@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-09-09, 2026-09-23.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-09-09, 2026-09-23, 2026-10-01.
 #pragma warning disable RS0030 // Do not use banned APIs
 #pragma warning disable CA1304 // Specify CultureInfo
 #pragma warning disable CA1309 // Use ordinal string comparison
@@ -45,6 +45,8 @@ public sealed partial class BaseItemRepository
         var minWidth = filter.MinWidth;
         var maxWidth = filter.MaxWidth;
         var now = DateTime.UtcNow;
+
+        baseQuery = ApplyIngestVisibility(baseQuery, filter);
 
         if (filter.IsHD.HasValue || filter.Is4K.HasValue)
         {

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01.
 #pragma warning disable CS1591
 #pragma warning disable CA5394
 
@@ -2417,6 +2417,16 @@ namespace Emby.Server.Implementations.Library
                             }
                         }
                     }
+                }
+            }
+
+            // An item whose media is probed after creation stays Pending (hidden from user-facing
+            // listings) until that probe succeeds. This is the only place Pending is assigned (c208).
+            foreach (var item in allItems)
+            {
+                if (item.DateLastRefreshed == DateTime.MinValue && MediaBrowser.Providers.MediaInfo.ProbeProvider.Supports(item))
+                {
+                    item.IngestState = IngestState.Pending;
                 }
             }
 

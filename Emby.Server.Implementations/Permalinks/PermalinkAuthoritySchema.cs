@@ -354,15 +354,33 @@ internal static class PermalinkAuthoritySchema
             var journalIncrement = table is "OperationDecisions" or "PathOperationDecisions"
                 ? "journal_counter + 1"
                 : "journal_counter";
+
+            // Writer admissions are lease bookkeeping, not content: they advance
+            // authority_sequence but never content_epoch, so heartbeats cannot cause
+            // content-epoch conflicts for unrelated paths or stop the absence watermark
+            // from converging.
+            var contentIncrement = table == "PermalinkWriterAdmissions"
+                ? "content_epoch"
+                : "content_epoch + 1";
             foreach (var verb in new[] { "INSERT", "UPDATE", "DELETE" })
             {
+                var counterName = $"count_{table.ToLowerInvariant()}_{verb.ToLowerInvariant()}";
+                if (contentIncrement == "content_epoch")
+                {
+                    // CREATE TRIGGER IF NOT EXISTS never replaces a trigger, so a database that
+                    // already carries the content-bumping definition must be repaired in place.
+                    await using var drop = connection.CreateCommand();
+                    drop.CommandText = $"DROP TRIGGER IF EXISTS {counterName}";
+                    _ = await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+
                 await using var counter = connection.CreateCommand();
                 counter.CommandText = $"""
-                    CREATE TRIGGER IF NOT EXISTS count_{table.ToLowerInvariant()}_{verb.ToLowerInvariant()}
+                    CREATE TRIGGER IF NOT EXISTS {counterName}
                     AFTER {verb} ON {table} BEGIN
                         UPDATE AuthorityCounters SET
                             authority_sequence = authority_sequence + 1,
-                            content_epoch = content_epoch + 1,
+                            content_epoch = {contentIncrement},
                             journal_counter = {journalIncrement}
                         WHERE singleton = 1;
                     END;

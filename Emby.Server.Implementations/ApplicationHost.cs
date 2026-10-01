@@ -574,6 +574,9 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IPermalinkAtomicFileSystem, MacPermalinkAtomicFileSystem>();
             serviceCollection.AddSingleton<IPermalinkAuthorityRootProvider, ConfigurationPermalinkAuthorityRootProvider>();
             serviceCollection.AddSingleton<PermalinkAuthorityStore>();
+            serviceCollection.AddSingleton<IPermalinkPathObjects, MacPermalinkPathObjects>();
+            serviceCollection.AddSingleton<PermalinkRootIdentityStore>();
+            serviceCollection.AddSingleton<PermalinkRootIdentityRegistry>();
             serviceCollection.AddSingleton<PermalinkAuthoritySnapshotPublisher>();
             serviceCollection.AddSingleton<IPermalinkAuthorityGenerationOracle>(provider =>
                 provider.GetRequiredService<PermalinkAuthoritySnapshotPublisher>());

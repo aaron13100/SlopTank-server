@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-01.
 using System;
 using System.Globalization;
 using System.IO;
@@ -77,8 +77,11 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IPermalinkAuthorityG
                 .ConfigureAwait(false);
             var metadata = await AllocateGenerationAsync(source, cancellationToken)
                 .ConfigureAwait(false);
-            await using var pinned = (SqliteTransaction)await source.BeginTransactionAsync(
-                cancellationToken).ConfigureAwait(false);
+            // The pin must be a DEFERRED (read) transaction. BeginTransactionAsync() defaults to
+            // Serializable, which Microsoft.Data.Sqlite maps to BEGIN IMMEDIATE, a write
+            // transaction; SQLite's online backup returns SQLITE_BUSY ("database is locked") at
+            // once when its source connection is in a write transaction.
+            await using var pinned = source.BeginTransaction(deferred: true);
             await PinGenerationAsync(source, pinned, metadata, cancellationToken)
                 .ConfigureAwait(false);
             var directoryName = $"g-{metadata.Generation.ToString(CultureInfo.InvariantCulture)}-{Guid.NewGuid():N}";

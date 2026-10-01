@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-07, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-07, 2026-09-09, 2026-10-01.
 using System;
 using System.IO;
 using System.Threading;
@@ -103,12 +103,20 @@ internal sealed class PermalinkMediaMutation
             item,
             source,
             cancellationToken).ConfigureAwait(false);
+        PermalinkStagingCopy.RemoveStaleTemporaries(staging);
         if (!File.Exists(staging))
         {
-            await CopyExclusiveAsync(source, staging, cancellationToken).ConfigureAwait(false);
             var anchor = _fileSystem.ReadAnchorToken(item.Path)
                 ?? throw Conflict("anchor-missing", $"Protected item '{item.Id}' lost its stable anchor.");
-            _fileSystem.AssignAnchorToken(staging, anchor);
+
+            // The anchor is applied to the complete temporary file before the atomic
+            // rename, so a staging file that exists is always complete and anchored.
+            await PermalinkStagingCopy.CopyAtomicAsync(
+                _fileSystem,
+                source,
+                staging,
+                temporary => _fileSystem.AssignAnchorToken(temporary, anchor),
+                cancellationToken).ConfigureAwait(false);
         }
 
         var desired = await _evidence.ComputeMediaReplacementAsync(
@@ -295,33 +303,6 @@ internal sealed class PermalinkMediaMutation
                 "prepared-old-mismatch",
                 "Live content no longer matches prepared-old evidence.");
         }
-    }
-
-    private async Task CopyExclusiveAsync(
-        string source,
-        string destination,
-        CancellationToken cancellationToken)
-    {
-        await using (var input = new FileStream(
-                         source,
-                         FileMode.Open,
-                         FileAccess.Read,
-                         FileShare.Read,
-                         1024 * 1024,
-                         FileOptions.Asynchronous | FileOptions.SequentialScan))
-        await using (var output = new FileStream(
-                         destination,
-                         FileMode.CreateNew,
-                         FileAccess.Write,
-                         FileShare.None,
-                         1024 * 1024,
-                         FileOptions.Asynchronous | FileOptions.WriteThrough))
-        {
-            await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
-            await output.FlushAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        _fileSystem.SyncFile(destination);
     }
 
     private async Task AppendContentAsync(

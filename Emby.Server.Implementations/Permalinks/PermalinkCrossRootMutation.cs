@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09, 2026-10-01.
 using System;
 using System.Globalization;
 using System.IO;
@@ -280,25 +280,17 @@ internal sealed class PermalinkCrossRootMutation
         }
     }
 
-    private async Task CopyExclusiveAsync(
+    private Task CopyExclusiveAsync(
         string source,
         string destination,
         CancellationToken cancellationToken)
     {
-        await using (var input = OpenRead(source))
-        await using (var output = new FileStream(
-                         destination,
-                         FileMode.CreateNew,
-                         FileAccess.Write,
-                         FileShare.None,
-                         1024 * 1024,
-                         FileOptions.Asynchronous | FileOptions.WriteThrough))
-        {
-            await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
-            await output.FlushAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        _fileSystem.SyncFile(destination);
+        return PermalinkStagingCopy.CopyAtomicAsync(
+            _fileSystem,
+            source,
+            destination,
+            beforePublish: null,
+            cancellationToken);
     }
 
     private static FileStream OpenRead(string path)

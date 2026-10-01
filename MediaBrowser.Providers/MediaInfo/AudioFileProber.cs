@@ -101,8 +101,7 @@ namespace MediaBrowser.Providers.MediaInfo
             }
             catch (Exception ex)
             {
-                item.IngestState = IngestState.ProbeFailed;
-                _logger.LogError(ex, "Probe failed for {Path}; item stays hidden (IngestState ProbeFailed) and is retried on the next refresh", item.Path);
+                ProbeProvider.MarkProbeFailed(item, _logger, ex);
                 throw;
             }
         }

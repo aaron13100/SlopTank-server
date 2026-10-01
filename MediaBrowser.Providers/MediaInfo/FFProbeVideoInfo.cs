@@ -78,7 +78,7 @@ namespace MediaBrowser.Providers.MediaInfo
 
         /// <summary>
         /// Probes a video and records the outcome on <see cref="BaseItem.IngestState"/>: Complete once the
-        /// streams are saved, ProbeFailed when the probe cannot produce them. A failure is logged with the
+        /// streams are saved, ProbeFailed when the probe cannot produce them (an already Complete item stays Complete). A failure is logged with the
         /// item path and rethrown, so the caller still sees it; the persisted state is what keeps the item
         /// hidden from user-facing listings and queued for a retry on the next refresh.
         /// </summary>
@@ -103,8 +103,7 @@ namespace MediaBrowser.Providers.MediaInfo
             }
             catch (Exception ex)
             {
-                item.IngestState = IngestState.ProbeFailed;
-                _logger.LogError(ex, "Probe failed for {Path}; item stays hidden (IngestState ProbeFailed) and is retried on the next refresh", item.Path);
+                ProbeProvider.MarkProbeFailed(item, _logger, ex);
                 throw;
             }
         }
@@ -129,8 +128,7 @@ namespace MediaBrowser.Providers.MediaInfo
                     // Return if no playable .vob files are found
                     if (vobs.Count == 0)
                     {
-                        _logger.LogError("No playable .vob files found in DVD structure, skipping FFprobe.");
-                        item.IngestState = IngestState.ProbeFailed;
+                        ProbeProvider.MarkProbeFailed(item, _logger, null, "no playable .vob files");
                         return ItemUpdateType.MetadataImport;
                     }
 
@@ -163,8 +161,7 @@ namespace MediaBrowser.Providers.MediaInfo
                     // Return if no playable .m2ts files are found
                     if (blurayDiscInfo is null || blurayDiscInfo.Files.Length == 0)
                     {
-                        _logger.LogError("No playable .m2ts files found in Blu-ray structure, skipping FFprobe.");
-                        item.IngestState = IngestState.ProbeFailed;
+                        ProbeProvider.MarkProbeFailed(item, _logger, null, "no playable .m2ts files");
                         return ItemUpdateType.MetadataImport;
                     }
 

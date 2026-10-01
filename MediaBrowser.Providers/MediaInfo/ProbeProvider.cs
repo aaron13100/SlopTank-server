@@ -148,6 +148,40 @@ namespace MediaBrowser.Providers.MediaInfo
                 && item.IsFileProtocol;
         }
 
+        /// <summary>
+        /// Records a failed probe on the item. This is the single place the failure transition lives:
+        /// <see cref="IngestState.Pending"/> becomes <see cref="IngestState.ProbeFailed"/> (hidden, retried on
+        /// the next refresh) and ProbeFailed stays ProbeFailed. An item that is already
+        /// <see cref="IngestState.Complete"/> stays Complete, because its previously probed streams are still
+        /// valid and a transient probe failure (contended volume, load) must not hide a working item.
+        /// </summary>
+        /// <param name="item">The item whose probe failed.</param>
+        /// <param name="logger">The logger of the calling prober.</param>
+        /// <param name="exception">The failure, or <c>null</c> when there is no exception (no playable files).</param>
+        /// <param name="reason">Short description used when there is no exception.</param>
+        public static void MarkProbeFailed(BaseItem item, ILogger logger, Exception exception, string reason = null)
+        {
+            ArgumentNullException.ThrowIfNull(item);
+            ArgumentNullException.ThrowIfNull(logger);
+
+            if (item.IngestState == IngestState.Complete)
+            {
+                logger.LogWarning(
+                    exception,
+                    "Probe failed for {Path} ({Reason}); the item is already Complete, so it stays visible with its previously probed streams and is retried on the next refresh",
+                    item.Path,
+                    reason ?? exception?.Message);
+                return;
+            }
+
+            item.IngestState = IngestState.ProbeFailed;
+            logger.LogError(
+                exception,
+                "Probe failed for {Path} ({Reason}); item stays hidden (IngestState ProbeFailed) and is retried on the next refresh",
+                item.Path,
+                reason ?? exception?.Message);
+        }
+
         /// <inheritdoc />
         public bool HasChanged(BaseItem item, IDirectoryService directoryService)
         {

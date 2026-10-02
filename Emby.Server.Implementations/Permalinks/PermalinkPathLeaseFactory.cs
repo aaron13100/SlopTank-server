@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -110,7 +110,7 @@ internal sealed class PermalinkPathLeaseFactory
     {
         var token = _fileSystem.NewAnchorToken();
         var intent = Guid.NewGuid();
-        await _evidence.InsertAnchorIntentAsync(intent, root.RootIdentityId, relative, cancellationToken)
+        await _evidence.InsertAnchorIntentAsync(intent, root.RootIdentityId, relative, token, cancellationToken)
             .ConfigureAwait(false);
         try
         {
@@ -120,11 +120,8 @@ internal sealed class PermalinkPathLeaseFactory
         {
             // The xattr write failed or could not be made durable: take back whatever landed
             // and close the intent, so the row never claims an anchor that is not there.
-            _ = _fileSystem.RemoveAnchorTokenIfEquals(path, token);
-            await _evidence.SetIntentStateAsync(
-                intent,
-                PermalinkPathEvidenceStore.IntentAbandoned,
-                CancellationToken.None).ConfigureAwait(false);
+            _ = await new PermalinkAnchorIntentSettlement(_evidence, _fileSystem, _objects)
+                .AbandonAsync(intent, path, token, CancellationToken.None).ConfigureAwait(false);
             throw;
         }
 

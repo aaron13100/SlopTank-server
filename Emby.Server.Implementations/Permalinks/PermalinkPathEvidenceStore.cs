@@ -1,5 +1,6 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02.
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -134,12 +135,14 @@ internal sealed class PermalinkPathEvidenceStore
     /// <param name="registryId">The registry row id.</param>
     /// <param name="rootIdentityId">The root identity.</param>
     /// <param name="relativePath">The normalized relative path.</param>
+    /// <param name="anchorToken">The token about to be written as the xattr; recovery compares against it.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task representing the write.</returns>
     public async Task InsertAnchorIntentAsync(
         Guid registryId,
         string rootIdentityId,
         string relativePath,
+        string anchorToken,
         CancellationToken cancellationToken)
     {
         var key = registryId.ToString("D");
@@ -154,8 +157,8 @@ internal sealed class PermalinkPathEvidenceStore
         await using var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO PermalinkEvidenceRegistry
-                (registry_id, evidence_kind, root_identity_id, normalized_relative_path, operation_id, state, created_at, updated_at)
-            VALUES ($id, $kind, $root, $path, NULL, $state, $now, $now)
+                (registry_id, evidence_kind, root_identity_id, normalized_relative_path, operation_id, state, created_at, updated_at, anchor_token)
+            VALUES ($id, $kind, $root, $path, NULL, $state, $now, $now, $token)
             """;
         command.Parameters.AddWithValue("$id", key);
         command.Parameters.AddWithValue("$kind", AnchorIntentKind);
@@ -163,6 +166,7 @@ internal sealed class PermalinkPathEvidenceStore
         command.Parameters.AddWithValue("$path", relativePath);
         command.Parameters.AddWithValue("$state", IntentPending);
         command.Parameters.AddWithValue("$now", Now());
+        command.Parameters.AddWithValue("$token", anchorToken);
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -224,6 +228,36 @@ internal sealed class PermalinkPathEvidenceStore
         command.Parameters.AddWithValue("$id", registryId.ToString("D"));
         var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
         return value as string;
+    }
+
+    /// <summary>Lists every anchor-intent row still pending, oldest first.</summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The pending rows; a row's token is null when it predates the token column.</returns>
+    public async Task<IReadOnlyList<PermalinkAnchorIntentRow>> ListPendingAnchorIntentsAsync(
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT registry_id, root_identity_id, normalized_relative_path, anchor_token
+              FROM PermalinkEvidenceRegistry
+             WHERE evidence_kind = $kind AND state = $state
+             ORDER BY created_at, registry_id
+            """;
+        command.Parameters.AddWithValue("$kind", AnchorIntentKind);
+        command.Parameters.AddWithValue("$state", IntentPending);
+        var rows = new List<PermalinkAnchorIntentRow>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            rows.Add(new PermalinkAnchorIntentRow(
+                Guid.Parse(reader.GetString(0)),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
+        }
+
+        return rows;
     }
 
     private static (string Name, object Value)[] KeyParameters(string rootIdentityId, string relativePath)

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02.
 using System;
 using System.Linq;
 using System.Threading;
@@ -131,6 +131,7 @@ internal static class PermalinkAuthoritySchema
                 state TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                anchor_token TEXT NULL,
                 FOREIGN KEY(root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
             CREATE TABLE IF NOT EXISTS PermalinkWriterAdmissions (
                 admission_id TEXT PRIMARY KEY,
@@ -297,8 +298,39 @@ internal static class PermalinkAuthoritySchema
             END;
             """;
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+        // CREATE TABLE IF NOT EXISTS never alters an existing table, so a database created before
+        // the anchor-intent token existed gets the column added in place (a no-op once present).
+        await AddColumnIfMissingAsync(
+            connection, "PermalinkEvidenceRegistry", "anchor_token", "TEXT NULL", cancellationToken)
+            .ConfigureAwait(false);
         await InstallImmutableEvidenceAsync(connection, cancellationToken).ConfigureAwait(false);
         await InstallWriteProtectionAsync(connection, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task AddColumnIfMissingAsync(
+        SqliteConnection connection,
+        string table,
+        string column,
+        string definition,
+        CancellationToken cancellationToken)
+    {
+        await using var probe = connection.CreateCommand();
+        probe.CommandText = "SELECT COUNT(*) FROM pragma_table_info($table) WHERE name = $column";
+        probe.Parameters.AddWithValue("$table", table);
+        probe.Parameters.AddWithValue("$column", column);
+        var present = Convert.ToInt64(
+            await probe.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            System.Globalization.CultureInfo.InvariantCulture);
+        if (present > 0)
+        {
+            return;
+        }
+
+        // Identifiers are compile-time constants of this class, never caller input.
+        await using var alter = connection.CreateCommand();
+        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
+        _ = await alter.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task InstallImmutableEvidenceAsync(

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -22,6 +22,7 @@ internal sealed class PermalinkPathLease : IPermalinkPathLease
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly IPermalinkPathObjects _objects;
     private readonly PermalinkPathEvidenceStore _evidence;
+    private readonly PermalinkAnchorIntentSettlement _settlement;
     private readonly Guid? _intentId;
     private int _disposed;
 
@@ -51,6 +52,7 @@ internal sealed class PermalinkPathLease : IPermalinkPathLease
         _fileSystem = fileSystem;
         _objects = objects;
         _evidence = evidence;
+        _settlement = new PermalinkAnchorIntentSettlement(evidence, fileSystem, objects);
     }
 
     /// <inheritdoc />
@@ -151,11 +153,8 @@ internal sealed class PermalinkPathLease : IPermalinkPathLease
                 var state = await _evidence.ReadIntentStateAsync(intent, CancellationToken.None).ConfigureAwait(false);
                 if (string.Equals(state, PermalinkPathEvidenceStore.IntentPending, StringComparison.Ordinal))
                 {
-                    _ = _fileSystem.RemoveAnchorTokenIfEquals(_path, AnchorToken);
-                    await _evidence.SetIntentStateAsync(
-                        intent,
-                        PermalinkPathEvidenceStore.IntentAbandoned,
-                        CancellationToken.None).ConfigureAwait(false);
+                    _ = await _settlement.AbandonAsync(intent, _path, AnchorToken, CancellationToken.None)
+                        .ConfigureAwait(false);
                 }
             }
         }

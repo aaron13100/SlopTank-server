@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-20.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-20, 2026-10-03.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -579,8 +579,23 @@ internal sealed class PermalinkOperationJournal : IDisposable
             cancellationToken).ConfigureAwait(false);
     }
 
+    public Task<PermalinkOperationDocument?> FindLatestPendingAsync(
+        Guid itemId,
+        CancellationToken cancellationToken)
+    {
+        return FindLatestPendingAsync(itemId, null, cancellationToken);
+    }
+
+    /// <summary>
+    /// Finds the newest non-terminal operation that fences an item, ignoring one operation.
+    /// </summary>
+    /// <param name="itemId">The Jellyfin item identifier.</param>
+    /// <param name="exceptOperationId">An operation that does not count, or null to count all.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The pending operation, or null when none other fences the item.</returns>
     public async Task<PermalinkOperationDocument?> FindLatestPendingAsync(
         Guid itemId,
+        Guid? exceptOperationId,
         CancellationToken cancellationToken)
     {
         var startedAt = Stopwatch.GetTimestamp();
@@ -597,7 +612,8 @@ internal sealed class PermalinkOperationJournal : IDisposable
 
             RecordLookup(Stopwatch.GetElapsedTime(startedAt), walked);
             return pending.Values
-                .Where(candidate => candidate.ItemId.Equals(itemId))
+                .Where(candidate => candidate.ItemId.Equals(itemId)
+                    && (exceptOperationId is null || !candidate.OperationId.Equals(exceptOperationId.Value)))
                 .MaxBy(candidate => candidate.CreatedAt, StringComparer.Ordinal);
         }
         finally
@@ -1893,6 +1909,27 @@ internal sealed class PermalinkOperationJournal : IDisposable
         CancellationToken cancellationToken)
     {
         return await FindLatestPendingAsync(itemId, cancellationToken).ConfigureAwait(false) is not null;
+    }
+
+    /// <summary>
+    /// Returns whether any non-terminal durable operation other than one named operation fences an
+    /// item.
+    /// </summary>
+    /// <remarks>
+    /// An operation never fences its own retry: an adoption interrupted before its terminal phase
+    /// is still pending, and the retry that completes it must not be refused by it.
+    /// </remarks>
+    /// <param name="itemId">The Jellyfin item identifier.</param>
+    /// <param name="exceptOperationId">The operation that does not count.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    public async Task<bool> HasPendingExceptAsync(
+        Guid itemId,
+        Guid exceptOperationId,
+        CancellationToken cancellationToken)
+    {
+        return await FindLatestPendingAsync(itemId, exceptOperationId, cancellationToken)
+            .ConfigureAwait(false) is not null;
     }
 
     private static bool IsSymbolicLink(string path)

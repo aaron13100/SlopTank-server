@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-10-03.
 using System;
 using System.Globalization;
 using System.Security.Cryptography;
@@ -174,8 +174,32 @@ internal sealed class PermalinkDocumentFactory
         PermalinkCapsuleSnapshot snapshot,
         Guid operationId)
     {
+        return CreateAdoptedContentSuccessor(request, snapshot, operationId, NewGuid(), UtcNow());
+    }
+
+    /// <summary>
+    /// Reconstructs the exact adopted content successor an authority claim already names.
+    /// </summary>
+    /// <remarks>
+    /// A retry after a crash between authorization and publication must rebuild the same event
+    /// the claim digest covers, so the event id and creation time come from the claim, never from
+    /// a fresh id or the wall clock.
+    /// </remarks>
+    /// <param name="request">The mutation request.</param>
+    /// <param name="snapshot">The snapshot.</param>
+    /// <param name="operationId">The derived adoption operation identifier.</param>
+    /// <param name="eventId">The successor event id the authority claim names.</param>
+    /// <param name="createdAt">The canonical creation timestamp the authority claim recorded.</param>
+    /// <returns>The resulting value.</returns>
+    public PermalinkEventDocument CreateAdoptedContentSuccessor(
+        PermalinkStoreRequest request,
+        PermalinkCapsuleSnapshot snapshot,
+        Guid operationId,
+        Guid eventId,
+        string createdAt)
+    {
         return new PermalinkEventDocument(
-            NewGuid(),
+            eventId,
             operationId,
             [snapshot.ContentHead.EventId],
             "operator-confirmed-adoption",
@@ -188,7 +212,7 @@ internal sealed class PermalinkDocumentFactory
             request.Leaves,
             snapshot.ContentHead.BindingInstanceId,
             snapshot.ContentHead.PathAssignment,
-            UtcNow());
+            createdAt);
     }
 
     /// <summary>

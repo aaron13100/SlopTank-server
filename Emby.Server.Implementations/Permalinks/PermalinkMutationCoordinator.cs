@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20, 2026-09-27, 2026-09-30.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20, 2026-09-27, 2026-09-30, 2026-10-03.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -254,6 +254,15 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             return new PermalinkMutationResult(operationId, settledPhase.Name);
         }
 
+        if (string.Equals(operation.Kind, PermalinkAdoptionJournalRecord.OperationKind, StringComparison.Ordinal))
+        {
+            // Every route settles an interrupted adoption the one way its authority claim allows.
+            return await _contentAdoption.RecoverAsync(
+                operation,
+                RequireItem(operation.ItemId),
+                cancellationToken).ConfigureAwait(false);
+        }
+
         if (operation.Kind is "deletion" or "promotion" or "kind-reclassification")
         {
             var result = await _itemStateMutation.CommitStateOnlyAsync(operation, cancellationToken)
@@ -306,6 +315,15 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         if (_journal.GetSettledPhase(operationId) is { } settledPhase)
         {
             return new PermalinkMutationResult(operationId, settledPhase.Name);
+        }
+
+        if (string.Equals(operation.Kind, PermalinkAdoptionJournalRecord.OperationKind, StringComparison.Ordinal))
+        {
+            // Every route settles an interrupted adoption the one way its authority claim allows.
+            return await _contentAdoption.RecoverAsync(
+                operation,
+                RequireItem(operation.ItemId),
+                cancellationToken).ConfigureAwait(false);
         }
 
         if (PermalinkItemStateMutation.IsIdentityKind(operation.Kind))
@@ -437,6 +455,15 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         if (_journal.GetSettledPhase(operationId) is { } settledPhase)
         {
             return new PermalinkMutationResult(operationId, settledPhase.Name);
+        }
+
+        if (string.Equals(operation.Kind, PermalinkAdoptionJournalRecord.OperationKind, StringComparison.Ordinal))
+        {
+            // Every route settles an interrupted adoption the one way its authority claim allows.
+            return await _contentAdoption.RecoverAsync(
+                operation,
+                RequireItem(operation.ItemId),
+                cancellationToken).ConfigureAwait(false);
         }
 
         if (_journal.HasPhase(operationId, PermalinkPhase.Published))

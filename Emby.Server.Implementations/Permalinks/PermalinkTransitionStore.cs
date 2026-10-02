@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-10.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-10, 2026-10-03.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -323,6 +323,62 @@ internal sealed class PermalinkTransitionStore
                 $"Content predecessor '{predecessorEventId}' already has a claimed successor.",
                 exception);
         }
+    }
+
+    /// <summary>
+    /// Reads every content claim one operation owns on a capsule.
+    /// </summary>
+    /// <remarks>
+    /// An operation id can own several claims: the primary key is the predecessor, and a
+    /// derived adoption id repeats whenever the same content root is adopted again.
+    /// </remarks>
+    /// <param name="capsuleId">The logical capsule identifier.</param>
+    /// <param name="operationId">The operation identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The claims in creation order.</returns>
+    public async Task<IReadOnlyList<PermalinkContentTransitionClaim>> FindContentTransitionsByOperationAsync(
+        Guid capsuleId,
+        Guid operationId,
+        CancellationToken cancellationToken)
+    {
+        return await ReadContentTransitionsAsync(
+            "capsule_id = $capsule AND operation_id = $operation",
+            ("$capsule", capsuleId.ToString("D")),
+            ("$operation", operationId.ToString("D")),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<PermalinkContentTransitionClaim>> ReadContentTransitionsAsync(
+        string predicate,
+        (string Name, string Value) first,
+        (string Name, string Value) second,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT capsule_id, predecessor, operation_id, event_id, event_digest, created_at
+              FROM ContentTransitionClaims
+             WHERE {predicate}
+             ORDER BY created_at, predecessor
+            """;
+        command.Parameters.AddWithValue(first.Name, first.Value);
+        command.Parameters.AddWithValue(second.Name, second.Value);
+        var claims = new List<PermalinkContentTransitionClaim>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            claims.Add(new PermalinkContentTransitionClaim(
+                Guid.Parse(reader.GetString(0)),
+                reader.GetString(1),
+                Guid.Parse(reader.GetString(2)),
+                Guid.Parse(reader.GetString(3)),
+                reader.GetString(4),
+                reader.GetString(5)));
+        }
+
+        return claims;
     }
 
     private static string GenerateId()

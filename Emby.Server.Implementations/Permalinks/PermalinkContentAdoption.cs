@@ -1,7 +1,6 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-14, 2026-09-23.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-14, 2026-09-23, 2026-10-03.
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -34,12 +33,12 @@ internal sealed class PermalinkContentAdoption
     private readonly PermalinkEvidence _evidence;
     private readonly PermalinkAuthorityStore _authority;
     private readonly PermalinkOperationJournal _journal;
+    private readonly PermalinkAdoptionJournalRecord _record;
     private readonly PermalinkCapsuleStore _capsules;
     private readonly PermalinkTransitionStore _transitions;
     private readonly PermalinkDocumentFactory _documents;
     private readonly PermalinkBindingIndex _bindings;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
-    private readonly TimeProvider _timeProvider;
     private readonly ILogger<PermalinkContentAdoption> _logger;
 
     /// <summary>
@@ -53,7 +52,6 @@ internal sealed class PermalinkContentAdoption
     /// <param name="documents">The immutable document factory.</param>
     /// <param name="bindings">The rebuildable binding index.</param>
     /// <param name="fileSystem">The durable permalink filesystem.</param>
-    /// <param name="timeProvider">The time provider.</param>
     /// <param name="logger">The logger.</param>
     public PermalinkContentAdoption(
         PermalinkEvidence evidence,
@@ -64,18 +62,17 @@ internal sealed class PermalinkContentAdoption
         PermalinkDocumentFactory documents,
         PermalinkBindingIndex bindings,
         IPermalinkAtomicFileSystem fileSystem,
-        TimeProvider timeProvider,
         ILogger<PermalinkContentAdoption> logger)
     {
         _evidence = evidence;
         _authority = authority;
         _journal = journal;
+        _record = new PermalinkAdoptionJournalRecord(journal);
         _capsules = capsules;
         _transitions = transitions;
         _documents = documents;
         _bindings = bindings;
         _fileSystem = fileSystem;
-        _timeProvider = timeProvider;
         _logger = logger;
     }
 
@@ -96,6 +93,13 @@ internal sealed class PermalinkContentAdoption
     }
 
     /// <summary>Adopts live leaf content after every fail-closed check passes.</summary>
+    /// <remarks>
+    /// The authority claim on the capsule head is the commit point. Before it exists the call is a
+    /// fresh adoption; once it exists every later call with the same derived id (a client retry,
+    /// or an exact replay of a finished adoption) resumes from the claim's own immutable evidence
+    /// and never authorizes a second successor. The journal record is published last, terminal on
+    /// creation, from that same evidence.
+    /// </remarks>
     /// <param name="item">The fenced library item.</param>
     /// <param name="request">The administrator-confirmed adoption evidence.</param>
     /// <param name="operationId">The derived adoption operation identifier.</param>
@@ -108,7 +112,8 @@ internal sealed class PermalinkContentAdoption
         CancellationToken cancellationToken)
     {
         var capsuleId = await ResolveCapsuleIdAsync(item, cancellationToken).ConfigureAwait(false);
-        if (await _journal.HasPendingAsync(item.Id, cancellationToken).ConfigureAwait(false))
+        if (await _journal.HasPendingExceptAsync(item.Id, operationId, cancellationToken)
+                .ConfigureAwait(false))
         {
             throw Conflict(
                 "identity-mutation-pending",
@@ -143,6 +148,32 @@ internal sealed class PermalinkContentAdoption
             reservation.CapsuleId,
             reservation.ItemKind,
             cancellationToken).ConfigureAwait(false);
+
+        var claims = await _transitions.FindContentTransitionsByOperationAsync(
+            reservation.CapsuleId,
+            operationId,
+            cancellationToken).ConfigureAwait(false);
+        if (claims.Count > 0)
+        {
+            return await ResumeAsync(
+                item,
+                request,
+                operationId,
+                reservation,
+                capsulePath,
+                snapshot,
+                claims,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (await _journal.ReadAsync(operationId, cancellationToken).ConfigureAwait(false) is not null)
+        {
+            // A record under this id with no authority claim behind it is not this adoption's.
+            throw ReusedOperation(
+                operationId,
+                "a journal record exists for it but the authority holds no claim for it");
+        }
+
         if (!string.Equals(
                 snapshot.ContentHead.ContentRoot,
                 request.RecordedContentRoot,
@@ -154,6 +185,278 @@ internal sealed class PermalinkContentAdoption
                 + $"is not the recorded predecessor '{request.RecordedContentRoot}'.");
         }
 
+        var observed = await RequireObservedAsync(item, request, cancellationToken).ConfigureAwait(false);
+        if (string.Equals(
+                request.RecordedContentRoot,
+                request.ObservedContentRoot,
+                StringComparison.Ordinal))
+        {
+            throw Conflict(
+                "content-unchanged",
+                "Recorded and observed content roots are equal; a predecessor is never burned on a no-op.");
+        }
+
+        RequireConfirmation(item, request);
+        var successor = _documents.CreateAdoptedContentSuccessor(
+            ToStoreRequest(item, reservation, observed),
+            snapshot,
+            operationId);
+
+        // The successor's creation time is published as the claim's, the event's and both journal
+        // files' time, so it must be one the reconciler can age: refuse before anything is written.
+        PermalinkAdoptionJournalRecord.RequireCreatedAt(successor.CreatedAt, "successor");
+        var bytes = CanonicalJson.Serialize(successor);
+        await _transitions.AuthorizeContentTransitionAsync(
+            reservation.CapsuleId,
+            snapshot.ContentHead.EventId,
+            successor,
+            bytes,
+            cancellationToken).ConfigureAwait(false);
+        await _capsules.AppendContentAsync(capsulePath, successor, bytes, cancellationToken)
+            .ConfigureAwait(false);
+        var result = await CompleteAsync(
+            item,
+            new PermalinkAdoptionEvidence(
+                operationId,
+                item.Id,
+                reservation.CapsuleId,
+                request.RecordedContentRoot,
+                request.ObservedContentRoot,
+                successor.PathAssignment.Path,
+                successor.CreatedAt),
+            cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation(
+            "Permalink content adoption: item {ItemId} capsule {CapsuleId} moved from predecessor "
+            + "{RecordedContentRoot} to observed {ObservedContentRoot} as event {EventId} under "
+            + "operation {OperationId}, confirmed by administrator {AdministratorUserId}.",
+            item.Id,
+            reservation.CapsuleId,
+            request.RecordedContentRoot,
+            request.ObservedContentRoot,
+            successor.EventId,
+            operationId,
+            request.AdministratorUserId);
+        return result;
+    }
+
+    /// <summary>
+    /// Settles an adoption whose journal record is missing or unsettled, from the operation
+    /// record itself.
+    /// </summary>
+    /// <remarks>
+    /// The authority claim already holds the successor, and the record is only ever published after
+    /// the successor was appended, so an unsettled adoption is always completed as committed. It is
+    /// never aborted: an abort would contradict the capsule and the claim.
+    /// </remarks>
+    /// <param name="operation">The unsettled adoption operation record.</param>
+    /// <param name="item">The adopted library item.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The committed adoption state.</returns>
+    /// <exception cref="PermalinkException">
+    /// Thrown with code manual-intervention when the authority and capsule evidence does not
+    /// describe this operation's successor.
+    /// </exception>
+    public async Task<PermalinkMutationResult> RecoverAsync(
+        PermalinkOperationDocument operation,
+        BaseItem item,
+        CancellationToken cancellationToken)
+    {
+        var reservation = await _authority.FindByCapsuleAsync(
+            operation.CapsuleId,
+            cancellationToken).ConfigureAwait(false)
+            ?? throw Conflict(
+                "capsule-missing",
+                $"Protected capsule '{operation.CapsuleId}' is unknown.");
+        var capsulePath = _capsules.GetCapsulePath(
+            reservation.RootPath,
+            item.Path,
+            reservation.ItemKind,
+            reservation.CapsuleId);
+        var snapshot = await _capsules.ReadValidatedAsync(
+            capsulePath,
+            reservation.CapsuleId,
+            reservation.ItemKind,
+            cancellationToken).ConfigureAwait(false);
+        var claims = await _transitions.FindContentTransitionsByOperationAsync(
+            reservation.CapsuleId,
+            operation.OperationId,
+            cancellationToken).ConfigureAwait(false);
+        var claim = FindOwnClaim(snapshot, claims, operation.OldContentRoot)
+            ?? throw Conflict(
+                "manual-intervention",
+                $"Adoption '{operation.OperationId}' has no authority claim on its recorded predecessor.");
+        var appended = FindAppended(snapshot, claim)
+            ?? throw Conflict(
+                "manual-intervention",
+                $"Adoption '{operation.OperationId}' was authorized but its successor "
+                + $"'{claim.EventId}' is not in capsule '{reservation.CapsuleId}'.");
+        if (!DeriveOperationId(item.Id, appended.ContentRoot).Equals(operation.OperationId))
+        {
+            throw Conflict(
+                "manual-intervention",
+                $"Adoption '{operation.OperationId}' does not derive from the item and the "
+                + "content root its authorized successor adopted.");
+        }
+
+        RequireAppendedMatchesClaim(appended, claim, operation.OperationId);
+        return await CompleteAsync(
+            item,
+            new PermalinkAdoptionEvidence(
+                operation.OperationId,
+                item.Id,
+                reservation.CapsuleId,
+                operation.OldContentRoot,
+                appended.ContentRoot,
+                appended.PathAssignment.Path,
+                claim.CreatedAt),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Continues an adoption the authority already claimed: finishes publication when the crash
+    /// came before the successor was appended, and always settles the journal record.
+    /// </summary>
+    private async Task<PermalinkMutationResult> ResumeAsync(
+        BaseItem item,
+        PermalinkContentAdoptionRequest request,
+        Guid operationId,
+        PermalinkGenesisReservation reservation,
+        string capsulePath,
+        PermalinkCapsuleSnapshot snapshot,
+        IReadOnlyList<PermalinkContentTransitionClaim> claims,
+        CancellationToken cancellationToken)
+    {
+        RequireConfirmation(item, request);
+        var claim = FindOwnClaim(snapshot, claims, request.RecordedContentRoot)
+            ?? throw ReusedOperation(
+                operationId,
+                $"it was authorized over a different recorded predecessor than '{request.RecordedContentRoot}'");
+        var appended = FindAppended(snapshot, claim);
+        var evidence = new PermalinkAdoptionEvidence(
+            operationId,
+            item.Id,
+            reservation.CapsuleId,
+            request.RecordedContentRoot,
+            request.ObservedContentRoot,
+            (appended ?? snapshot.ContentHead).PathAssignment.Path,
+            claim.CreatedAt);
+        var settled = await _record.ValidateExistingAsync(evidence, cancellationToken)
+            .ConfigureAwait(false);
+        if (appended is null && settled is not null)
+        {
+            throw EvidenceMismatch(
+                operationId,
+                $"the journal settled as '{settled.Name}' before the claimed successor "
+                + $"'{claim.EventId}' was published");
+        }
+
+        if (appended is null)
+        {
+            appended = await PublishClaimedSuccessorAsync(
+                item,
+                request,
+                operationId,
+                reservation,
+                capsulePath,
+                snapshot,
+                claim,
+                cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            if (!string.Equals(appended.ContentRoot, request.ObservedContentRoot, StringComparison.Ordinal))
+            {
+                throw ReusedOperation(
+                    operationId,
+                    $"its authorized successor adopted '{appended.ContentRoot}', not '{request.ObservedContentRoot}'");
+            }
+
+            RequireAppendedMatchesClaim(appended, claim, operationId);
+        }
+
+        var result = await CompleteAsync(
+            item,
+            evidence,
+            cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation(
+            "Permalink content adoption: item {ItemId} capsule {CapsuleId} operation {OperationId} "
+            + "resumed from its authority claim and settled committed.",
+            item.Id,
+            reservation.CapsuleId,
+            operationId);
+        return result;
+    }
+
+    /// <summary>
+    /// Appends the successor an authority claim names when the crash came before the append,
+    /// rebuilding it from the claim and refusing if the rebuilt event is not the claimed one.
+    /// </summary>
+    private async Task<PermalinkEventDocument> PublishClaimedSuccessorAsync(
+        BaseItem item,
+        PermalinkContentAdoptionRequest request,
+        Guid operationId,
+        PermalinkGenesisReservation reservation,
+        string capsulePath,
+        PermalinkCapsuleSnapshot snapshot,
+        PermalinkContentTransitionClaim claim,
+        CancellationToken cancellationToken)
+    {
+        if (!snapshot.ContentHead.EventId.ToString("D").Equals(claim.Predecessor, StringComparison.Ordinal))
+        {
+            throw Conflict(
+                "manual-intervention",
+                $"Adoption '{operationId}' claimed predecessor '{claim.Predecessor}' but its "
+                + $"successor '{claim.EventId}' is absent and the capsule head moved on.");
+        }
+
+        PermalinkAdoptionJournalRecord.RequireCreatedAt(claim.CreatedAt, "authority claim");
+        var observed = await RequireObservedAsync(item, request, cancellationToken).ConfigureAwait(false);
+        var successor = _documents.CreateAdoptedContentSuccessor(
+            ToStoreRequest(item, reservation, observed),
+            snapshot,
+            operationId,
+            claim.EventId,
+            claim.CreatedAt);
+        var bytes = CanonicalJson.Serialize(successor);
+        if (!string.Equals(CanonicalJson.Digest(bytes), claim.EventDigest, StringComparison.Ordinal))
+        {
+            throw EvidenceMismatch(
+                operationId,
+                $"the live content no longer rebuilds the successor '{claim.EventId}' the authority claimed");
+        }
+
+        await _capsules.AppendContentAsync(capsulePath, successor, bytes, cancellationToken)
+            .ConfigureAwait(false);
+        return successor;
+    }
+
+    /// <summary>
+    /// Binds the item to the adopted root (when the record is not already settled) and makes the
+    /// terminal journal record exist.
+    /// </summary>
+    private async Task<PermalinkMutationResult> CompleteAsync(
+        BaseItem item,
+        PermalinkAdoptionEvidence evidence,
+        CancellationToken cancellationToken)
+    {
+        if (_journal.GetSettledPhase(evidence.OperationId) is null)
+        {
+            await _bindings.UpdateContentRootAsync(
+                item.Id,
+                evidence.ObservedContentRoot,
+                cancellationToken).ConfigureAwait(false);
+            _evidence.InvalidateContentDigest(item.Path);
+        }
+
+        await _record.EnsureCommittedAsync(evidence, cancellationToken).ConfigureAwait(false);
+        return new PermalinkMutationResult(evidence.OperationId, PermalinkPhase.Committed.Name);
+    }
+
+    private async Task<PermalinkEvidenceResult> RequireObservedAsync(
+        BaseItem item,
+        PermalinkContentAdoptionRequest request,
+        CancellationToken cancellationToken)
+    {
         var observed = await _evidence.ComputeContentItemAsync(item, cancellationToken)
             .ConfigureAwait(false);
         if (!string.Equals(observed.ContentRoot, request.ObservedContentRoot, StringComparison.Ordinal))
@@ -167,16 +470,11 @@ internal sealed class PermalinkContentAdoption
                 + $"'{request.ObservedContentRoot}'.");
         }
 
-        if (string.Equals(
-                request.RecordedContentRoot,
-                request.ObservedContentRoot,
-                StringComparison.Ordinal))
-        {
-            throw Conflict(
-                "content-unchanged",
-                "Recorded and observed content roots are equal; a predecessor is never burned on a no-op.");
-        }
+        return observed;
+    }
 
+    private static void RequireConfirmation(BaseItem item, PermalinkContentAdoptionRequest request)
+    {
         if (!string.Equals(
                 request.Confirmation,
                 $"adopt-content:{item.Id:D}:{request.ObservedContentRoot}",
@@ -186,8 +484,14 @@ internal sealed class PermalinkContentAdoption
                 "adoption-confirmation-mismatch",
                 "The confirmation phrase does not repeat the exact item id and observed content root.");
         }
+    }
 
-        var storeRequest = new PermalinkStoreRequest(
+    private static PermalinkStoreRequest ToStoreRequest(
+        BaseItem item,
+        PermalinkGenesisReservation reservation,
+        PermalinkEvidenceResult observed)
+    {
+        return new PermalinkStoreRequest(
             item.Id,
             reservation.ItemKind,
             item.Path,
@@ -195,99 +499,56 @@ internal sealed class PermalinkContentAdoption
             observed.Leaves,
             true,
             null);
-        var successor = _documents.CreateAdoptedContentSuccessor(storeRequest, snapshot, operationId);
-        var bytes = CanonicalJson.Serialize(successor);
-        await _transitions.AuthorizeContentTransitionAsync(
-            reservation.CapsuleId,
-            snapshot.ContentHead.EventId,
-            successor,
-            bytes,
-            cancellationToken).ConfigureAwait(false);
-        await _capsules.AppendContentAsync(capsulePath, successor, bytes, cancellationToken)
-            .ConfigureAwait(false);
-        await _bindings.UpdateContentRootAsync(
-            item.Id,
-            observed.ContentRoot,
-            cancellationToken).ConfigureAwait(false);
-        _evidence.InvalidateContentDigest(item.Path);
-        await WriteJournalRecordAsync(
-            item,
-            capsuleId,
-            request,
-            operationId,
-            observed.ContentRoot,
-            cancellationToken).ConfigureAwait(false);
-        _logger.LogInformation(
-            "Permalink content adoption: item {ItemId} capsule {CapsuleId} moved from predecessor "
-            + "{RecordedContentRoot} to observed {ObservedContentRoot} as event {EventId} under "
-            + "operation {OperationId}, confirmed by administrator {AdministratorUserId}.",
-            item.Id,
-            reservation.CapsuleId,
-            request.RecordedContentRoot,
-            request.ObservedContentRoot,
-            successor.EventId,
-            operationId,
-            request.AdministratorUserId);
-        return new PermalinkMutationResult(operationId, PermalinkPhase.Committed.Name);
     }
 
     /// <summary>
-    /// Writes the adoption's terminal-on-creation journal record.
+    /// Picks the claim this adoption owns: the one placed on a predecessor event whose content
+    /// root is the recorded one. A derived id can own several claims when an earlier release let
+    /// the same root be adopted over a different predecessor.
     /// </summary>
-    /// <remarks>
-    /// The record holds operation.json plus exactly one committed phase file, so
-    /// PermalinkOperationJournal.GetSettledPhase sees it settled: the reconciler
-    /// walks only unsettled directories and never fences the adopted item, and a
-    /// crash between the two writes self-heals to an aborted record through the
-    /// normal recovery gate. The CreatedAt must stay parseable RFC3339, because
-    /// any operation the reconciler does visit with an unparseable timestamp is
-    /// logged and left fenced. Auditable where every other operation is.
-    /// </remarks>
-    /// <param name="item">The adopted library item.</param>
-    /// <param name="capsuleId">The sole capsule adopted against.</param>
-    /// <param name="request">The administrator-confirmed adoption evidence.</param>
-    /// <param name="operationId">The derived adoption operation identifier.</param>
-    /// <param name="observedContentRoot">The adopted live content root.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>A task representing the asynchronous operation.</returns>
-    private async Task WriteJournalRecordAsync(
-        BaseItem item,
-        Guid capsuleId,
-        PermalinkContentAdoptionRequest request,
-        Guid operationId,
-        string observedContentRoot,
-        CancellationToken cancellationToken)
+    private static PermalinkContentTransitionClaim? FindOwnClaim(
+        PermalinkCapsuleSnapshot snapshot,
+        IReadOnlyList<PermalinkContentTransitionClaim> claims,
+        string recordedContentRoot)
     {
-        var createdAt = UtcNow();
-        var operation = new PermalinkOperationDocument(
-            operationId,
-            item.Id,
-            capsuleId,
-            "adoption",
-            item.Path,
-            null,
-            request.RecordedContentRoot,
-            new Dictionary<string, string>(item.ProviderIds, StringComparer.OrdinalIgnoreCase),
-            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
-            PermalinkIdentitySnapshot.Capture(item),
-            null,
-            createdAt);
-        await _journal.WriteOperationAsync(operation, cancellationToken).ConfigureAwait(false);
-        await _journal.WritePhaseAsync(
-            operationId,
-            PermalinkPhase.Committed,
-            new PermalinkOperationPhase(
+        var owned = claims
+            .Where(claim => snapshot.Events.Any(candidate =>
+                candidate.EventId.ToString("D").Equals(claim.Predecessor, StringComparison.Ordinal)
+                && string.Equals(candidate.ContentRoot, recordedContentRoot, StringComparison.Ordinal)))
+            .ToArray();
+        return owned.Length == 1 ? owned[0] : null;
+    }
+
+    private static PermalinkEventDocument? FindAppended(
+        PermalinkCapsuleSnapshot snapshot,
+        PermalinkContentTransitionClaim claim)
+    {
+        return snapshot.Events.FirstOrDefault(candidate => candidate.EventId.Equals(claim.EventId));
+    }
+
+    /// <summary>
+    /// Requires the appended event to be exactly the one the authority claimed: same operation,
+    /// kind, predecessor, creation time and canonical digest.
+    /// </summary>
+    private static void RequireAppendedMatchesClaim(
+        PermalinkEventDocument appended,
+        PermalinkContentTransitionClaim claim,
+        Guid operationId)
+    {
+        if (!appended.OperationId.Equals(operationId)
+            || !string.Equals(appended.Kind, "operator-confirmed-adoption", StringComparison.Ordinal)
+            || appended.PreviousContentEventId is not { } previous
+            || !previous.ToString("D").Equals(claim.Predecessor, StringComparison.Ordinal)
+            || !string.Equals(appended.CreatedAt, claim.CreatedAt, StringComparison.Ordinal)
+            || !string.Equals(
+                CanonicalJson.Digest(CanonicalJson.Serialize(appended)),
+                claim.EventDigest,
+                StringComparison.Ordinal))
+        {
+            throw EvidenceMismatch(
                 operationId,
-                PermalinkPhase.Committed.Name,
-                observedContentRoot,
-                createdAt)
-            {
-                ObservedState =
-                    "reason=operator-confirmed-adoption"
-                    + $";recorded={request.RecordedContentRoot}"
-                    + $";observed={request.ObservedContentRoot}"
-            },
-            cancellationToken).ConfigureAwait(false);
+                $"the capsule's event '{appended.EventId}' is not the successor the authority claimed");
+        }
     }
 
     /// <summary>
@@ -397,13 +658,22 @@ internal sealed class PermalinkContentAdoption
         }
     }
 
-    private string UtcNow()
-    {
-        return _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture);
-    }
-
     private static PermalinkException Conflict(string code, string message)
     {
         return new PermalinkException(PermalinkErrorKind.Conflict, code, message);
+    }
+
+    private static PermalinkException ReusedOperation(Guid operationId, string reason)
+    {
+        return Conflict(
+            "operation-id-reused",
+            $"Adoption operation '{operationId}' has different input: {reason}.");
+    }
+
+    private static PermalinkException EvidenceMismatch(Guid operationId, string reason)
+    {
+        return Conflict(
+            "adoption-evidence-mismatch",
+            $"Adoption operation '{operationId}' cannot be completed from its authority claim: {reason}.");
     }
 }

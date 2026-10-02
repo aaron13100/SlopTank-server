@@ -58,13 +58,7 @@ internal sealed class PermalinkPathLeaseFactory
             cancellationToken).ConfigureAwait(false);
         try
         {
-            var pin = isVirtual
-                ? PermalinkPathLease.VirtualPin
-                : _objects.ReadPinnedIdentityNoFollow(path)
-                    ?? throw new PermalinkException(
-                        PermalinkErrorKind.Unavailable,
-                        "content-unreachable",
-                        $"Permalink content is unreachable at '{path}'.");
+            var pin = isVirtual ? PermalinkPathLease.VirtualPin : PinContentPath(path);
             var epoch = await _evidence.ReadContentEpochAsync(cancellationToken).ConfigureAwait(false);
             long generation;
             await using (var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false))
@@ -100,6 +94,25 @@ internal sealed class PermalinkPathLeaseFactory
             keyLock.Dispose();
             throw;
         }
+    }
+
+    /// <summary>
+    /// Pins the final component without following it and refuses a symlink: the anchor lives on
+    /// the object the pin names, so a link would split the pin from the anchor.
+    /// </summary>
+    private string PinContentPath(string path)
+    {
+        var pinned = _objects.ReadPinnedObjectNoFollow(path)
+            ?? throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "content-unreachable",
+                $"Permalink content is unreachable at '{path}'.");
+        return pinned.IsSymbolicLink
+            ? throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "permalink-path-symlink",
+                $"Permalink content path '{path}' is a symbolic link; the final path component is never symlink-resolved.")
+            : pinned.Identity;
     }
 
     private async Task<(string Token, Guid? Intent)> CreateAnchorUnderIntentAsync(

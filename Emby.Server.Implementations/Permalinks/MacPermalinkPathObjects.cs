@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02.
 using System;
 using System.Globalization;
 using System.IO;
@@ -18,6 +18,9 @@ public sealed class MacPermalinkPathObjects : IPermalinkPathObjects
     private const int StatBufferSize = 144;
     private const int DeviceOffset = 0;
     private const int InodeOffset = 8;
+    private const int ModeOffset = 4;
+    private const int FileTypeMask = 0xF000;
+    private const int SymbolicLinkType = 0xA000;
     private const int PathMax = 1024;
 
     /// <inheritdoc />
@@ -40,7 +43,10 @@ public sealed class MacPermalinkPathObjects : IPermalinkPathObjects
     }
 
     /// <inheritdoc />
-    public string? ReadPinnedIdentityNoFollow(string path)
+    public string? ReadPinnedIdentityNoFollow(string path) => ReadPinnedObjectNoFollow(path)?.Identity;
+
+    /// <inheritdoc />
+    public PermalinkPinnedObject? ReadPinnedObjectNoFollow(string path)
     {
         var buffer = Marshal.AllocHGlobal(StatBufferSize);
         try
@@ -52,7 +58,10 @@ public sealed class MacPermalinkPathObjects : IPermalinkPathObjects
 
             var device = Marshal.ReadInt32(buffer, DeviceOffset);
             var inode = unchecked((ulong)Marshal.ReadInt64(buffer, InodeOffset));
-            return string.Create(CultureInfo.InvariantCulture, $"{device}:{inode}");
+            var mode = unchecked((ushort)Marshal.ReadInt16(buffer, ModeOffset));
+            return new PermalinkPinnedObject(
+                string.Create(CultureInfo.InvariantCulture, $"{device}:{inode}"),
+                (mode & FileTypeMask) == SymbolicLinkType);
         }
         finally
         {

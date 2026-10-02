@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02.
 namespace MediaBrowser.Controller.Permalinks;
 
 /// <summary>
@@ -21,6 +21,14 @@ public interface IPermalinkPathObjects
     /// <param name="path">The path to inspect.</param>
     /// <returns>The identity formatted as <c>device:inode</c>, or <see langword="null"/> when the path does not exist.</returns>
     string? ReadPinnedIdentityNoFollow(string path);
+
+    /// <summary>
+    /// Reads the pinned identity and the object kind of the final path component from one
+    /// <c>lstat</c>, without following a symlink.
+    /// </summary>
+    /// <param name="path">The path to inspect.</param>
+    /// <returns>The pinned object, or <see langword="null"/> when the path does not exist.</returns>
+    PermalinkPinnedObject? ReadPinnedObjectNoFollow(string path);
 
     /// <summary>
     /// Reads a small regular file, or reports that it is absent.

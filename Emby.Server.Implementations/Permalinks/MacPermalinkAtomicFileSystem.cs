@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-09-09, 2026-09-16, 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-09-09, 2026-09-16, 2026-10-01, 2026-10-02.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -24,6 +24,7 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
     private const int FullSync = 51;
     private const int OpenReadOnly = 0;
     private const int RenameExclusive = 0x00000004;
+    private const int XattrNoFollow = 0x0001;
     private const int XattrCreate = 0x0002;
     private readonly MacPermalinkMountPolicy _mountPolicy;
     private readonly string _publicationOwner;
@@ -59,7 +60,7 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
             return false;
         }
 
-        if (RemoveXattr(path, AnchorName, 0) != 0)
+        if (RemoveXattr(path, AnchorName, XattrNoFollow) != 0)
         {
             var error = Marshal.GetLastPInvokeError();
             if (error == AttributeMissing)
@@ -88,7 +89,7 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
     {
         _mountPolicy.EnsureAdmitted(path);
         var bytes = new byte[16];
-        var length = GetXattr(path, AnchorName, bytes, (nuint)bytes.Length, 0, 0);
+        var length = GetXattr(path, AnchorName, bytes, (nuint)bytes.Length, 0, XattrNoFollow);
         if (length < 0)
         {
             var error = Marshal.GetLastPInvokeError();
@@ -144,7 +145,7 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
         }
 
         if (bytes.Length != 16
-            || SetXattr(path, AnchorName, bytes, (nuint)bytes.Length, 0, XattrCreate) != 0)
+            || SetXattr(path, AnchorName, bytes, (nuint)bytes.Length, 0, XattrCreate | XattrNoFollow) != 0)
         {
             throw FileSystemFailure("anchor-assign", path, Marshal.GetLastPInvokeError());
         }

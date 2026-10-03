@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02, 2026-10-03.
 using System;
 using System.Linq;
 using System.Threading;
@@ -148,6 +148,9 @@ internal static class PermalinkAuthoritySchema
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_PermalinkEvidenceRegistry_PendingScanKey
+                ON PermalinkEvidenceRegistry(root_identity_id, normalized_relative_path)
+                WHERE evidence_kind = 'pending-scan' AND state = 'pending';
             CREATE UNIQUE INDEX IF NOT EXISTS IX_PermalinkWriterAdmissions_ActivePath
                 ON PermalinkWriterAdmissions(root_identity_id, normalized_relative_path)
                 WHERE status IN ('issued', 'started', 'recovery-required');

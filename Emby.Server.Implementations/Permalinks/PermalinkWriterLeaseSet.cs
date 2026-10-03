@@ -67,7 +67,17 @@ internal sealed class PermalinkWriterLeaseSet : IAsyncDisposable
     /// <returns>A task representing the recheck.</returns>
     /// <exception cref="PermalinkException">Conflict with the same <c>permalink-*</c> codes Ensure uses when the key changed.</exception>
     public Task RecheckAsync(string path, CancellationToken cancellationToken)
-        => RecheckEntriesAsync(new[] { Require(path) }, cancellationToken);
+        => RecheckEntriesAsync(new[] { Require(path) }, scanner: false, cancellationToken);
+
+    /// <summary>
+    /// Rechecks a new-item scanner key without consuming or rejecting a pending supersession slot.
+    /// Reservations and blocking writer admissions still refuse it.
+    /// </summary>
+    /// <param name="path">A path in the set.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the recheck.</returns>
+    public Task RecheckScannerAsync(string path, CancellationToken cancellationToken)
+        => RecheckEntriesAsync(new[] { Require(path) }, scanner: true, cancellationToken);
 
     /// <summary>
     /// Rechecks every leased key, in key order.
@@ -79,7 +89,7 @@ internal sealed class PermalinkWriterLeaseSet : IAsyncDisposable
     {
         var ordered = new List<Entry>(_entries.Values);
         ordered.Sort((left, right) => PermalinkPathLeaseFactory.CompareKeys(left.Key, right.Key));
-        await RecheckEntriesAsync(ordered, cancellationToken).ConfigureAwait(false);
+        await RecheckEntriesAsync(ordered, scanner: false, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Releases every key.</summary>
@@ -109,20 +119,37 @@ internal sealed class PermalinkWriterLeaseSet : IAsyncDisposable
                 $"Path '{path}' was not leased by this writer before it was touched.");
     }
 
-    private async Task RecheckEntriesAsync(IReadOnlyList<Entry> entries, CancellationToken cancellationToken)
+    private async Task RecheckEntriesAsync(
+        IReadOnlyList<Entry> entries,
+        bool scanner,
+        CancellationToken cancellationToken)
     {
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = connection.BeginTransaction(deferred: true);
         foreach (var entry in entries)
         {
-            await PermalinkPathKeyRecheck.RequireClearAsync(
-                _evidence,
-                connection,
-                transaction,
-                entry.Key.RootIdentityId,
-                entry.Key.NormalizedRelativePath,
-                entry.Generation,
-                cancellationToken).ConfigureAwait(false);
+            if (scanner)
+            {
+                await PermalinkPathKeyRecheck.RequireScannerClearAsync(
+                    _evidence,
+                    connection,
+                    transaction,
+                    entry.Key.RootIdentityId,
+                    entry.Key.NormalizedRelativePath,
+                    entry.Generation,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await PermalinkPathKeyRecheck.RequireClearAsync(
+                    _evidence,
+                    connection,
+                    transaction,
+                    entry.Key.RootIdentityId,
+                    entry.Key.NormalizedRelativePath,
+                    entry.Generation,
+                    cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 

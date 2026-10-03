@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-03.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -27,6 +27,15 @@ internal sealed class PermalinkPathEvidenceStore
 
     /// <summary>The intent state after an unsettled lease removed its own anchor.</summary>
     public const string IntentAbandoned = "abandoned";
+
+    /// <summary>The registry <c>evidence_kind</c> of a new item deferred by the scanner.</summary>
+    public const string PendingScanKind = "pending-scan";
+
+    /// <summary>The pending-scan state while the candidate has not been indexed.</summary>
+    public const string ScanPending = "pending";
+
+    /// <summary>The pending-scan state after a later scan indexed the candidate.</summary>
+    public const string ScanIndexed = "indexed";
 
     private readonly PermalinkAuthorityStore _authority;
     private readonly TimeProvider _timeProvider;
@@ -214,6 +223,143 @@ internal sealed class PermalinkPathEvidenceStore
             .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await SetIntentStateAsync(connection, transaction, registryId, state, cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Records one reserved new-item scan candidate, idempotently per canonical key.</summary>
+    /// <param name="key">The candidate's canonical key.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the durable registry write.</returns>
+    public async Task RecordPendingScanResultAsync(
+        PermalinkLeasedKey key,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var existing = connection.CreateCommand())
+        {
+            existing.CommandText = """
+                SELECT registry_id FROM PermalinkEvidenceRegistry
+                 WHERE evidence_kind = $kind AND root_identity_id = $root
+                   AND normalized_relative_path = $path AND state = $state
+                 LIMIT 1
+                """;
+            existing.Parameters.AddWithValue("$kind", PendingScanKind);
+            existing.Parameters.AddWithValue("$root", key.RootIdentityId);
+            existing.Parameters.AddWithValue("$path", key.NormalizedRelativePath);
+            existing.Parameters.AddWithValue("$state", ScanPending);
+            if (await existing.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null)
+            {
+                return;
+            }
+        }
+
+        var id = Guid.NewGuid();
+        var idText = id.ToString("D");
+        using var scope = await _authority.BeginAuthorizedWriteAsync(
+            connection,
+            id,
+            "PermalinkEvidenceRegistry",
+            "INSERT",
+            idText,
+            cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO PermalinkEvidenceRegistry
+                (registry_id, evidence_kind, root_identity_id, normalized_relative_path, operation_id, state, created_at, updated_at, anchor_token)
+            VALUES ($id, $kind, $root, $path, NULL, $state, $now, $now, NULL)
+            """;
+        command.Parameters.AddWithValue("$id", idText);
+        command.Parameters.AddWithValue("$kind", PendingScanKind);
+        command.Parameters.AddWithValue("$root", key.RootIdentityId);
+        command.Parameters.AddWithValue("$path", key.NormalizedRelativePath);
+        command.Parameters.AddWithValue("$state", ScanPending);
+        command.Parameters.AddWithValue("$now", Now());
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Marks every pending scan result for a successfully indexed key as indexed.</summary>
+    /// <param name="key">The indexed key.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the durable registry update.</returns>
+    public async Task CompletePendingScanResultsAsync(
+        PermalinkLeasedKey key,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        var ids = new List<Guid>();
+        await using (var select = connection.CreateCommand())
+        {
+            select.CommandText = """
+                SELECT registry_id FROM PermalinkEvidenceRegistry
+                 WHERE evidence_kind = $kind AND root_identity_id = $root
+                   AND normalized_relative_path = $path AND state = $state
+                 ORDER BY created_at, registry_id
+                """;
+            select.Parameters.AddWithValue("$kind", PendingScanKind);
+            select.Parameters.AddWithValue("$root", key.RootIdentityId);
+            select.Parameters.AddWithValue("$path", key.NormalizedRelativePath);
+            select.Parameters.AddWithValue("$state", ScanPending);
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                ids.Add(Guid.Parse(reader.GetString(0)));
+            }
+        }
+
+        foreach (var id in ids)
+        {
+            await using var transaction = (SqliteTransaction)await connection
+                .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await SetIntentStateAsync(
+                connection,
+                transaction,
+                id,
+                ScanIndexed,
+                cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Returns whether any pending-scan registry evidence still needs reconciliation.</summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>True when at least one pending row exists.</returns>
+    public async Task<bool> HasPendingScanResultsAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT EXISTS(
+                SELECT 1 FROM PermalinkEvidenceRegistry
+                 WHERE evidence_kind = $kind AND state = $state)
+            """;
+        command.Parameters.AddWithValue("$kind", PendingScanKind);
+        command.Parameters.AddWithValue("$state", ScanPending);
+        return Convert.ToInt64(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+    }
+
+    /// <summary>Reads the relative paths that currently have pending scanner evidence.</summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The distinct NFC-normalized relative paths.</returns>
+    public async Task<IReadOnlySet<string>> ReadPendingScanRelativePathsAsync(
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT DISTINCT normalized_relative_path FROM PermalinkEvidenceRegistry
+             WHERE evidence_kind = $kind AND state = $state
+            """;
+        command.Parameters.AddWithValue("$kind", PendingScanKind);
+        command.Parameters.AddWithValue("$state", ScanPending);
+        var paths = new HashSet<string>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            paths.Add(reader.GetString(0));
+        }
+
+        return paths;
     }
 
     /// <summary>Reads the current state of an anchor-intent row.</summary>

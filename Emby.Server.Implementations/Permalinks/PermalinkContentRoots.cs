@@ -38,21 +38,37 @@ internal sealed class PermalinkContentRoots
     /// <exception cref="PermalinkException">Ineligible <c>content-root-missing</c> when no configured root contains the path.</exception>
     public string Resolve(string path)
     {
-        var fullPath = Path.GetFullPath(path);
-        foreach (var root in _roots)
+        if (TryResolve(path, out var root))
         {
-            var relative = Path.GetRelativePath(root, fullPath);
-            if (relative != ".."
-                && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                && !Path.IsPathRooted(relative))
-            {
-                return root;
-            }
+            return root;
         }
 
         throw new PermalinkException(
             PermalinkErrorKind.Ineligible,
             "content-root-missing",
             $"Path '{path}' is outside every configured permalink content root.");
+    }
+
+    /// <summary>Tries to find the configured content root a path lives under.</summary>
+    /// <param name="path">The path.</param>
+    /// <param name="root">The configured full root when the path is managed.</param>
+    /// <returns>True when a configured root contains the path.</returns>
+    public bool TryResolve(string path, out string root)
+    {
+        var fullPath = Path.GetFullPath(path);
+        foreach (var candidateRoot in _roots)
+        {
+            var relative = Path.GetRelativePath(candidateRoot, fullPath);
+            if (relative != ".."
+                && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                && !Path.IsPathRooted(relative))
+            {
+                root = candidateRoot;
+                return true;
+            }
+        }
+
+        root = string.Empty;
+        return false;
     }
 }

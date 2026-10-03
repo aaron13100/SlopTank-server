@@ -34,6 +34,56 @@ internal static class PermalinkPathKeyRecheck
         string path,
         long expectedGeneration,
         CancellationToken cancellationToken)
+        => await RequireClearCoreAsync(
+            evidence,
+            connection,
+            transaction,
+            rootIdentityId,
+            path,
+            expectedGeneration,
+            rejectPendingSupersession: true,
+            cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Applies the scanner subset of the key predicate. A pending supersession slot is
+    /// intentionally allowed and left untouched: scan discovery may index the item, but only a
+    /// later explicit Ensure/share is allowed to consume the slot.
+    /// </summary>
+    /// <param name="evidence">The path evidence store.</param>
+    /// <param name="connection">The authority connection.</param>
+    /// <param name="transaction">The transaction the reads run in.</param>
+    /// <param name="rootIdentityId">The root identity.</param>
+    /// <param name="path">The normalized relative path.</param>
+    /// <param name="expectedGeneration">The reservation generation recorded when the lease was taken.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the recheck.</returns>
+    public static async Task RequireScannerClearAsync(
+        PermalinkPathEvidenceStore evidence,
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string rootIdentityId,
+        string path,
+        long expectedGeneration,
+        CancellationToken cancellationToken)
+        => await RequireClearCoreAsync(
+            evidence,
+            connection,
+            transaction,
+            rootIdentityId,
+            path,
+            expectedGeneration,
+            rejectPendingSupersession: false,
+            cancellationToken).ConfigureAwait(false);
+
+    private static async Task RequireClearCoreAsync(
+        PermalinkPathEvidenceStore evidence,
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string rootIdentityId,
+        string path,
+        long expectedGeneration,
+        bool rejectPendingSupersession,
+        CancellationToken cancellationToken)
     {
         var activeReservations = await evidence.CountActiveReservationsAsync(
             connection, transaction, rootIdentityId, path, cancellationToken).ConfigureAwait(false);
@@ -46,7 +96,8 @@ internal static class PermalinkPathKeyRecheck
                 $"Path '{path}' was reserved after its lease was taken (generation {expectedGeneration} became {maxGeneration}).");
         }
 
-        if (await evidence.CountPendingSlotsAsync(connection, transaction, rootIdentityId, path, cancellationToken)
+        if (rejectPendingSupersession
+            && await evidence.CountPendingSlotsAsync(connection, transaction, rootIdentityId, path, cancellationToken)
             .ConfigureAwait(false) > 0)
         {
             throw Conflict(

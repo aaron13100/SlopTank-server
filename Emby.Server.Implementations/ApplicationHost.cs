@@ -581,6 +581,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkPathLocks>();
             serviceCollection.AddSingleton<PermalinkPathEvidenceStore>();
             serviceCollection.AddSingleton<PermalinkPathLeaseFactory>();
+            serviceCollection.AddSingleton<IPermalinkScanAdmissionService, PermalinkScanAdmissionService>();
             serviceCollection.AddSingleton<PermalinkAuthoritySnapshotPublisher>();
             serviceCollection.AddSingleton<IPermalinkAuthorityGenerationOracle>(provider =>
                 provider.GetRequiredService<PermalinkAuthoritySnapshotPublisher>());
@@ -770,6 +771,7 @@ namespace Emby.Server.Implementations
             Folder.CollectionManager = Resolve<ICollectionManager>();
             Folder.LimitedConcurrencyLibraryScheduler = Resolve<ILimitedConcurrencyLibraryScheduler>();
             Folder.PermalinkIdentityMutationAdapter = Resolve<IPermalinkIdentityMutationAdapter>();
+            Folder.PermalinkScanAdmissionService = Resolve<IPermalinkScanAdmissionService>();
             Episode.MediaEncoder = Resolve<IMediaEncoder>();
             UserView.TVSeriesManager = Resolve<ITVSeriesManager>();
             Video.RecordingsManager = Resolve<IRecordingsManager>();

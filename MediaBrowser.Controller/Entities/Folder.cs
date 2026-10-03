@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-30, 2026-09-04, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-26.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-30, 2026-09-04, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-26, 2026-10-03.
 #nullable disable
 
 #pragma warning disable CA1002, CA1721, CA1819, CS1591
@@ -62,6 +62,8 @@ namespace MediaBrowser.Controller.Entities
         public static ILimitedConcurrencyLibraryScheduler LimitedConcurrencyLibraryScheduler { get; set; }
 
         public static IPermalinkIdentityMutationAdapter PermalinkIdentityMutationAdapter { get; set; }
+
+        public static IPermalinkScanAdmissionService PermalinkScanAdmissionService { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is root.
@@ -432,6 +434,7 @@ namespace MediaBrowser.Controller.Entities
 
                 // Create a list for our validated children
                 var newItems = new List<BaseItem>();
+                var rediscoveredItems = new List<BaseItem>();
                 var actuallyRemoved = new List<BaseItem>();
 
                 // Build a reverse path→item lookup for detecting type changes
@@ -480,6 +483,7 @@ namespace MediaBrowser.Controller.Entities
                             }
 
                             accessibleChildren.Add(currentChild);
+                            rediscoveredItems.Add(currentChild);
                             continue;
                         }
 
@@ -525,6 +529,7 @@ namespace MediaBrowser.Controller.Entities
                         else
                         {
                             accessibleChildren.Add(currentChild);
+                            rediscoveredItems.Add(currentChild);
                         }
 
                         continue;
@@ -576,6 +581,10 @@ namespace MediaBrowser.Controller.Entities
                     validChildren.Add(child);
                     accessibleChildren.Add(child);
                 }
+
+                await PermalinkScanAdmissionService.ReconcileRediscoveredItemsAsync(
+                    rediscoveredItems,
+                    cancellationToken).ConfigureAwait(false);
 
                 // That's all the new and changed ones - now see if any have been removed and need cleanup
                 var itemsRemoved = currentChildren.Values.Except(validChildren).ToList();
@@ -664,7 +673,45 @@ namespace MediaBrowser.Controller.Entities
 
                 if (newItems.Count > 0)
                 {
-                    LibraryManager.CreateItems(newItems, this, cancellationToken);
+                    await using var admission = await PermalinkScanAdmissionService
+                        .BeginNewItemBatchAsync(newItems, cancellationToken).ConfigureAwait(false);
+                    var blocked = newItems.Where(item => admission.IsBlocked(item.Id)).ToArray();
+                    foreach (var item in blocked)
+                    {
+                        newItems.Remove(item);
+                        validChildren.Remove(item);
+                        accessibleChildren.Remove(item);
+                        permalinkConflictsSkipped++;
+                        Logger.LogWarning(
+                            "Skipping new library scan item {ItemId} ({ItemName}) at {ItemPath} because its canonical path is reserved",
+                            item.Id,
+                            item.Name,
+                            item.Path);
+                    }
+
+                    foreach (var replacement in replacedPrimaries
+                        .Where(pair => admission.IsBlocked(pair.NewPrimary.Id))
+                        .ToArray())
+                    {
+                        replacedPrimaries.Remove(replacement);
+                        actuallyRemoved.Remove(replacement.OldPrimary);
+                        replacement.OldPrimary.SetParent(this);
+                        if (!validChildren.Contains(replacement.OldPrimary))
+                        {
+                            validChildren.Add(replacement.OldPrimary);
+                        }
+
+                        if (!accessibleChildren.Contains(replacement.OldPrimary))
+                        {
+                            accessibleChildren.Add(replacement.OldPrimary);
+                        }
+                    }
+
+                    if (newItems.Count > 0)
+                    {
+                        LibraryManager.CreateItems(newItems, this, cancellationToken);
+                        await admission.CompleteAsync(newItems, cancellationToken).ConfigureAwait(false);
+                    }
                 }
 
                 // Process deferred replaced-primary deletions now that new primaries exist in DB/cache.

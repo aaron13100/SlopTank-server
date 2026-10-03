@@ -587,6 +587,9 @@ namespace Emby.Server.Implementations
                 provider.GetRequiredService<PermalinkAuthoritySnapshotPublisher>());
             serviceCollection.AddSingleton(provider => new PermalinkOperationJournalCensus(
                 provider.GetRequiredService<PermalinkAuthorityStore>().AuthorityRoot));
+            serviceCollection.AddSingleton<PermalinkRootIdentityCensus>();
+            serviceCollection.AddSingleton<IPermalinkRootIdentityCensus>(provider =>
+                provider.GetRequiredService<PermalinkRootIdentityCensus>());
             serviceCollection.AddSingleton<PermalinkAbsenceWatermarkService>();
             serviceCollection.AddSingleton<PermalinkWriterAdmissionService>();
             serviceCollection.AddSingleton<IPermalinkWriterAdmissionService>(provider =>

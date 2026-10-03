@@ -1,5 +1,6 @@
 // SlopTank modification notice: added or changed by SlopTank on 2026-10-03.
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using MediaBrowser.Controller.Permalinks;
@@ -29,6 +30,9 @@ internal sealed class PermalinkContentRoots
             .OrderByDescending(value => value.Length)
             .ToArray();
     }
+
+    /// <summary>Gets every configured root path in longest-prefix resolution order.</summary>
+    public IReadOnlyList<string> ConfiguredRoots => Array.AsReadOnly(_roots);
 
     /// <summary>
     /// Finds the configured content root a path lives under.

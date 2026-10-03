@@ -1,5 +1,6 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-03.
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Threading;
@@ -43,6 +44,24 @@ internal sealed class PermalinkRootIdentityStore
     /// <returns>The row, or null.</returns>
     public Task<PermalinkRootIdentityRow?> FindByRootAsync(string canonicalRoot, CancellationToken cancellationToken)
         => FindAsync("canonical_root = $key", canonicalRoot, cancellationToken);
+
+    /// <summary>Lists every canonical root ever registered, including roots no longer configured.</summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The distinct canonical roots in ordinal order.</returns>
+    public async Task<IReadOnlyList<string>> ListCanonicalRootsAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT DISTINCT canonical_root FROM PermalinkRootIdentities ORDER BY canonical_root COLLATE BINARY";
+        var roots = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            roots.Add(reader.GetString(0));
+        }
+
+        return roots;
+    }
 
     /// <summary>Inserts a new registration under an exact authorized write.</summary>
     /// <param name="row">The row.</param>

@@ -19,15 +19,18 @@ internal sealed class PermalinkAbsenceWatermarkService
 
     private readonly PermalinkAuthorityStore _authority;
     private readonly PermalinkOperationJournalCensus _journal;
+    private readonly IPermalinkRootIdentityCensus _roots;
     private readonly TimeProvider _timeProvider;
 
     public PermalinkAbsenceWatermarkService(
         PermalinkAuthorityStore authority,
         PermalinkOperationJournalCensus journal,
+        IPermalinkRootIdentityCensus roots,
         TimeProvider timeProvider)
     {
         _authority = authority;
         _journal = journal;
+        _roots = roots;
         _timeProvider = timeProvider;
     }
 
@@ -46,8 +49,10 @@ internal sealed class PermalinkAbsenceWatermarkService
     private async Task<PermalinkAbsenceWatermark> SealCoreAsync(CancellationToken cancellationToken)
     {
         await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        var baselineRoots = await _roots.ReadAsync(cancellationToken).ConfigureAwait(false);
         var baseline = await ReadFactsAsync(connection: null, transaction: null, cancellationToken)
             .ConfigureAwait(false);
+        ValidateRoots(baselineRoots, baseline);
         ValidatePopulation(baseline);
         var journal = await _journal.ReadAsync(cancellationToken).ConfigureAwait(false);
         var repeated = await _journal.ReadAsync(cancellationToken).ConfigureAwait(false);
@@ -58,10 +63,19 @@ internal sealed class PermalinkAbsenceWatermarkService
                 "The operation journal changed while its absence generation was being measured.");
         }
 
+        var repeatedRoots = await _roots.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (baselineRoots != repeatedRoots)
+        {
+            throw Conflict(
+                "absence-watermark-root-raced",
+                "A root identity generation changed while the absence watermark was being assembled.");
+        }
+
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken)
             .ConfigureAwait(false);
         var current = await ReadFactsAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+        ValidateRoots(repeatedRoots, current);
         ValidatePopulation(current);
         if (baseline != current)
         {
@@ -125,10 +139,12 @@ internal sealed class PermalinkAbsenceWatermarkService
         CancellationToken cancellationToken)
     {
         await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        var roots = await _roots.ReadAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         var watermark = await ReadLatestAsync(connection, cancellationToken).ConfigureAwait(false)
             ?? throw Conflict("absence-watermark-missing", "No absence watermark has been sealed.");
         var facts = await ReadFactsAsync(connection, transaction: null, cancellationToken).ConfigureAwait(false);
+        ValidateRoots(roots, facts);
         if (watermark.RegistryWriterVersion != RegistryWriterVersion
             || watermark.ContentEpoch != facts.ContentEpoch
             || watermark.JournalCounter != facts.JournalCounter
@@ -151,7 +167,9 @@ internal sealed class PermalinkAbsenceWatermarkService
         }
 
         var after = await ReadFactsAsync(connection, transaction: null, cancellationToken).ConfigureAwait(false);
-        if (facts != after)
+        var afterRoots = await _roots.ReadAsync(cancellationToken).ConfigureAwait(false);
+        ValidateRoots(afterRoots, after);
+        if (facts != after || roots != afterRoots)
         {
             throw Conflict(
                 "absence-watermark-authority-stale",
@@ -197,7 +215,12 @@ internal sealed class PermalinkAbsenceWatermarkService
             {
                 rootCommand.Transaction = transaction;
                 rootCommand.CommandText = """
-                    SELECT root_identity_id, generation FROM PermalinkRootIdentities
+                    SELECT root_identity_id, generation
+                      FROM PermalinkRootIdentities AS current
+                     WHERE generation = (
+                         SELECT MAX(candidate.generation)
+                           FROM PermalinkRootIdentities AS candidate
+                          WHERE candidate.canonical_root = current.canonical_root)
                      ORDER BY root_identity_id COLLATE BINARY
                     """;
                 await using var reader = await rootCommand.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -283,6 +306,16 @@ internal sealed class PermalinkAbsenceWatermarkService
             throw Conflict(
                 "absence-registry-population-incomplete",
                 "The completed registry population does not match the current content epoch and cardinality.");
+        }
+    }
+
+    private static void ValidateRoots(PermalinkRootIdentityCensusResult roots, AuthorityFacts facts)
+    {
+        if (!string.Equals(roots.RootGenerationsJson, facts.RootGenerationsJson, StringComparison.Ordinal))
+        {
+            throw Conflict(
+                "absence-root-census-mismatch",
+                "The freshly attested root set does not match the authority root-generation set.");
         }
     }
 

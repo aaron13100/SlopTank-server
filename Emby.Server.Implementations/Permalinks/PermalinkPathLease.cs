@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-03.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -93,34 +93,14 @@ internal sealed class PermalinkPathLease : IPermalinkPathLease
         CancellationToken cancellationToken)
     {
         RecheckObject();
-        var root = RootIdentityId;
-        var path = NormalizedRelativePath;
-        var activeReservations = await _evidence.CountActiveReservationsAsync(
-            connection, transaction, root, path, cancellationToken).ConfigureAwait(false);
-        var maxGeneration = await _evidence.ReadMaxReservationGenerationAsync(
-            connection, transaction, root, path, cancellationToken).ConfigureAwait(false);
-        if (activeReservations > 0 || maxGeneration != ReservationGeneration)
-        {
-            throw Conflict(
-                "permalink-path-reserved",
-                $"Path '{path}' was reserved while its identity was being established (generation {ReservationGeneration} became {maxGeneration}).");
-        }
-
-        if (await _evidence.CountPendingSlotsAsync(connection, transaction, root, path, cancellationToken)
-            .ConfigureAwait(false) > 0)
-        {
-            throw Conflict(
-                "permalink-supersession-pending",
-                $"Path '{path}' has a pending supersession slot and cannot mint a genesis.");
-        }
-
-        if (await _evidence.CountBlockingAdmissionsAsync(connection, transaction, root, path, cancellationToken)
-            .ConfigureAwait(false) > 0)
-        {
-            throw Conflict(
-                "permalink-path-writer-admitted",
-                $"Path '{path}' has an admitted writer that has not completed.");
-        }
+        await PermalinkPathKeyRecheck.RequireClearAsync(
+            _evidence,
+            connection,
+            transaction,
+            RootIdentityId,
+            NormalizedRelativePath,
+            ReservationGeneration,
+            cancellationToken).ConfigureAwait(false);
 
         if (_intentId is { } intent)
         {

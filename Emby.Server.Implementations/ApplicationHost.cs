@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-09-27, 2026-09-28, 2026-10-01, 2026-10-02, 2026-10-04, 2026-10-06, 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-09-27, 2026-09-28, 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-04, 2026-10-06, 2026-10-07.
 #nullable disable
 
 #pragma warning disable CS1591
@@ -577,6 +577,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IPermalinkPathObjects, MacPermalinkPathObjects>();
             serviceCollection.AddSingleton<PermalinkRootIdentityStore>();
             serviceCollection.AddSingleton<PermalinkRootIdentityRegistry>();
+            serviceCollection.AddSingleton<PermalinkContentRoots>();
             serviceCollection.AddSingleton<PermalinkPathLocks>();
             serviceCollection.AddSingleton<PermalinkPathEvidenceStore>();
             serviceCollection.AddSingleton<PermalinkPathLeaseFactory>();

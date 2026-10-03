@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-07, 2026-09-09, 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-07, 2026-09-09, 2026-10-01, 2026-10-03.
 using System;
 using System.IO;
 using System.Threading;
@@ -22,6 +22,7 @@ internal sealed class PermalinkMediaMutation
     private readonly PermalinkBindingIndex _bindings;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly PermalinkMutationClaimStore _claims;
+    private readonly PermalinkPathLeaseFactory _leases;
 
     public PermalinkMediaMutation(
         PermalinkEvidence evidence,
@@ -32,7 +33,8 @@ internal sealed class PermalinkMediaMutation
         PermalinkDocumentFactory documents,
         PermalinkBindingIndex bindings,
         IPermalinkAtomicFileSystem fileSystem,
-        PermalinkMutationClaimStore claims)
+        PermalinkMutationClaimStore claims,
+        PermalinkPathLeaseFactory leases)
     {
         _evidence = evidence;
         _authority = authority;
@@ -43,27 +45,74 @@ internal sealed class PermalinkMediaMutation
         _bindings = bindings;
         _fileSystem = fileSystem;
         _claims = claims;
+        _leases = leases;
     }
 
+    /// <summary>
+    /// Stages, claims and publishes the replacement under the item path's lease, then finalizes.
+    /// The lease is released before finalization, which has its own physical step (the anchor
+    /// re-assignment) and takes its own lease.
+    /// </summary>
+    /// <param name="operation">The immutable operation document.</param>
+    /// <param name="item">The library item.</param>
+    /// <param name="request">The commit request.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The mutation result.</returns>
     public async Task<PermalinkMutationResult> CommitAsync(
         PermalinkOperationDocument operation,
         BaseItem item,
         PermalinkMutationCommitRequest request,
         CancellationToken cancellationToken)
     {
-        var staging = await StageAsync(
-            operation,
-            item,
-            request.StagedPath,
-            cancellationToken).ConfigureAwait(false);
-        await VerifyPreparedOldAsync(operation, item, claimed: false, cancellationToken)
-            .ConfigureAwait(false);
-        await _claims.ClaimAsync(RequireBundle(operation), operation.OperationId, cancellationToken)
-            .ConfigureAwait(false);
-        await VerifyPreparedOldAsync(operation, item, claimed: true, cancellationToken)
-            .ConfigureAwait(false);
+        await using (var leases = await _leases.AcquireWriterSetAsync([item.Path], cancellationToken)
+            .ConfigureAwait(false))
+        {
+            var staging = await StageAsync(
+                operation,
+                item,
+                request.StagedPath,
+                cancellationToken).ConfigureAwait(false);
+            await VerifyPreparedOldAsync(operation, item, claimed: false, cancellationToken)
+                .ConfigureAwait(false);
+            await _claims.ClaimAsync(RequireBundle(operation), operation.OperationId, cancellationToken)
+                .ConfigureAwait(false);
+            await VerifyPreparedOldAsync(operation, item, claimed: true, cancellationToken)
+                .ConfigureAwait(false);
+            await SwapInStagedAsync(leases, operation, item, staging, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return await FinalizeAsync(operation, item, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Moves the live bytes to operation quarantine (when not already there) and publishes the
+    /// operation's staged bytes at the item path. The pair is one publication unit under one
+    /// lease, so the key is rechecked once, before the first move that will actually run; a lost
+    /// recheck refuses before anything moved and leaves the staged output where it is.
+    /// </summary>
+    /// <param name="leases">The writer's leases; must cover the item path.</param>
+    /// <param name="operation">The immutable operation document.</param>
+    /// <param name="item">The library item.</param>
+    /// <param name="staging">The staged desired bytes.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the publication.</returns>
+    /// <exception cref="PermalinkException">Conflict when the item path's key changed under the lease.</exception>
+    internal async Task SwapInStagedAsync(
+        PermalinkWriterLeaseSet leases,
+        PermalinkOperationDocument operation,
+        BaseItem item,
+        string staging,
+        CancellationToken cancellationToken)
+    {
         var quarantine = GetQuarantinePath(operation);
-        if (!File.Exists(quarantine))
+        var quarantineNeeded = !File.Exists(quarantine);
+        if (quarantineNeeded || !File.Exists(item.Path))
+        {
+            await leases.RecheckAsync(item.Path, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (quarantineNeeded)
         {
             File.Move(item.Path, quarantine);
         }
@@ -74,8 +123,36 @@ internal sealed class PermalinkMediaMutation
         }
 
         _evidence.InvalidateContentDigest(item.Path);
-        return await FinalizeAsync(operation, item, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Moves the quarantined prepared-old bytes back to the item path, rechecking its key first.
+    /// </summary>
+    /// <param name="leases">The writer's leases; must cover the item path.</param>
+    /// <param name="operation">The immutable operation document.</param>
+    /// <param name="item">The library item.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the restoration.</returns>
+    /// <exception cref="PermalinkException">Conflict when the item path's key changed under the lease.</exception>
+    internal async Task RestoreQuarantineAsync(
+        PermalinkWriterLeaseSet leases,
+        PermalinkOperationDocument operation,
+        BaseItem item,
+        CancellationToken cancellationToken)
+    {
+        await leases.RecheckAsync(item.Path, cancellationToken).ConfigureAwait(false);
+        File.Move(GetQuarantinePath(operation), item.Path);
+        _evidence.InvalidateContentDigest(item.Path);
+    }
+
+    /// <summary>
+    /// Leases the item path for a physical step run outside Commit (recovery, resolution).
+    /// </summary>
+    /// <param name="item">The library item.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The lease set.</returns>
+    internal Task<PermalinkWriterLeaseSet> LeaseItemPathAsync(BaseItem item, CancellationToken cancellationToken)
+        => _leases.AcquireWriterSetAsync([item.Path], cancellationToken);
 
     /// <summary>
     /// Copies caller-owned bytes into durable operation staging and publishes exact Ready evidence.
@@ -321,6 +398,9 @@ internal sealed class PermalinkMediaMutation
         var liveAnchor = _fileSystem.ReadAnchorToken(item.Path);
         if (liveAnchor is null)
         {
+            await using var leases = await _leases.AcquireWriterSetAsync([item.Path], cancellationToken)
+                .ConfigureAwait(false);
+            await leases.RecheckAsync(item.Path, cancellationToken).ConfigureAwait(false);
             _fileSystem.AssignAnchorToken(item.Path, reservation.AnchorToken);
         }
         else if (!string.Equals(liveAnchor, reservation.AnchorToken, StringComparison.Ordinal))

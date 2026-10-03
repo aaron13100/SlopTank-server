@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-09, 2026-10-03.
 using System;
 using System.Globalization;
 using System.IO;
@@ -56,34 +56,51 @@ internal sealed class PermalinkMediaRecovery
             throw Conflict("ready-missing", "Operation-owned desired evidence is missing.");
         }
 
-        var evidence = await ObserveAsync(operation, item, ready.ContentRoot, cancellationToken)
-            .ConfigureAwait(false);
         var bundle = PermalinkMediaMutation.RequireBundle(operation);
-        if (evidence.LiveIsOld && evidence.StagingIsDesired && !evidence.QuarantineExists)
+        bool finalize;
+        await using (var leases = await _mutation.LeaseItemPathAsync(item, cancellationToken)
+            .ConfigureAwait(false))
         {
-            await _claims.ClaimAsync(bundle, operation.OperationId, cancellationToken)
+            var evidence = await ObserveAsync(operation, item, ready.ContentRoot, cancellationToken)
                 .ConfigureAwait(false);
-            File.Move(item.Path, _mutation.GetQuarantinePath(operation));
-            File.Move(_mutation.GetStagingPath(operation), item.Path);
-            _evidence.InvalidateContentDigest(item.Path);
-            return await _mutation.FinalizeAsync(operation, item, cancellationToken)
-                .ConfigureAwait(false);
+            if (evidence.LiveIsOld && evidence.StagingIsDesired && !evidence.QuarantineExists)
+            {
+                await _claims.ClaimAsync(bundle, operation.OperationId, cancellationToken)
+                    .ConfigureAwait(false);
+                await _mutation.SwapInStagedAsync(
+                    leases,
+                    operation,
+                    item,
+                    _mutation.GetStagingPath(operation),
+                    cancellationToken).ConfigureAwait(false);
+                finalize = true;
+            }
+            else if (!evidence.LiveExists && evidence.QuarantineIsOld && evidence.StagingIsDesired)
+            {
+                await RequireClaimsAsync(bundle, operation.OperationId, cancellationToken)
+                    .ConfigureAwait(false);
+                await _mutation.SwapInStagedAsync(
+                    leases,
+                    operation,
+                    item,
+                    _mutation.GetStagingPath(operation),
+                    cancellationToken).ConfigureAwait(false);
+                finalize = true;
+            }
+            else if (evidence.LiveIsDesired && evidence.QuarantineIsOld)
+            {
+                await RequireClaimsAsync(bundle, operation.OperationId, cancellationToken)
+                    .ConfigureAwait(false);
+                finalize = true;
+            }
+            else
+            {
+                finalize = false;
+            }
         }
 
-        if (!evidence.LiveExists && evidence.QuarantineIsOld && evidence.StagingIsDesired)
+        if (finalize)
         {
-            await RequireClaimsAsync(bundle, operation.OperationId, cancellationToken)
-                .ConfigureAwait(false);
-            File.Move(_mutation.GetStagingPath(operation), item.Path);
-            _evidence.InvalidateContentDigest(item.Path);
-            return await _mutation.FinalizeAsync(operation, item, cancellationToken)
-                .ConfigureAwait(false);
-        }
-
-        if (evidence.LiveIsDesired && evidence.QuarantineIsOld)
-        {
-            await RequireClaimsAsync(bundle, operation.OperationId, cancellationToken)
-                .ConfigureAwait(false);
             return await _mutation.FinalizeAsync(operation, item, cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -168,8 +185,13 @@ internal sealed class PermalinkMediaRecovery
                     "the live target is occupied or quarantine is not exact prepared-old.");
             }
 
-            File.Move(_mutation.GetQuarantinePath(operation), item.Path);
-            _evidence.InvalidateContentDigest(item.Path);
+            await using (var leases = await _mutation.LeaseItemPathAsync(item, cancellationToken)
+                .ConfigureAwait(false))
+            {
+                await _mutation.RestoreQuarantineAsync(leases, operation, item, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             await _journal.WritePhaseAsync(
                 operation.OperationId,
                 PermalinkPhase.Restored,

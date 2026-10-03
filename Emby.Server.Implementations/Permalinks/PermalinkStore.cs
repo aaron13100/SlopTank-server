@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-03.
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -25,7 +25,7 @@ internal sealed class PermalinkStore : IPermalinkStore
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly PermalinkPathLeaseFactory _leases;
     private readonly ILogger<PermalinkStore> _logger;
-    private readonly string[] _contentRoots;
+    private readonly PermalinkContentRoots _contentRoots;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkStore"/> class.
@@ -39,7 +39,7 @@ internal sealed class PermalinkStore : IPermalinkStore
     /// <param name="fileSystem">The durable permalink filesystem.</param>
     /// <param name="leases">The path lease factory.</param>
     /// <param name="logger">The logger, used for the per-step ensure timing.</param>
-    /// <param name="configuration">The server configuration.</param>
+    /// <param name="contentRoots">The configured content roots.</param>
     public PermalinkStore(
         PermalinkAuthorityStore authority,
         PermalinkTransitionStore transitions,
@@ -50,7 +50,7 @@ internal sealed class PermalinkStore : IPermalinkStore
         IPermalinkAtomicFileSystem fileSystem,
         PermalinkPathLeaseFactory leases,
         ILogger<PermalinkStore> logger,
-        IConfiguration configuration)
+        PermalinkContentRoots contentRoots)
     {
         _authority = authority;
         _transitions = transitions;
@@ -61,13 +61,7 @@ internal sealed class PermalinkStore : IPermalinkStore
         _fileSystem = fileSystem;
         _leases = leases;
         _logger = logger;
-        _contentRoots = configuration.GetSection("Permalinks:ContentRoots")
-            .GetChildren()
-            .Select(section => section.Value)
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(value => Path.GetFullPath(value!))
-            .OrderByDescending(value => value.Length)
-            .ToArray();
+        _contentRoots = contentRoots;
     }
 
     /// <inheritdoc />
@@ -281,25 +275,7 @@ internal sealed class PermalinkStore : IPermalinkStore
                 $"{Path.DirectorySeparatorChar}permalink-virtual-seasons{Path.DirectorySeparatorChar}",
                 StringComparison.Ordinal);
 
-    private string ResolveRoot(string path)
-    {
-        var fullPath = Path.GetFullPath(path);
-        foreach (var root in _contentRoots)
-        {
-            var relative = Path.GetRelativePath(root, fullPath);
-            if (relative != ".."
-                && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                && !Path.IsPathRooted(relative))
-            {
-                return root;
-            }
-        }
-
-        throw new PermalinkException(
-            PermalinkErrorKind.Ineligible,
-            "content-root-missing",
-            $"Path '{path}' is outside every configured permalink content root.");
-    }
+    private string ResolveRoot(string path) => _contentRoots.Resolve(path);
 
     private static void ValidateAdoptionCandidate(
         PermalinkGenesisReservation reservation,

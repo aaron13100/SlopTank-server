@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-03, 2026-09-07, 2026-09-09, 2026-09-30.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-03, 2026-09-07, 2026-09-09, 2026-09-30, 2026-10-03.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -24,26 +24,20 @@ internal sealed class PermalinkMutationBundleFactory
     private readonly PermalinkAuthorityStore _authority;
     private readonly PermalinkCapsuleStore _capsules;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
-    private readonly string[] _contentRoots;
+    private readonly PermalinkContentRoots _contentRoots;
 
     public PermalinkMutationBundleFactory(
         ILibraryManager libraryManager,
         PermalinkAuthorityStore authority,
         PermalinkCapsuleStore capsules,
         IPermalinkAtomicFileSystem fileSystem,
-        IConfiguration configuration)
+        PermalinkContentRoots contentRoots)
     {
         _libraryManager = libraryManager;
         _authority = authority;
         _capsules = capsules;
         _fileSystem = fileSystem;
-        _contentRoots = configuration.GetSection("Permalinks:ContentRoots")
-            .GetChildren()
-            .Select(section => section.Value)
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(value => Path.GetFullPath(value!))
-            .OrderByDescending(value => value.Length)
-            .ToArray();
+        _contentRoots = contentRoots;
     }
 
     /// <summary>
@@ -246,25 +240,7 @@ internal sealed class PermalinkMutationBundleFactory
         return parts;
     }
 
-    private string ResolveRoot(string path)
-    {
-        var fullPath = Path.GetFullPath(path);
-        foreach (var root in _contentRoots)
-        {
-            var relative = Path.GetRelativePath(root, fullPath);
-            if (relative != ".."
-                && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                && !Path.IsPathRooted(relative))
-            {
-                return root;
-            }
-        }
-
-        throw new PermalinkException(
-            PermalinkErrorKind.Ineligible,
-            "content-root-missing",
-            $"Destination '{path}' is outside every configured permalink content root.");
-    }
+    private string ResolveRoot(string path) => _contentRoots.Resolve(path);
 
     private static PermalinkException Conflict(string code, string message)
     {

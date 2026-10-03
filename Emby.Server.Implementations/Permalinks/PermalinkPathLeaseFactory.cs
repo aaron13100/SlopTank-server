@@ -1,5 +1,6 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-03.
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Permalinks;
@@ -19,6 +20,7 @@ internal sealed class PermalinkPathLeaseFactory
     private readonly IPermalinkPathObjects _objects;
     private readonly PermalinkPathEvidenceStore _evidence;
     private readonly PermalinkAuthorityStore _authority;
+    private readonly PermalinkContentRoots _contentRoots;
 
     public PermalinkPathLeaseFactory(
         PermalinkRootIdentityRegistry roots,
@@ -26,7 +28,8 @@ internal sealed class PermalinkPathLeaseFactory
         IPermalinkAtomicFileSystem fileSystem,
         IPermalinkPathObjects objects,
         PermalinkPathEvidenceStore evidence,
-        PermalinkAuthorityStore authority)
+        PermalinkAuthorityStore authority,
+        PermalinkContentRoots contentRoots)
     {
         _roots = roots;
         _locks = locks;
@@ -34,6 +37,7 @@ internal sealed class PermalinkPathLeaseFactory
         _objects = objects;
         _evidence = evidence;
         _authority = authority;
+        _contentRoots = contentRoots;
     }
 
     /// <summary>
@@ -92,6 +96,96 @@ internal sealed class PermalinkPathLeaseFactory
         catch
         {
             keyLock.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Orders two lease keys: root identity first, then relative path, both ordinal. The single
+    /// definition of lease order, shared by acquisition and the lease set's own iteration.
+    /// </summary>
+    /// <param name="left">The first key.</param>
+    /// <param name="right">The second key.</param>
+    /// <returns>A negative, zero or positive comparison result.</returns>
+    public static int CompareKeys(PermalinkLeasedKey left, PermalinkLeasedKey right)
+    {
+        var byRoot = string.CompareOrdinal(left.RootIdentityId, right.RootIdentityId);
+        return byRoot != 0
+            ? byRoot
+            : string.CompareOrdinal(left.NormalizedRelativePath, right.NormalizedRelativePath);
+    }
+
+    /// <summary>
+    /// Acquires the path leases of a physical writer for every given library path, in ascending
+    /// key order (after the caller's per-item lock), and records each key's reservation generation
+    /// so <see cref="PermalinkWriterLeaseSet.RecheckAsync"/> can detect a reservation that landed
+    /// and was released in between. Duplicate paths (and aliases of one key) are leased once.
+    /// Callers can neither pick the order nor forget to release a key: a failure while acquiring
+    /// releases every key already taken.
+    /// </summary>
+    /// <param name="paths">Every library path the writer will create, rename, replace or unlink.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The lease set; dispose it when the physical steps are done.</returns>
+    /// <exception cref="PermalinkException">Ineligible when a path is outside every content root; Unavailable for an UNKNOWN root.</exception>
+    public async Task<PermalinkWriterLeaseSet> AcquireWriterSetAsync(
+        IEnumerable<string> paths,
+        CancellationToken cancellationToken)
+    {
+        var resolved = new Dictionary<string, PermalinkLeasedKey>(StringComparer.Ordinal);
+        var byKey = new Dictionary<PermalinkLeasedKey, string>();
+        foreach (var path in paths)
+        {
+            var full = PermalinkWriterLeaseSet.FullPathKey(path);
+            if (resolved.ContainsKey(full))
+            {
+                continue;
+            }
+
+            var configuredRoot = _contentRoots.Resolve(path);
+            var root = await _roots.EnsureKnownAsync(configuredRoot, cancellationToken).ConfigureAwait(false);
+            var key = new PermalinkLeasedKey(root.RootIdentityId, PermalinkPathKey.Normalize(configuredRoot, path));
+            resolved[full] = key;
+            _ = byKey.TryAdd(key, full);
+        }
+
+        var ordered = new List<PermalinkLeasedKey>(byKey.Keys);
+        ordered.Sort(CompareKeys);
+        var handles = new List<IDisposable>(ordered.Count);
+        try
+        {
+            foreach (var key in ordered)
+            {
+                handles.Add(await _locks.AcquireAsync(
+                    PermalinkPathKey.LockKey(key.RootIdentityId, key.NormalizedRelativePath),
+                    cancellationToken).ConfigureAwait(false));
+            }
+
+            var generations = new Dictionary<PermalinkLeasedKey, long>();
+            await using (var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false))
+            {
+                foreach (var key in ordered)
+                {
+                    generations[key] = await _evidence.ReadMaxReservationGenerationAsync(
+                        connection, null, key.RootIdentityId, key.NormalizedRelativePath, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+
+            var entries = new Dictionary<string, PermalinkWriterLeaseSet.Entry>(StringComparer.Ordinal);
+            foreach (var (full, key) in resolved)
+            {
+                entries[full] = new PermalinkWriterLeaseSet.Entry(key, generations[key]);
+            }
+
+            return new PermalinkWriterLeaseSet(entries, handles, _authority, _evidence);
+        }
+        catch
+        {
+            for (var index = handles.Count - 1; index >= 0; index--)
+            {
+                handles[index].Dispose();
+            }
+
             throw;
         }
     }

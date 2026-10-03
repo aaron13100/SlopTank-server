@@ -1,5 +1,6 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09, 2026-10-03.
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -22,6 +23,7 @@ internal sealed class PermalinkPathMutation
     private readonly PermalinkMutationClaimStore _claims;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly PermalinkCrossRootMutation _crossRoot;
+    private readonly PermalinkPathLeaseFactory _leases;
 
     public PermalinkPathMutation(
         ILibraryManager libraryManager,
@@ -30,7 +32,8 @@ internal sealed class PermalinkPathMutation
         PermalinkBindingIndex bindings,
         PermalinkMutationClaimStore claims,
         IPermalinkAtomicFileSystem fileSystem,
-        PermalinkCrossRootMutation crossRoot)
+        PermalinkCrossRootMutation crossRoot,
+        PermalinkPathLeaseFactory leases)
     {
         _libraryManager = libraryManager;
         _evidence = evidence;
@@ -39,6 +42,7 @@ internal sealed class PermalinkPathMutation
         _claims = claims;
         _fileSystem = fileSystem;
         _crossRoot = crossRoot;
+        _leases = leases;
     }
 
     /// <summary>Commits the exact immutable path map without replacing any destination.</summary>
@@ -53,28 +57,31 @@ internal sealed class PermalinkPathMutation
     {
         var bundle = RequireBundle(operation);
         ValidateDestinations(bundle);
-        await VerifyOldAsync(operation, item, cancellationToken).ConfigureAwait(false);
-        await _journal.WritePhaseAsync(
-            operation.OperationId,
-            PermalinkPhase.Ready,
-            new PermalinkOperationPhase(
+        await using (var leases = await AcquireAsync(bundle, cancellationToken).ConfigureAwait(false))
+        {
+            await VerifyOldAsync(operation, item, cancellationToken).ConfigureAwait(false);
+            await _journal.WritePhaseAsync(
                 operation.OperationId,
-                PermalinkPhase.Ready.Name,
-                operation.OldContentRoot,
-                operation.CreatedAt),
-            cancellationToken).ConfigureAwait(false);
-        await _claims.ClaimAsync(bundle, operation.OperationId, cancellationToken)
-            .ConfigureAwait(false);
-        await VerifyOldAsync(operation, item, cancellationToken).ConfigureAwait(false);
-
-        if (IsCrossRoot(bundle))
-        {
-            await _crossRoot.PublishAsync(operation, bundle, cancellationToken)
+                PermalinkPhase.Ready,
+                new PermalinkOperationPhase(
+                    operation.OperationId,
+                    PermalinkPhase.Ready.Name,
+                    operation.OldContentRoot,
+                    operation.CreatedAt),
+                cancellationToken).ConfigureAwait(false);
+            await _claims.ClaimAsync(bundle, operation.OperationId, cancellationToken)
                 .ConfigureAwait(false);
-        }
-        else
-        {
-            PublishSameRoot(bundle);
+            await VerifyOldAsync(operation, item, cancellationToken).ConfigureAwait(false);
+
+            if (IsCrossRoot(bundle))
+            {
+                await _crossRoot.PublishAsync(operation, bundle, leases, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await PublishSameRootAsync(leases, bundle, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         return await CompleteAsync(operation, item, bundle, cancellationToken)
@@ -121,18 +128,22 @@ internal sealed class PermalinkPathMutation
                 "Same-root path evidence is mixed and cannot be recovered automatically.");
         }
 
-        if (allSources && !anyDestinations)
+        await using (var leases = await AcquireAsync(bundle, cancellationToken).ConfigureAwait(false))
         {
-            await _claims.ClaimAsync(bundle, operation.OperationId, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        else
-        {
-            await RequireClaimsAsync(bundle, operation.OperationId, cancellationToken)
-                .ConfigureAwait(false);
+            if (allSources && !anyDestinations)
+            {
+                await _claims.ClaimAsync(bundle, operation.OperationId, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await RequireClaimsAsync(bundle, operation.OperationId, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            await _crossRoot.PublishAsync(operation, bundle, leases, cancellationToken).ConfigureAwait(false);
         }
 
-        await _crossRoot.PublishAsync(operation, bundle, cancellationToken).ConfigureAwait(false);
         return await CompleteAsync(operation, item, bundle, cancellationToken)
             .ConfigureAwait(false);
     }
@@ -177,8 +188,60 @@ internal sealed class PermalinkPathMutation
         return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
     }
 
-    private static void PublishSameRoot(PermalinkMutationBundle bundle)
+    /// <summary>
+    /// Leases every library path a bundle will create, rename or unlink: each part's source and
+    /// destination plus, for a tree, its source and destination roots.
+    /// </summary>
+    private Task<PermalinkWriterLeaseSet> AcquireAsync(
+        PermalinkMutationBundle bundle,
+        CancellationToken cancellationToken)
     {
+        return _leases.AcquireWriterSetAsync(LeasedPaths(bundle), cancellationToken);
+    }
+
+    private static List<string> LeasedPaths(PermalinkMutationBundle bundle)
+    {
+        var paths = new List<string>();
+        foreach (var part in bundle.Parts)
+        {
+            paths.Add(part.SourcePath);
+            if (!string.IsNullOrWhiteSpace(part.DestinationPath))
+            {
+                paths.Add(part.DestinationPath);
+            }
+        }
+
+        if (bundle.Parts.Count > 0
+            && bundle.Parts.All(part => part.Role.StartsWith("tree:", StringComparison.Ordinal)))
+        {
+            var first = bundle.Parts[0];
+            var relative = first.Role["tree:".Length..].Replace('/', Path.DirectorySeparatorChar);
+            paths.Add(RemoveRelativePath(first.SourcePath, relative));
+            if (!string.IsNullOrWhiteSpace(first.DestinationPath))
+            {
+                paths.Add(RemoveRelativePath(first.DestinationPath, relative));
+            }
+        }
+
+        return paths;
+    }
+
+    /// <summary>
+    /// Publishes a same-root bundle by renaming it. Every leased key is rechecked once before the
+    /// first rename, so a lost recheck cannot leave a half-moved multipart bundle, and each step
+    /// rechecks the keys it touches again immediately before its own rename.
+    /// </summary>
+    /// <param name="leases">The writer's leases; must cover every part and tree root.</param>
+    /// <param name="bundle">The immutable bundle.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the publication.</returns>
+    /// <exception cref="PermalinkException">Conflict when any leased key changed.</exception>
+    internal static async Task PublishSameRootAsync(
+        PermalinkWriterLeaseSet leases,
+        PermalinkMutationBundle bundle,
+        CancellationToken cancellationToken)
+    {
+        await leases.RecheckAllAsync(cancellationToken).ConfigureAwait(false);
         var directoryMove = bundle.Parts.Count > 0
             && bundle.Parts.All(part => part.Role.StartsWith("tree:", StringComparison.Ordinal));
         if (directoryMove)
@@ -188,6 +251,8 @@ internal sealed class PermalinkPathMutation
                 .Replace('/', Path.DirectorySeparatorChar);
             var sourceRoot = RemoveRelativePath(first.SourcePath, relative);
             var destinationRoot = RemoveRelativePath(first.DestinationPath!, relative);
+            await leases.RecheckAsync(sourceRoot, cancellationToken).ConfigureAwait(false);
+            await leases.RecheckAsync(destinationRoot, cancellationToken).ConfigureAwait(false);
             Directory.CreateDirectory(Path.GetDirectoryName(destinationRoot)!);
             Directory.Move(sourceRoot, destinationRoot);
             return;
@@ -195,6 +260,8 @@ internal sealed class PermalinkPathMutation
 
         foreach (var part in bundle.Parts)
         {
+            await leases.RecheckAsync(part.SourcePath, cancellationToken).ConfigureAwait(false);
+            await leases.RecheckAsync(part.DestinationPath!, cancellationToken).ConfigureAwait(false);
             Directory.CreateDirectory(Path.GetDirectoryName(part.DestinationPath!)!);
             File.Move(part.SourcePath, part.DestinationPath!);
         }

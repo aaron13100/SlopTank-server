@@ -15,15 +15,18 @@ namespace Emby.Server.Implementations.Permalinks;
 internal sealed class PermalinkRootIdentityCensus : IPermalinkRootIdentityCensus
 {
     private readonly PermalinkContentRoots _contentRoots;
+    private readonly PermalinkEvidenceRoots _evidenceRoots;
     private readonly PermalinkRootIdentityRegistry _registry;
     private readonly PermalinkRootIdentityStore _store;
 
     public PermalinkRootIdentityCensus(
         PermalinkContentRoots contentRoots,
+        PermalinkEvidenceRoots evidenceRoots,
         PermalinkRootIdentityRegistry registry,
         PermalinkRootIdentityStore store)
     {
         _contentRoots = contentRoots;
+        _evidenceRoots = evidenceRoots;
         _registry = registry;
         _store = store;
     }
@@ -33,6 +36,13 @@ internal sealed class PermalinkRootIdentityCensus : IPermalinkRootIdentityCensus
     {
         var generations = new SortedDictionary<string, long>(StringComparer.Ordinal);
         foreach (var configuredRoot in _contentRoots.ConfiguredRoots)
+        {
+            Add(
+                generations,
+                await _registry.EnsureKnownAsync(configuredRoot, cancellationToken).ConfigureAwait(false));
+        }
+
+        foreach (var configuredRoot in _evidenceRoots.ConfiguredRoots)
         {
             Add(
                 generations,

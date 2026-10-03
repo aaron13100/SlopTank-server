@@ -578,6 +578,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkRootIdentityStore>();
             serviceCollection.AddSingleton<PermalinkRootIdentityRegistry>();
             serviceCollection.AddSingleton<PermalinkContentRoots>();
+            serviceCollection.AddSingleton<PermalinkEvidenceRoots>();
             serviceCollection.AddSingleton<PermalinkPathLocks>();
             serviceCollection.AddSingleton<PermalinkPathEvidenceStore>();
             serviceCollection.AddSingleton<PermalinkPathLeaseFactory>();

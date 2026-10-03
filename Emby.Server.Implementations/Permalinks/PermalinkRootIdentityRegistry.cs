@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-03.
 using System;
 using System.Collections.Concurrent;
 using System.Globalization;
@@ -11,7 +11,7 @@ using Microsoft.Data.Sqlite;
 namespace Emby.Server.Implementations.Permalinks;
 
 /// <summary>
-/// Decides whether a content root is KNOWN (marker, registry row, authority and device:inode all
+/// Decides whether a configured root is KNOWN (marker, registry row, authority and device:inode all
 /// agree), registers a brand-new root, or refuses an UNKNOWN one (P6 decisions, "Root identity
 /// registration"). An UNKNOWN root is never auto re-registered: a marker without a row, a row
 /// without a marker, a marker from another authority and a device:inode mismatch all need an
@@ -44,16 +44,16 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
     }
 
     /// <summary>
-    /// Returns the identity of a content root, registering it when it is brand new.
+    /// Returns the identity of a configured root, registering it when it is brand new.
     /// </summary>
-    /// <param name="configuredRoot">The configured content-root path (an alias is fine).</param>
+    /// <param name="configuredRoot">The configured content-root or evidence-root path (an alias is fine).</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The KNOWN root identity.</returns>
     /// <exception cref="PermalinkException">Unavailable with code <see cref="UnknownCode"/> for an UNKNOWN root.</exception>
     public async Task<PermalinkRootIdentity> EnsureKnownAsync(string configuredRoot, CancellationToken cancellationToken)
     {
         var canonical = _objects.CanonicalizeDirectory(configuredRoot)
-            ?? throw Unknown(configuredRoot, "the content root does not exist or cannot be resolved");
+            ?? throw Unknown(configuredRoot, "the configured root does not exist or cannot be resolved");
         var markerPath = Path.Combine(canonical, PermalinkRootMarker.FileName);
         var rootPin = _objects.ReadPinnedIdentityNoFollow(canonical);
         var markerPin = _objects.ReadPinnedIdentityNoFollow(markerPath);
@@ -90,7 +90,7 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
         => new(
             PermalinkErrorKind.Unavailable,
             UnknownCode,
-            $"The content root '{root}' has no verifiable permalink identity ({reason}). It is not re-registered automatically.",
+            $"The configured root '{root}' has no verifiable permalink identity ({reason}). It is not re-registered automatically.",
             cause);
 
     private async Task<PermalinkRootIdentity> ResolveLockedAsync(
@@ -99,7 +99,7 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
         CancellationToken cancellationToken)
     {
         var rootPin = _objects.ReadPinnedIdentityNoFollow(canonical)
-            ?? throw Unknown(canonical, "the content root cannot be inspected");
+            ?? throw Unknown(canonical, "the configured root cannot be inspected");
         var markerBytes = _objects.ReadFileIfExists(markerPath);
         var rowForRoot = await _store.FindByRootAsync(canonical, cancellationToken).ConfigureAwait(false);
         if (markerBytes is null)

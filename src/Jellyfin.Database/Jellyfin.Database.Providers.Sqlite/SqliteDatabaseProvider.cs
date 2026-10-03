@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-24.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-24, 2026-10-03.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -25,6 +25,7 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
     private const string BackupFolderName = "SQLiteBackups";
     private readonly IApplicationPaths _applicationPaths;
     private readonly ILogger<SqliteDatabaseProvider> _logger;
+    private string? _databasePath;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SqliteDatabaseProvider"/> class.
@@ -68,6 +69,8 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
             Pooling = GetOption(customOptions, "pooling", e => e.Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase), () => true),
             DefaultTimeout = GetOption(customOptions, "command-timeout", int.Parse, () => 60)
         };
+
+        _databasePath = Path.GetFullPath(sqliteConnectionBuilder.DataSource!);
 
         var connectionString = sqliteConnectionBuilder.ToString();
 
@@ -148,38 +151,75 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
     /// <inheritdoc />
     public Task<string> MigrationBackupFast(CancellationToken cancellationToken)
     {
-        var key = DateTime.UtcNow.ToString("yyyyMMddhhmmss", CultureInfo.InvariantCulture);
-        var path = Path.Combine(_applicationPaths.DataPath, "jellyfin.db");
-        var backupFile = Path.Combine(_applicationPaths.DataPath, BackupFolderName);
-        Directory.CreateDirectory(backupFile);
+        cancellationToken.ThrowIfCancellationRequested();
 
-        backupFile = Path.Combine(backupFile, $"{key}_jellyfin.db");
-        File.Copy(path, backupFile);
-        return Task.FromResult(key);
+        var key = DateTime.UtcNow.ToString("yyyyMMddHHmmssfffffff", CultureInfo.InvariantCulture);
+        var path = GetDatabasePath();
+        var backupDirectory = GetBackupDirectory(path);
+        Directory.CreateDirectory(backupDirectory);
+
+        var backupFile = GetBackupPath(backupDirectory, key);
+        var stagingFile = CreateStagingPath(backupFile);
+        try
+        {
+            CreateValidatedSnapshot(path, stagingFile, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            FlushFile(stagingFile);
+            File.Move(stagingFile, backupFile);
+            return Task.FromResult(key);
+        }
+        finally
+        {
+            DeleteDatabaseFiles(stagingFile);
+        }
     }
 
     /// <inheritdoc />
     public Task RestoreBackupFast(string key, CancellationToken cancellationToken)
     {
-        // ensure there are absolutely no dangling Sqlite connections.
-        SqliteConnection.ClearAllPools();
-        var path = Path.Combine(_applicationPaths.DataPath, "jellyfin.db");
-        var backupFile = Path.Combine(_applicationPaths.DataPath, BackupFolderName, $"{key}_jellyfin.db");
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var path = GetDatabasePath();
+        var backupFile = GetBackupPath(GetBackupDirectory(path), key);
 
         if (!File.Exists(backupFile))
         {
             _logger.LogCritical("Tried to restore a backup that does not exist: {Key}", key);
-            return Task.CompletedTask;
+            throw new FileNotFoundException("The SQLite migration backup does not exist.", backupFile);
         }
 
-        File.Copy(backupFile, path, true);
-        return Task.CompletedTask;
+        var stagingFile = CreateStagingPath(path);
+        try
+        {
+            CreateValidatedSnapshot(backupFile, stagingFile, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            FlushFile(stagingFile);
+
+            // Restore is only called while startup migration work is quiesced. Pool clearing
+            // prevents a later borrower from retaining the previous database generation; an
+            // independently active connection will make this commit fail on platforms that
+            // enforce file locks and must be treated as a failed rollback.
+            SqliteConnection.ClearAllPools();
+
+            // Once the commit begins, finish it without observing cancellation. A WAL, SHM, or
+            // rollback journal from the replaced database must never be attached to the
+            // validated replacement.
+            DeleteDatabaseSidecars(path);
+            File.Move(stagingFile, path, true);
+            SqliteConnection.ClearAllPools();
+            return Task.CompletedTask;
+        }
+        finally
+        {
+            DeleteDatabaseFiles(stagingFile);
+        }
     }
 
     /// <inheritdoc />
     public Task DeleteBackup(string key)
     {
-        var backupFile = Path.Combine(_applicationPaths.DataPath, BackupFolderName, $"{key}_jellyfin.db");
+        var path = GetDatabasePath();
+        var backupFile = GetBackupPath(GetBackupDirectory(path), key);
 
         if (!File.Exists(backupFile))
         {
@@ -190,6 +230,118 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
         File.Delete(backupFile);
         return Task.CompletedTask;
     }
+
+    private static string GetBackupDirectory(string databasePath)
+    {
+        var directory = Path.GetDirectoryName(databasePath)
+            ?? throw new InvalidOperationException("The SQLite database path has no parent directory.");
+        return Path.Combine(directory, BackupFolderName);
+    }
+
+    private static string GetBackupPath(string backupDirectory, string key)
+    {
+        if (string.IsNullOrWhiteSpace(key)
+            || key.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0
+            || key.Contains(Path.DirectorySeparatorChar, StringComparison.Ordinal)
+            || key.Contains(Path.AltDirectorySeparatorChar, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("The SQLite backup key is not a valid file name.", nameof(key));
+        }
+
+        return Path.Combine(backupDirectory, $"{key}_jellyfin.db");
+    }
+
+    private static string CreateStagingPath(string destinationPath)
+    {
+        var directory = Path.GetDirectoryName(destinationPath)
+            ?? throw new InvalidOperationException("The SQLite destination path has no parent directory.");
+        return Path.Combine(directory, $".{Path.GetFileName(destinationPath)}.{Guid.NewGuid():N}.staging");
+    }
+
+    private static void CreateValidatedSnapshot(string sourcePath, string destinationPath, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var sourceConnectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = sourcePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false
+        }.ToString();
+        var destinationConnectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = destinationPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false
+        }.ToString();
+
+        using (var source = new SqliteConnection(sourceConnectionString))
+        using (var destination = new SqliteConnection(destinationConnectionString))
+        {
+            source.Open();
+            destination.Open();
+            cancellationToken.ThrowIfCancellationRequested();
+            source.BackupDatabase(destination);
+        }
+
+        ValidateDatabase(destinationPath);
+    }
+
+    private static void ValidateDatabase(string path)
+    {
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadOnly,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false
+        }.ToString();
+
+        using var connection = new SqliteConnection(connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA integrity_check;";
+        using var reader = command.ExecuteReader();
+
+        var resultCount = 0;
+        while (reader.Read())
+        {
+            resultCount++;
+            if (!string.Equals(reader.GetString(0), "ok", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("The staged SQLite database failed its integrity check.");
+            }
+        }
+
+        if (resultCount != 1)
+        {
+            throw new InvalidDataException("The staged SQLite database returned an unexpected integrity-check result.");
+        }
+    }
+
+    private static void FlushFile(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+        stream.Flush(flushToDisk: true);
+    }
+
+    private static void DeleteDatabaseSidecars(string path)
+    {
+        File.Delete(path + "-wal");
+        File.Delete(path + "-shm");
+        File.Delete(path + "-journal");
+    }
+
+    private static void DeleteDatabaseFiles(string path)
+    {
+        File.Delete(path);
+        DeleteDatabaseSidecars(path);
+    }
+
+    private string GetDatabasePath()
+        => _databasePath ?? Path.GetFullPath(Path.Combine(_applicationPaths.DataPath, "jellyfin.db"));
 
     /// <inheritdoc/>
     public async Task PurgeDatabase(JellyfinDbContext dbContext, IEnumerable<string>? tableNames)

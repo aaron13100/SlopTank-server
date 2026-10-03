@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-23.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-23, 2026-10-04.
 using System.Collections.Generic;
 
 namespace MediaBrowser.Controller.Permalinks;
@@ -8,8 +8,10 @@ namespace MediaBrowser.Controller.Permalinks;
 /// <param name="DesiredProviderIds">The exact desired provider assignment.</param>
 /// <param name="DesiredItemKind">The exact desired item kind.</param>
 /// <param name="CascadeToDescendants">Whether the mutation body rewrites recursive descendants and must durably fence them too. A manual metadata edit that leaves LockData unchanged never touches a descendant, so its response must not pay the per-descendant ensure and journal round-trips (measured 2026-09-23: 27 s for a 15-episode season under ambient load, 100 s+ on 2026-09-21 while the editor spun forever).</param>
+/// <param name="SkipPreparationWhenIdentityUnchanged">Whether a manual metadata caller has verified that every identity-bearing field remains unchanged and may therefore skip the physical-content prepare. The adapter independently rechecks provider ids and item kind; pending durable operations still fence every item in the write scope.</param>
 public sealed record PermalinkIdentityMutationRequest(
     string Kind,
     IReadOnlyDictionary<string, string>? DesiredProviderIds = null,
     string? DesiredItemKind = null,
-    bool CascadeToDescendants = false);
+    bool CascadeToDescendants = false,
+    bool SkipPreparationWhenIdentityUnchanged = false);

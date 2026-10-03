@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-23.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-23, 2026-10-04.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -175,6 +175,11 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
                     itemId: item.Id);
             }
 
+            if (CanSkipPreparationForUnchangedIdentity(items[0], request))
+            {
+                continue;
+            }
+
             var operationId = Guid.NewGuid();
             await _coordinator.PrepareAsync(
                 item,
@@ -189,6 +194,28 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         }
 
         return result;
+    }
+
+    private static bool CanSkipPreparationForUnchangedIdentity(
+        BaseItem primaryItem,
+        PermalinkIdentityMutationRequest request)
+    {
+        if (request.Kind != "manual-metadata"
+            || !request.SkipPreparationWhenIdentityUnchanged
+            || request.DesiredProviderIds is null)
+        {
+            return false;
+        }
+
+        return primaryItem.ProviderIds.Count == request.DesiredProviderIds.Count
+            && primaryItem.ProviderIds.All(pair =>
+                request.DesiredProviderIds.TryGetValue(pair.Key, out var value)
+                && string.Equals(pair.Value, value, StringComparison.Ordinal))
+            && (request.DesiredItemKind is null
+                || string.Equals(
+                    request.DesiredItemKind,
+                    primaryItem.GetBaseItemKind().ToString(),
+                    StringComparison.Ordinal));
     }
 
     private async Task InvokeMutationAsync(

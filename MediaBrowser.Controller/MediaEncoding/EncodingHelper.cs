@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04.
 #nullable disable
 
 #pragma warning disable CS1591
@@ -7326,6 +7327,16 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             inputModifier += " " + GetFastSeekCommandLineParameter(state, encodingOptions, segmentContainer);
             inputModifier = inputModifier.Trim();
+
+            // For HLS with copied video, input seeking starts video at the preceding keyframe.
+            // Keep accurate-seek audio preroll too, so transcoded audio shares that timeline.
+            if (state.IsVideoRequest
+                && state.TranscodingType is TranscodingJobType.Hls
+                && IsCopyCodec(state.OutputVideoCodec)
+                && (state.BaseRequest.StartTimeTicks ?? 0) > 0)
+            {
+                inputModifier = "-noaccurate_seek " + inputModifier;
+            }
 
             if (state.InputProtocol == MediaProtocol.Rtsp)
             {

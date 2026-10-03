@@ -49,9 +49,9 @@ internal sealed class PermalinkMediaMutation
     }
 
     /// <summary>
-    /// Stages, claims and publishes the replacement under the item path's lease, then finalizes.
-    /// The lease is released before finalization, which has its own physical step (the anchor
-    /// re-assignment) and takes its own lease.
+    /// Stages, claims, publishes and finalizes the replacement under one item-path lease. Keeping
+    /// the lease through the possible anchor re-assignment lets an external admission be redeemed
+    /// once against the original inode and remain exact for every later step in that publication.
     /// </summary>
     /// <param name="operation">The immutable operation document.</param>
     /// <param name="item">The library item.</param>
@@ -78,11 +78,17 @@ internal sealed class PermalinkMediaMutation
                 .ConfigureAwait(false);
             await VerifyPreparedOldAsync(operation, item, claimed: true, cancellationToken)
                 .ConfigureAwait(false);
-            await SwapInStagedAsync(leases, operation, item, staging, cancellationToken)
+            var permit = await SwapInStagedAsync(
+                leases,
+                operation,
+                item,
+                staging,
+                cancellationToken,
+                request.WriterAdmissionId)
+                .ConfigureAwait(false);
+            return await FinalizeAsync(operation, item, cancellationToken, leases, permit)
                 .ConfigureAwait(false);
         }
-
-        return await FinalizeAsync(operation, item, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -96,18 +102,29 @@ internal sealed class PermalinkMediaMutation
     /// <param name="item">The library item.</param>
     /// <param name="staging">The staged desired bytes.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>A task representing the publication.</returns>
+    /// <param name="writerAdmissionId">The external writer admission, when this commit owns one.</param>
+    /// <returns>The redeemed permit to retain for later steps under the same lease.</returns>
     /// <exception cref="PermalinkException">Conflict when the item path's key changed under the lease.</exception>
-    internal async Task SwapInStagedAsync(
+    internal async Task<PermalinkWriterAdmissionPermit?> SwapInStagedAsync(
         PermalinkWriterLeaseSet leases,
         PermalinkOperationDocument operation,
         BaseItem item,
         string staging,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? writerAdmissionId = null)
     {
         var quarantine = GetQuarantinePath(operation);
         var quarantineNeeded = !File.Exists(quarantine);
-        if (quarantineNeeded || !File.Exists(item.Path))
+        PermalinkWriterAdmissionPermit? permit = null;
+        if (writerAdmissionId.HasValue)
+        {
+            permit = await leases.RedeemAdmissionAsync(
+                item.Path,
+                writerAdmissionId.Value,
+                "replace-media",
+                cancellationToken).ConfigureAwait(false);
+        }
+        else if (quarantineNeeded || !File.Exists(item.Path))
         {
             await leases.RecheckAsync(item.Path, cancellationToken).ConfigureAwait(false);
         }
@@ -123,6 +140,7 @@ internal sealed class PermalinkMediaMutation
         }
 
         _evidence.InvalidateContentDigest(item.Path);
+        return permit;
     }
 
     /// <summary>
@@ -305,7 +323,9 @@ internal sealed class PermalinkMediaMutation
     public async Task<PermalinkMutationResult> FinalizeAsync(
         PermalinkOperationDocument operation,
         BaseItem item,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        PermalinkWriterLeaseSet? heldLeases = null,
+        PermalinkWriterAdmissionPermit? permit = null)
     {
         var desired = await _evidence.ComputeContentItemAsync(item, cancellationToken)
             .ConfigureAwait(false);
@@ -335,7 +355,8 @@ internal sealed class PermalinkMediaMutation
             operation.OperationId,
             "ready",
             cancellationToken).ConfigureAwait(false);
-        await AppendContentAsync(operation, item, desired, cancellationToken).ConfigureAwait(false);
+        await AppendContentAsync(operation, item, desired, cancellationToken, heldLeases, permit)
+            .ConfigureAwait(false);
         await _bindings.UpdateContentRootAsync(
             operation.ItemId,
             desired.ContentRoot,
@@ -386,7 +407,9 @@ internal sealed class PermalinkMediaMutation
         PermalinkOperationDocument operation,
         BaseItem item,
         PermalinkEvidenceResult desired,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        PermalinkWriterLeaseSet? heldLeases,
+        PermalinkWriterAdmissionPermit? permit)
     {
         var reservation = await _authority.FindByCapsuleAsync(
             operation.CapsuleId,
@@ -398,9 +421,17 @@ internal sealed class PermalinkMediaMutation
         var liveAnchor = _fileSystem.ReadAnchorToken(item.Path);
         if (liveAnchor is null)
         {
-            await using var leases = await _leases.AcquireWriterSetAsync([item.Path], cancellationToken)
-                .ConfigureAwait(false);
-            await leases.RecheckAsync(item.Path, cancellationToken).ConfigureAwait(false);
+            if (heldLeases is not null)
+            {
+                await heldLeases.RecheckWithPermitAsync(item.Path, permit, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await using var leases = await _leases.AcquireWriterSetAsync([item.Path], cancellationToken)
+                    .ConfigureAwait(false);
+                await leases.RecheckAsync(item.Path, cancellationToken).ConfigureAwait(false);
+            }
+
             _fileSystem.AssignAnchorToken(item.Path, reservation.AnchorToken);
         }
         else if (!string.Equals(liveAnchor, reservation.AnchorToken, StringComparison.Ordinal))

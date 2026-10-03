@@ -21,18 +21,21 @@ internal sealed class PermalinkWriterLeaseSet : IAsyncDisposable
     private readonly IReadOnlyList<IDisposable> _handles;
     private readonly PermalinkAuthorityStore _authority;
     private readonly PermalinkPathEvidenceStore _evidence;
+    private readonly IPermalinkPathObjects _objects;
     private int _disposed;
 
     public PermalinkWriterLeaseSet(
         IReadOnlyDictionary<string, Entry> entries,
         IReadOnlyList<IDisposable> handles,
         PermalinkAuthorityStore authority,
-        PermalinkPathEvidenceStore evidence)
+        PermalinkPathEvidenceStore evidence,
+        IPermalinkPathObjects objects)
     {
         _entries = entries;
         _handles = handles;
         _authority = authority;
         _evidence = evidence;
+        _objects = objects;
     }
 
     /// <summary>Gets the leased keys in the order they were acquired.</summary>
@@ -67,7 +70,58 @@ internal sealed class PermalinkWriterLeaseSet : IAsyncDisposable
     /// <returns>A task representing the recheck.</returns>
     /// <exception cref="PermalinkException">Conflict with the same <c>permalink-*</c> codes Ensure uses when the key changed.</exception>
     public Task RecheckAsync(string path, CancellationToken cancellationToken)
-        => RecheckEntriesAsync(new[] { Require(path) }, scanner: false, cancellationToken);
+        => RecheckEntriesAsync(new[] { Require(path) }, scanner: false, permit: null, cancellationToken);
+
+    /// <summary>
+    /// Rechecks one leased key for the external writer that owns the named admission.
+    /// </summary>
+    /// <param name="path">A path in the set.</param>
+    /// <param name="admissionId">The external writer's admission.</param>
+    /// <param name="action">The admitted action.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the recheck.</returns>
+    public async Task RecheckAdmittedAsync(
+        string path,
+        Guid admissionId,
+        string action,
+        CancellationToken cancellationToken)
+        => _ = await RedeemAdmissionAsync(path, admissionId, action, cancellationToken)
+            .ConfigureAwait(false);
+
+    /// <summary>Redeems an exact admission once and returns its lease-bound permit.</summary>
+    /// <param name="path">The admitted path.</param>
+    /// <param name="admissionId">The durable admission identifier.</param>
+    /// <param name="action">The admitted action.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The permit for subsequent steps under this same held lease.</returns>
+    public async Task<PermalinkWriterAdmissionPermit> RedeemAdmissionAsync(
+        string path,
+        Guid admissionId,
+        string action,
+        CancellationToken cancellationToken)
+    {
+        var entry = Require(path);
+        var pinned = _objects.ReadPinnedObjectNoFollow(path)
+            ?? throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "content-unreachable",
+                $"Writer admission target is unreachable at '{path}'.");
+        if (pinned.IsSymbolicLink)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "permalink-path-symlink",
+                $"Writer admission target '{path}' is a symbolic link.");
+        }
+
+        var permit = new PermalinkWriterAdmissionPermit(admissionId, action, pinned.Identity, entry.Key);
+        await RecheckEntriesAsync(
+            new[] { entry },
+            scanner: false,
+            permit,
+            cancellationToken).ConfigureAwait(false);
+        return permit;
+    }
 
     /// <summary>
     /// Rechecks a new-item scanner key without consuming or rejecting a pending supersession slot.
@@ -77,7 +131,7 @@ internal sealed class PermalinkWriterLeaseSet : IAsyncDisposable
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task representing the recheck.</returns>
     public Task RecheckScannerAsync(string path, CancellationToken cancellationToken)
-        => RecheckEntriesAsync(new[] { Require(path) }, scanner: true, cancellationToken);
+        => RecheckEntriesAsync(new[] { Require(path) }, scanner: true, permit: null, cancellationToken);
 
     /// <summary>
     /// Rechecks every leased key, in key order.
@@ -86,10 +140,37 @@ internal sealed class PermalinkWriterLeaseSet : IAsyncDisposable
     /// <returns>A task representing the recheck.</returns>
     /// <exception cref="PermalinkException">Conflict as <see cref="RecheckAsync"/>.</exception>
     public async Task RecheckAllAsync(CancellationToken cancellationToken)
+        => await RecheckAllWithPermitAsync(permit: null, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Rechecks every leased key while excluding one already-redeemed admission on its own key.</summary>
+    /// <param name="permit">The lease-bound permit, or null.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the recheck.</returns>
+    public async Task RecheckAllWithPermitAsync(
+        PermalinkWriterAdmissionPermit? permit,
+        CancellationToken cancellationToken)
     {
         var ordered = new List<Entry>(_entries.Values);
         ordered.Sort((left, right) => PermalinkPathLeaseFactory.CompareKeys(left.Key, right.Key));
-        await RecheckEntriesAsync(ordered, scanner: false, cancellationToken).ConfigureAwait(false);
+        await RecheckEntriesAsync(ordered, scanner: false, permit, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Rechecks one path under an admission already redeemed by this held lease.</summary>
+    /// <param name="path">The leased path.</param>
+    /// <param name="permit">The lease-bound permit, or null.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the recheck.</returns>
+    public Task RecheckWithPermitAsync(
+        string path,
+        PermalinkWriterAdmissionPermit? permit,
+        CancellationToken cancellationToken)
+    {
+        var entry = Require(path);
+        return RecheckEntriesAsync(
+            new[] { entry },
+            scanner: false,
+            permit?.Key == entry.Key ? permit : null,
+            cancellationToken);
     }
 
     /// <summary>Releases every key.</summary>
@@ -122,12 +203,14 @@ internal sealed class PermalinkWriterLeaseSet : IAsyncDisposable
     private async Task RecheckEntriesAsync(
         IReadOnlyList<Entry> entries,
         bool scanner,
+        PermalinkWriterAdmissionPermit? permit,
         CancellationToken cancellationToken)
     {
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = connection.BeginTransaction(deferred: true);
         foreach (var entry in entries)
         {
+            var entryPermit = permit?.Key == entry.Key ? permit : null;
             if (scanner)
             {
                 await PermalinkPathKeyRecheck.RequireScannerClearAsync(
@@ -148,6 +231,7 @@ internal sealed class PermalinkWriterLeaseSet : IAsyncDisposable
                     entry.Key.RootIdentityId,
                     entry.Key.NormalizedRelativePath,
                     entry.Generation,
+                    entryPermit,
                     cancellationToken).ConfigureAwait(false);
             }
         }

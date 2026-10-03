@@ -100,6 +100,7 @@ internal sealed class PermalinkPathLease : IPermalinkPathLease
             RootIdentityId,
             NormalizedRelativePath,
             ReservationGeneration,
+            permit: null,
             cancellationToken).ConfigureAwait(false);
 
         if (_intentId is { } intent)

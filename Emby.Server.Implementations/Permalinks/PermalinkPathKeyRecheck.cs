@@ -1,4 +1,5 @@
 // SlopTank modification notice: added or changed by SlopTank on 2026-10-03.
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Permalinks;
@@ -23,6 +24,7 @@ internal static class PermalinkPathKeyRecheck
     /// <param name="rootIdentityId">The root identity.</param>
     /// <param name="path">The normalized relative path.</param>
     /// <param name="expectedGeneration">The reservation generation recorded when the lease was taken.</param>
+    /// <param name="permit">The current external writer's exact capability, or null for an ordinary writer.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task representing the recheck.</returns>
     /// <exception cref="PermalinkException">Conflict <c>permalink-path-reserved</c>, <c>permalink-supersession-pending</c> or <c>permalink-path-writer-admitted</c>.</exception>
@@ -33,6 +35,7 @@ internal static class PermalinkPathKeyRecheck
         string rootIdentityId,
         string path,
         long expectedGeneration,
+        PermalinkWriterAdmissionPermit? permit,
         CancellationToken cancellationToken)
         => await RequireClearCoreAsync(
             evidence,
@@ -42,6 +45,7 @@ internal static class PermalinkPathKeyRecheck
             path,
             expectedGeneration,
             rejectPendingSupersession: true,
+            permit,
             cancellationToken).ConfigureAwait(false);
 
     /// <summary>
@@ -73,6 +77,7 @@ internal static class PermalinkPathKeyRecheck
             path,
             expectedGeneration,
             rejectPendingSupersession: false,
+            permit: null,
             cancellationToken).ConfigureAwait(false);
 
     private static async Task RequireClearCoreAsync(
@@ -83,6 +88,7 @@ internal static class PermalinkPathKeyRecheck
         string path,
         long expectedGeneration,
         bool rejectPendingSupersession,
+        PermalinkWriterAdmissionPermit? permit,
         CancellationToken cancellationToken)
     {
         var activeReservations = await evidence.CountActiveReservationsAsync(
@@ -105,7 +111,36 @@ internal static class PermalinkPathKeyRecheck
                 $"Path '{path}' has a pending supersession slot.");
         }
 
-        if (await evidence.CountBlockingAdmissionsAsync(connection, transaction, rootIdentityId, path, cancellationToken)
+        if (permit is not null)
+        {
+            var admitted = await evidence.ReadWriterAdmissionAsync(
+                connection,
+                transaction,
+                rootIdentityId,
+                path,
+                permit.AdmissionId,
+                cancellationToken).ConfigureAwait(false);
+            if (admitted is null
+                || admitted.Status != "started"
+                || admitted.AuthorityEpoch != PermalinkAuthoritySchema.SupportedProtocolEpoch
+                || admitted.HeartbeatDeadlineUtc is null
+                || admitted.HeartbeatDeadlineUtc < DateTimeOffset.UtcNow
+                || !string.Equals(admitted.Action, permit.Action, StringComparison.Ordinal)
+                || !string.Equals(admitted.PinnedObjectIdentity, permit.PinnedObjectIdentity, StringComparison.Ordinal))
+            {
+                throw Conflict(
+                    "permalink-writer-admission-invalid",
+                    $"Writer admission '{permit.AdmissionId:D}' is not a live exact capability for path '{path}'.");
+            }
+        }
+
+        if (await evidence.CountBlockingAdmissionsAsync(
+                connection,
+                transaction,
+                rootIdentityId,
+                path,
+                permit?.AdmissionId,
+                cancellationToken)
             .ConfigureAwait(false) > 0)
         {
             throw Conflict(

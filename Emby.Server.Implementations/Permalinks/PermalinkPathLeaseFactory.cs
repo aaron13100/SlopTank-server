@@ -177,7 +177,7 @@ internal sealed class PermalinkPathLeaseFactory
                 entries[full] = new PermalinkWriterLeaseSet.Entry(key, generations[key]);
             }
 
-            return new PermalinkWriterLeaseSet(entries, handles, _authority, _evidence);
+            return new PermalinkWriterLeaseSet(entries, handles, _authority, _evidence, _objects);
         }
         catch
         {

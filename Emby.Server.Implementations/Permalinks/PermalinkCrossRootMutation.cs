@@ -33,17 +33,19 @@ internal sealed class PermalinkCrossRootMutation
     /// <param name="bundle">The immutable mutation bundle.</param>
     /// <param name="leases">The writer's leases; must cover every part's source and destination (and tree roots).</param>
     /// <param name="cancellationToken">The cancellation token.</param>
+    /// <param name="permit">The external writer permit already redeemed for the source key, or null.</param>
     /// <returns>A task representing the asynchronous operation.</returns>
     /// <exception cref="PermalinkException">Conflict when a leased key changed before a publication step.</exception>
     public async Task PublishAsync(
         PermalinkOperationDocument operation,
         PermalinkMutationBundle bundle,
         PermalinkWriterLeaseSet leases,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        PermalinkWriterAdmissionPermit? permit = null)
     {
         if (IsTree(bundle))
         {
-            await PublishTreeAsync(operation, bundle, leases, cancellationToken).ConfigureAwait(false);
+            await PublishTreeAsync(operation, bundle, leases, cancellationToken, permit).ConfigureAwait(false);
             return;
         }
 
@@ -92,7 +94,7 @@ internal sealed class PermalinkCrossRootMutation
                         $"Planned staging for '{part.Role}' is missing.");
                 }
 
-                await leases.RecheckAsync(destination, cancellationToken).ConfigureAwait(false);
+                await leases.RecheckWithPermitAsync(destination, permit, cancellationToken).ConfigureAwait(false);
                 File.Move(staged, destination);
             }
 
@@ -113,7 +115,7 @@ internal sealed class PermalinkCrossRootMutation
                 index.ToString("D6", CultureInfo.InvariantCulture));
             if (File.Exists(part.SourcePath) && !File.Exists(quarantine))
             {
-                await leases.RecheckAsync(part.SourcePath, cancellationToken).ConfigureAwait(false);
+                await leases.RecheckWithPermitAsync(part.SourcePath, permit, cancellationToken).ConfigureAwait(false);
                 File.Move(part.SourcePath, quarantine);
             }
 
@@ -135,7 +137,8 @@ internal sealed class PermalinkCrossRootMutation
         PermalinkOperationDocument operation,
         PermalinkMutationBundle bundle,
         PermalinkWriterLeaseSet leases,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        PermalinkWriterAdmissionPermit? permit)
     {
         var destinationContentRoot = bundle.DestinationRootPath
             ?? throw Conflict("destination-root-missing", "Cross-root bundle has no destination root.");
@@ -200,7 +203,7 @@ internal sealed class PermalinkCrossRootMutation
                     "Cross-root tree source lost its stable anchor.");
             _fileSystem.AssignAnchorToken(stagingRoot, anchor);
             _fileSystem.CreateDirectoryDurable(Path.GetDirectoryName(destinationRoot)!);
-            await leases.RecheckAllAsync(cancellationToken).ConfigureAwait(false);
+            await leases.RecheckAllWithPermitAsync(permit, cancellationToken).ConfigureAwait(false);
             _fileSystem.PublishDirectoryImmutable(stagingRoot, destinationRoot);
         }
 
@@ -225,7 +228,7 @@ internal sealed class PermalinkCrossRootMutation
 
         if (sourceExists)
         {
-            await leases.RecheckAsync(sourceRoot, cancellationToken).ConfigureAwait(false);
+            await leases.RecheckWithPermitAsync(sourceRoot, permit, cancellationToken).ConfigureAwait(false);
             _fileSystem.CreateDirectoryDurable(Path.GetDirectoryName(quarantineRoot)!);
             Directory.Move(sourceRoot, quarantineRoot);
         }

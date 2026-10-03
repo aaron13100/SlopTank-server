@@ -125,6 +125,7 @@ internal sealed class PermalinkPathEvidenceStore
     /// <param name="transaction">The transaction.</param>
     /// <param name="rootIdentityId">The root identity.</param>
     /// <param name="relativePath">The normalized relative path.</param>
+    /// <param name="excludedAdmissionId">The current external writer's own row, or null.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The count.</returns>
     public Task<long> CountBlockingAdmissionsAsync(
@@ -132,13 +133,61 @@ internal sealed class PermalinkPathEvidenceStore
         SqliteTransaction transaction,
         string rootIdentityId,
         string relativePath,
+        Guid? excludedAdmissionId,
         CancellationToken cancellationToken)
         => ScalarAsync(
             connection,
             transaction,
-            "SELECT COUNT(*) FROM PermalinkWriterAdmissions WHERE root_identity_id = $root AND normalized_relative_path = $path AND status IN ('issued', 'started', 'recovery-required')",
-            KeyParameters(rootIdentityId, relativePath),
+            "SELECT COUNT(*) FROM PermalinkWriterAdmissions WHERE root_identity_id = $root AND normalized_relative_path = $path AND status IN ('issued', 'started', 'recovery-required') AND ($excluded IS NULL OR admission_id <> $excluded)",
+            [
+                ("$root", rootIdentityId),
+                ("$path", relativePath),
+                ("$excluded", excludedAdmissionId?.ToString("D") ?? (object)DBNull.Value)
+            ],
             cancellationToken);
+
+    /// <summary>Reads the exact writer admission offered as the current writer's capability.</summary>
+    /// <param name="connection">The connection.</param>
+    /// <param name="transaction">The transaction.</param>
+    /// <param name="rootIdentityId">The root identity.</param>
+    /// <param name="relativePath">The normalized relative path.</param>
+    /// <param name="admissionId">The offered admission identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The bound evidence, or null when the identifier is not bound to this key.</returns>
+    public async Task<PermalinkWriterAdmissionEvidence?> ReadWriterAdmissionAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string rootIdentityId,
+        string relativePath,
+        Guid admissionId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT pinned_object_identity, action, authority_epoch, status, heartbeat_deadline_utc
+              FROM PermalinkWriterAdmissions
+             WHERE admission_id = $id AND root_identity_id = $root
+               AND normalized_relative_path = $path
+            """;
+        command.Parameters.AddWithValue("$id", admissionId.ToString("D"));
+        command.Parameters.AddWithValue("$root", rootIdentityId);
+        command.Parameters.AddWithValue("$path", relativePath);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return null;
+        }
+
+        return new PermalinkWriterAdmissionEvidence(
+            reader.GetString(0),
+            reader.GetString(1),
+            reader.GetInt64(2),
+            reader.GetString(3),
+            await reader.IsDBNullAsync(4, cancellationToken).ConfigureAwait(false)
+                ? null
+                : DateTimeOffset.Parse(reader.GetString(4), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+    }
 
     /// <summary>Records a pending anchor intent, committed on its own before any xattr write.</summary>
     /// <param name="registryId">The registry row id.</param>

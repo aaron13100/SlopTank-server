@@ -286,7 +286,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
                 cancellationToken)
                 .ConfigureAwait(false),
             "path" or "cross-root" or "tree" or "multipart"
-                => await _pathMutation.CommitAsync(operation, item, cancellationToken)
+                => await _pathMutation.CommitAsync(operation, item, request.WriterAdmissionId, cancellationToken)
                 .ConfigureAwait(false),
             var kind when PermalinkItemStateMutation.IsIdentityKind(kind)
                 => await _itemStateMutation.CommitIdentityAsync(operation, item, request, cancellationToken)

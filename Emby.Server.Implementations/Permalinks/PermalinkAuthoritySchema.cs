@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-04.
 using System;
 using System.Linq;
 using System.Threading;
@@ -179,6 +179,26 @@ internal static class PermalinkAuthoritySchema
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
+            -- A retirement copy is a two-root operation. Its registry row owns the content fact,
+            -- its writer-admission row reserves the source content key, and this companion binds
+            -- the exact absent evidence destination and its parent without overloading either
+            -- older one-path schema.
+            CREATE TABLE IF NOT EXISTS PermalinkRetirementIntents (
+                operation_id TEXT PRIMARY KEY,
+                registry_id TEXT NOT NULL UNIQUE,
+                admission_id TEXT NOT NULL UNIQUE,
+                destination_root_identity_id TEXT NOT NULL,
+                destination_normalized_relative_path TEXT NOT NULL,
+                destination_parent_pinned_object_identity TEXT NOT NULL,
+                snapshot_generation INTEGER NOT NULL CHECK(snapshot_generation > 0),
+                published_object_identity TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(registry_id) REFERENCES PermalinkEvidenceRegistry(registry_id),
+                FOREIGN KEY(admission_id) REFERENCES PermalinkWriterAdmissions(admission_id),
+                FOREIGN KEY(destination_root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_PermalinkRetirementIntents_Destination
+                ON PermalinkRetirementIntents(destination_root_identity_id, destination_normalized_relative_path);
             CREATE UNIQUE INDEX IF NOT EXISTS IX_PermalinkEvidenceRegistry_PendingScanKey
                 ON PermalinkEvidenceRegistry(root_identity_id, normalized_relative_path)
                 WHERE evidence_kind = 'pending-scan' AND state = 'pending';
@@ -426,6 +446,7 @@ internal static class PermalinkAuthoritySchema
             ("PermalinkRegistryPopulations", "NEW.population_id"),
             ("PermalinkAbsenceWatermarks", "NEW.watermark_id"),
             ("PermalinkWriterAdmissions", "NEW.admission_id"),
+            ("PermalinkRetirementIntents", "NEW.operation_id"),
             ("PathReservations", "NEW.reservation_id"),
             ("PendingSupersessionSlots", "NEW.slot_id")
         };
@@ -470,7 +491,10 @@ internal static class PermalinkAuthoritySchema
             // authority_sequence but never content_epoch, so heartbeats cannot cause
             // content-epoch conflicts for unrelated paths or stop the absence watermark
             // from converging.
-            var contentIncrement = table == "PermalinkWriterAdmissions"
+            // The retirement companion and admission are binding/lease details inserted in the
+            // same transaction as their registry row. The registry write is the one content fact
+            // and advances content_epoch exactly once.
+            var contentIncrement = table is "PermalinkWriterAdmissions" or "PermalinkRetirementIntents"
                 ? "content_epoch"
                 : "content_epoch + 1";
             foreach (var verb in new[] { "INSERT", "UPDATE", "DELETE" })

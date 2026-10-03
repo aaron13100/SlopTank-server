@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-04.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -35,6 +35,17 @@ public sealed class PermalinkWriterAdmissionController : BaseJellyfinApiControll
         CancellationToken cancellationToken)
         => ExecuteAsync(() => _admissions.IssueAsync(request, cancellationToken));
 
+    /// <summary>Atomically records a retirement destination before any hardlink or copy.</summary>
+    /// <param name="request">The exact source, absent destination and destination-parent binding.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The issued writer admission.</returns>
+    [HttpPost("Permalinks/Authority/RetirementAdmissions")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public Task<ActionResult<PermalinkWriterAdmission>> IssueRetirement(
+        [FromBody] PermalinkRetirementAdmissionRequest request,
+        CancellationToken cancellationToken)
+        => ExecuteAsync(() => _admissions.IssueRetirementAsync(request, cancellationToken));
+
     /// <summary>Reads the current admission immediately before publication.</summary>
     /// <param name="admissionId">The admission identifier.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
@@ -66,6 +77,14 @@ public sealed class PermalinkWriterAdmissionController : BaseJellyfinApiControll
     [HttpPost("Permalinks/Authority/WriterAdmissions/{admissionId:guid}/Complete")]
     public Task<ActionResult<PermalinkWriterAdmission>> Complete(Guid admissionId, CancellationToken cancellationToken)
         => ExecuteAsync(() => _admissions.CompleteAsync(admissionId, cancellationToken));
+
+    /// <summary>Re-attests and durably registers a published retirement copy.</summary>
+    /// <param name="admissionId">The retirement operation identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The completed or refused admission.</returns>
+    [HttpPost("Permalinks/Authority/WriterAdmissions/{admissionId:guid}/SettleRetirement")]
+    public Task<ActionResult<PermalinkWriterAdmission>> SettleRetirement(Guid admissionId, CancellationToken cancellationToken)
+        => ExecuteAsync(() => _admissions.SettleRetirementAsync(admissionId, cancellationToken));
 
     private async Task<ActionResult<PermalinkWriterAdmission>> ExecuteAsync(
         Func<Task<PermalinkWriterAdmission>> action)

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-04.
 using System;
 using System.Globalization;
 using System.IO;
@@ -22,6 +22,8 @@ public sealed class MacPermalinkPathObjects : IPermalinkPathObjects
     private const int FileTypeMask = 0xF000;
     private const int SymbolicLinkType = 0xA000;
     private const int PathMax = 1024;
+    private const int NoEntryError = 2;
+    private const int NotDirectoryError = 20;
 
     /// <inheritdoc />
     public string? CanonicalizeDirectory(string path)
@@ -46,13 +48,24 @@ public sealed class MacPermalinkPathObjects : IPermalinkPathObjects
     public string? ReadPinnedIdentityNoFollow(string path) => ReadPinnedObjectNoFollow(path)?.Identity;
 
     /// <inheritdoc />
-    public PermalinkPinnedObject? ReadPinnedObjectNoFollow(string path)
+    public PermalinkPinnedObject? ReadPinnedObjectNoFollow(string path) => ReadPinnedObjectNoFollow(path, exactAbsence: false);
+
+    /// <inheritdoc />
+    public PermalinkPinnedObject? ReadPinnedObjectNoFollowExact(string path) => ReadPinnedObjectNoFollow(path, exactAbsence: true);
+
+    private static PermalinkPinnedObject? ReadPinnedObjectNoFollow(string path, bool exactAbsence)
     {
         var buffer = Marshal.AllocHGlobal(StatBufferSize);
         try
         {
             if (LStat(path, buffer) != 0)
             {
+                var error = Marshal.GetLastPInvokeError();
+                if (exactAbsence && error is not NoEntryError and not NotDirectoryError)
+                {
+                    throw new IOException($"lstat failed for '{path}' with errno {error}.");
+                }
+
                 return null;
             }
 

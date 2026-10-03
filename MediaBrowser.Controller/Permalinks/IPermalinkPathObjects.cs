@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-04.
 namespace MediaBrowser.Controller.Permalinks;
 
 /// <summary>
@@ -29,6 +29,14 @@ public interface IPermalinkPathObjects
     /// <param name="path">The path to inspect.</param>
     /// <returns>The pinned object, or <see langword="null"/> when the path does not exist.</returns>
     PermalinkPinnedObject? ReadPinnedObjectNoFollow(string path);
+
+    /// <summary>
+    /// Reads the final component without following it, returning null only for ENOENT or
+    /// ENOTDIR. Other probe failures throw instead of being misclassified as absence.
+    /// </summary>
+    /// <param name="path">The path to inspect.</param>
+    /// <returns>The pinned object, or null only when the path is definitely absent.</returns>
+    PermalinkPinnedObject? ReadPinnedObjectNoFollowExact(string path);
 
     /// <summary>
     /// Reads a small regular file, or reports that it is absent.

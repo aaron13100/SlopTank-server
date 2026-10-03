@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-23.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-23, 2026-10-04.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -86,13 +86,15 @@ public class ItemUpdateController : BaseJellyfinApiController
             return NotFound();
         }
 
-        // Computed before the mutation so the identity request states whether
-        // the edit cascades into descendants: the LockData rewrite below is
-        // the only branch that touches recursive children, and the durable
-        // descendant fencing must cover exactly that case rather than every
-        // folder edit.
+        // Computed before the mutation so the identity request states the exact
+        // write scope. LockData recurses through any folder, while the normal
+        // update path also propagates ratings/tags and some series fields into
+        // Series, Season, and MusicAlbum descendants.
         var newLockData = request.LockData ?? false;
         var isLockedChanged = item.IsLocked != newLockData;
+        var updatesDescendants = (isLockedChanged && item is Folder)
+            || item is Series or Season or MusicAlbum;
+        var preservesIdentity = PreservesPermalinkIdentity(item, request);
 
         try
         {
@@ -102,7 +104,8 @@ public class ItemUpdateController : BaseJellyfinApiController
                     "manual-metadata",
                     request.ProviderIds,
                     request.Type == default ? null : request.Type.ToString(),
-                    CascadeToDescendants: isLockedChanged),
+                    CascadeToDescendants: updatesDescendants,
+                    SkipPreparationWhenIdentityUnchanged: preservesIdentity),
                 async (_, _) => await ApplyItemUpdateAsync(item, request, isLockedChanged).ConfigureAwait(false),
                 CancellationToken.None).ConfigureAwait(false);
             return NoContent();
@@ -162,6 +165,54 @@ public class ItemUpdateController : BaseJellyfinApiController
                 },
                 RefreshPriority.High);
         }
+    }
+
+    private bool PreservesPermalinkIdentity(BaseItem item, BaseItemDto request)
+    {
+        var desiredOriginalTitle = string.IsNullOrWhiteSpace(request.OriginalTitle)
+            ? null
+            : request.OriginalTitle;
+        DateTime? desiredPremiereDate = request.PremiereDate.HasValue
+            ? NormalizeDateTime(request.PremiereDate.Value)
+            : null;
+        var desiredSeriesName = request.SeriesName is not null && item is IHasSeries
+            ? request.SeriesName
+            : item is IHasSeries hasSeries
+                ? hasSeries.SeriesName
+                : null;
+
+        if ((request.Type != default && request.Type != item.GetBaseItemKind())
+            || !ProviderIdsEqual(item.ProviderIds, request.ProviderIds)
+            || !string.Equals(item.Name, request.Name, StringComparison.Ordinal)
+            || !string.Equals(item.OriginalTitle, desiredOriginalTitle, StringComparison.Ordinal)
+            || item.ProductionYear != request.ProductionYear
+            || item.PremiereDate != desiredPremiereDate
+            || !string.Equals(
+                item is IHasSeries currentSeries ? currentSeries.SeriesName : null,
+                desiredSeriesName,
+                StringComparison.Ordinal)
+            || item.ParentIndexNumber != request.ParentIndexNumber
+            || item.IndexNumber != request.IndexNumber)
+        {
+            return false;
+        }
+
+        // A Series update writes its current name into every Season/Episode.
+        // Treat a pre-existing child mismatch as an identity mutation even
+        // when the submitted series name itself is unchanged.
+        return item is not Series series
+            || series.GetRecursiveChildren()
+                .OfType<IHasSeries>()
+                .All(child => string.Equals(child.SeriesName, request.Name, StringComparison.Ordinal));
+    }
+
+    private static bool ProviderIdsEqual(
+        IReadOnlyDictionary<string, string> current,
+        IReadOnlyDictionary<string, string> desired)
+    {
+        return current.Count == desired.Count
+            && current.All(pair => desired.TryGetValue(pair.Key, out var value)
+                && string.Equals(pair.Value, value, StringComparison.Ordinal));
     }
 
     /// <summary>

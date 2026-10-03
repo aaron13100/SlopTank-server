@@ -133,6 +133,37 @@ internal static class PermalinkAuthoritySchema
                 updated_at TEXT NOT NULL,
                 anchor_token TEXT NULL,
                 FOREIGN KEY(root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
+            -- A population run is control evidence, not content. Registry writes performed by the
+            -- run advance content_epoch; completing this row records the exact epoch/cardinality
+            -- after the last such write without invalidating itself.
+            CREATE TABLE IF NOT EXISTS PermalinkRegistryPopulations (
+                population_id TEXT PRIMARY KEY,
+                registry_writer_version INTEGER NOT NULL CHECK(registry_writer_version > 0),
+                status TEXT NOT NULL CHECK(status IN ('running', 'complete', 'failed')),
+                completed_content_epoch INTEGER NULL CHECK(completed_content_epoch >= 0),
+                registry_cardinality INTEGER NULL CHECK(registry_cardinality >= 0),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK((status = 'complete' AND completed_content_epoch IS NOT NULL AND registry_cardinality IS NOT NULL)
+                    OR (status <> 'complete' AND completed_content_epoch IS NULL AND registry_cardinality IS NULL)));
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_PermalinkRegistryPopulations_Running
+                ON PermalinkRegistryPopulations(status) WHERE status = 'running';
+            -- Watermarks are append-only seals over one completed population plus both complete
+            -- operation-journal areas. They do not mutate the content facts they attest.
+            CREATE TABLE IF NOT EXISTS PermalinkAbsenceWatermarks (
+                watermark_id TEXT PRIMARY KEY,
+                root_generations_json TEXT NOT NULL,
+                hot_journal_generation TEXT NOT NULL,
+                hot_journal_cardinality INTEGER NOT NULL CHECK(hot_journal_cardinality >= 0),
+                archive_journal_generation TEXT NOT NULL,
+                archive_journal_cardinality INTEGER NOT NULL CHECK(archive_journal_cardinality >= 0),
+                registry_writer_version INTEGER NOT NULL CHECK(registry_writer_version > 0),
+                content_epoch INTEGER NOT NULL CHECK(content_epoch >= 0),
+                journal_counter INTEGER NOT NULL CHECK(journal_counter >= 0),
+                registry_cardinality INTEGER NOT NULL CHECK(registry_cardinality >= 0),
+                population_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(population_id) REFERENCES PermalinkRegistryPopulations(population_id));
             CREATE TABLE IF NOT EXISTS PermalinkWriterAdmissions (
                 admission_id TEXT PRIMARY KEY,
                 root_identity_id TEXT NOT NULL,
@@ -350,7 +381,8 @@ internal static class PermalinkAuthoritySchema
             "PathOperationDecisions",
             "MutationClaims",
             "CanonicalTransitionClaims",
-            "LegacyPredecessorMap"
+            "LegacyPredecessorMap",
+            "PermalinkAbsenceWatermarks"
         ];
         foreach (var table in tables)
         {
@@ -391,6 +423,8 @@ internal static class PermalinkAuthoritySchema
             ("PermalinkOperationArchiveCandidates", "NEW.operation_id"),
             ("PermalinkRootIdentities", "NEW.root_identity_id"),
             ("PermalinkEvidenceRegistry", "NEW.registry_id"),
+            ("PermalinkRegistryPopulations", "NEW.population_id"),
+            ("PermalinkAbsenceWatermarks", "NEW.watermark_id"),
             ("PermalinkWriterAdmissions", "NEW.admission_id"),
             ("PathReservations", "NEW.reservation_id"),
             ("PendingSupersessionSlots", "NEW.slot_id")
@@ -423,7 +457,10 @@ internal static class PermalinkAuthoritySchema
             }
         }
 
-        foreach (var table in tables.Select(entry => entry.Table).Where(table => table != "SnapshotMetadata"))
+        foreach (var table in tables.Select(entry => entry.Table).Where(
+                     table => table is not "SnapshotMetadata"
+                         and not "PermalinkRegistryPopulations"
+                         and not "PermalinkAbsenceWatermarks"))
         {
             var journalIncrement = table is "OperationDecisions" or "PathOperationDecisions"
                 ? "journal_counter + 1"

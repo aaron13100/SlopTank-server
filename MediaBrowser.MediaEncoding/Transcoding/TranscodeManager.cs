@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09, 2026-10-04.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -450,6 +450,29 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
             state,
             cancellationTokenSource);
 
+        var observeHlsSeekTimeline = HlsSeekTimelineObserver.ShouldObserve(
+            transcodingJobType,
+            state.VideoRequest is not null,
+            state.OutputVideoCodec,
+            state.BaseRequest.StartTimeTicks);
+        var hlsSeekInputModifier = observeHlsSeekTimeline
+            ? _encodingHelper.GetInputModifier(
+                state,
+                _serverConfigurationManager.GetEncodingOptions(),
+                EncodingHelper.GetSegmentFileExtension(state.Request.SegmentContainer).TrimStart('.'))
+            : string.Empty;
+        var hlsSeekFirstSegmentPath = state.WaitForPath ?? outputPath;
+        var hlsSeekProbePath = _mediaEncoder.ProbePath;
+        var hlsSeekProbeCancellationToken = cancellationTokenSource.Token;
+        var hlsSeekMetadata = observeHlsSeekTimeline
+            ? (MediaSourceId: state.Request.MediaSourceId,
+                RequestId: state.Request.Id,
+                JobId: transcodingJob.Id,
+                RequestedStartTimeTicks: state.BaseRequest.StartTimeTicks!.Value,
+                SubtitleDeliveryMethod: state.SubtitleDeliveryMethod,
+                CopyTimestamps: state.CopyTimestamps)
+            : default;
+
         _logger.LogInformation("{Filename} {Arguments}", process.StartInfo.FileName, process.StartInfo.Arguments);
 
         var logFilePrefix = "FFmpeg.Transcode-";
@@ -505,6 +528,45 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
 
         _logger.LogDebug("Launched FFmpeg process");
         state.TranscodingJob = transcodingJob;
+
+        if (observeHlsSeekTimeline)
+        {
+            int ffmpegPid;
+            try
+            {
+                ffmpegPid = process.Id;
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or ObjectDisposedException)
+            {
+                _logger.LogWarning(
+                    exception,
+                    "HLS seek timeline observation unavailable because FFmpeg exited before its process ID could be captured. MediaSourceId={MediaSourceId} RequestId={RequestId} JobId={JobId}",
+                    hlsSeekMetadata.MediaSourceId,
+                    hlsSeekMetadata.RequestId,
+                    hlsSeekMetadata.JobId);
+                ffmpegPid = 0;
+            }
+
+            if (ffmpegPid != 0)
+            {
+                var context = new HlsSeekTimelineObserver.Context(
+                    hlsSeekMetadata.MediaSourceId!,
+                    hlsSeekMetadata.RequestId,
+                    hlsSeekMetadata.JobId!,
+                    ffmpegPid,
+                    hlsSeekMetadata.RequestedStartTimeTicks,
+                    hlsSeekInputModifier,
+                    hlsSeekMetadata.SubtitleDeliveryMethod,
+                    hlsSeekMetadata.CopyTimestamps);
+                _ = Task.Run(() => HlsSeekTimelineObserver.ObserveAsync(
+                    context,
+                    hlsSeekFirstSegmentPath,
+                    hlsSeekProbePath,
+                    transcodingJob,
+                    _logger,
+                    hlsSeekProbeCancellationToken));
+            }
+        }
 
         // Important - don't await the log task or we won't be able to kill FFmpeg when the user stops playback
         _ = new JobLogger(_logger).StartStreamingLog(state, process.StandardError, logStream);

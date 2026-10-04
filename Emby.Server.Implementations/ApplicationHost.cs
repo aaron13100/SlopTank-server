@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-27, 2026-09-28.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-27, 2026-09-28, 2026-10-04.
 #nullable disable
 
 #pragma warning disable CS1591
@@ -31,6 +31,7 @@ using Emby.Server.Implementations.Library.Search;
 using Emby.Server.Implementations.Library.SimilarItems;
 using Emby.Server.Implementations.Localization;
 using Emby.Server.Implementations.Permalinks;
+using Emby.Server.Implementations.PlaybackPreparation;
 using Emby.Server.Implementations.Playlists;
 using Emby.Server.Implementations.Plugins;
 using Emby.Server.Implementations.QuickConnect;
@@ -75,6 +76,7 @@ using MediaBrowser.Controller.MediaSegments;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Persistence;
+using MediaBrowser.Controller.PlaybackPreparation;
 using MediaBrowser.Controller.Playlists;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.QuickConnect;
@@ -607,6 +609,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkRemovalEvidenceVerifier>();
             serviceCollection.AddSingleton<IPermalinkRemovalCoordinator, PermalinkRemovalCoordinator>();
             serviceCollection.AddSingleton<IPermalinkIdentityMutationAdapter, PermalinkIdentityMutationAdapter>();
+            serviceCollection.AddSingleton<IPlaybackPreparationService, PlaybackPreparationService>();
             serviceCollection.AddSingleton<PermalinkLeaseStore>();
             serviceCollection.AddSingleton<PermalinkPlaybackDocumentStore>();
             serviceCollection.AddSingleton<PermalinkPlaybackPlanStore>();

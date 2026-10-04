@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04.
 namespace MediaBrowser.Common.Api;
 
 /// <summary>
@@ -19,6 +20,11 @@ public static class Policies
     /// Policy name for allowing local access only.
     /// </summary>
     public const string LocalAccessOnly = "LocalAccessOnly";
+
+    /// <summary>
+    /// Policy for the loopback-only playback preparation worker API.
+    /// </summary>
+    public const string PlaybackPreparationWorker = "PlaybackPreparationWorker";
 
     /// <summary>
     /// Policy name for escaping schedule controls.

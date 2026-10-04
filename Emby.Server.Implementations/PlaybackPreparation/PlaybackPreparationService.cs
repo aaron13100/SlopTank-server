@@ -1,0 +1,322 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04.
+// allow-no-test-found: private integration coverage is assigned to sloptank-tests/server/tests.
+#pragma warning disable CS1591
+#pragma warning disable SA1116
+#pragma warning disable SA1117
+using System;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Emby.Server.Implementations.Permalinks;
+using Jellyfin.Database.Implementations;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
+using MediaBrowser.Controller;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.PlaybackPreparation;
+using MediaBrowser.Model.PlaybackPreparation;
+using Microsoft.EntityFrameworkCore;
+
+namespace Emby.Server.Implementations.PlaybackPreparation;
+
+public sealed class PlaybackPreparationService : IPlaybackPreparationService
+{
+    private static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(30);
+    private readonly IDbContextFactory<JellyfinDbContext> _dbProvider;
+    private readonly IServerApplicationHost _appHost;
+    private readonly TimeProvider _timeProvider;
+
+    public PlaybackPreparationService(
+        IDbContextFactory<JellyfinDbContext> dbProvider,
+        IServerApplicationHost appHost,
+        TimeProvider timeProvider)
+    {
+        _dbProvider = dbProvider;
+        _appHost = appHost;
+        _timeProvider = timeProvider;
+    }
+
+    public async Task<PlaybackPreparationRequest?> ClaimAsync(CancellationToken cancellationToken)
+    {
+        await using var db = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var activePhases = new[] { PlaybackPreparationAttemptPhase.Claimed, PlaybackPreparationAttemptPhase.Preparing };
+        await db.PlaybackPreparationAttempts
+            .Where(value => activePhases.Contains(value.Phase) && value.LeaseExpiresAtUtc <= now)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(value => value.Phase, PlaybackPreparationAttemptPhase.Expired)
+                .SetProperty(value => value.CompletedAtUtc, now), cancellationToken)
+            .ConfigureAwait(false);
+
+        var item = await db.BaseItems
+            .Where(value => value.IngestState == IngestState.Complete
+                && (value.Type == "MediaBrowser.Controller.Entities.Movies.Movie"
+                    || value.Type == "MediaBrowser.Controller.Entities.TV.Episode")
+                && (value.PlaybackReadiness == PlaybackReadiness.Pending
+                    || value.PlaybackReadiness == PlaybackReadiness.Failed)
+                && value.Path != null
+                && !db.PlaybackPreparationAttempts.Any(attempt =>
+                    attempt.ItemId.Equals(value.Id)
+                    && attempt.Phase == PlaybackPreparationAttemptPhase.Failed
+                    && attempt.CompletedAtUtc != null
+                    && attempt.CompletedAtUtc > now.AddMinutes(-5))
+                && !db.PlaybackPreparationAttempts.Any(attempt =>
+                    attempt.ItemId.Equals(value.Id)
+                    && activePhases.Contains(attempt.Phase)
+                    && attempt.LeaseExpiresAtUtc > now))
+            .Select(value => new
+            {
+                Item = value,
+                LastFailure = db.PlaybackPreparationAttempts
+                    .Where(attempt => attempt.ItemId.Equals(value.Id)
+                        && attempt.Phase == PlaybackPreparationAttemptPhase.Failed)
+                    .OrderByDescending(attempt => attempt.CompletedAtUtc)
+                    .Select(attempt => attempt.CompletedAtUtc)
+                    .FirstOrDefault()
+            })
+            .OrderBy(value => value.Item.PlaybackReadiness == PlaybackReadiness.Pending ? 0 : 1)
+            .ThenBy(value => value.Item.PlaybackReadiness == PlaybackReadiness.Pending ? value.Item.DateCreated : value.LastFailure)
+            .ThenBy(value => value.Item.Id)
+            .Select(value => value.Item)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (item is null || item.Path is null)
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return null;
+        }
+
+        var path = _appHost.ExpandVirtualPath(item.Path);
+        var identity = PermalinkObjectIdentity.Read(path);
+        if (identity is null)
+        {
+            item.PlaybackReadiness = PlaybackReadiness.Failed;
+            item.PlaybackReadyObjectIdentity = null;
+            item.PlaybackReadyAlgorithmVersion = null;
+            db.PlaybackPreparationAttempts.Add(new PlaybackPreparationAttemptEntity
+            {
+                RequestId = Guid.NewGuid(),
+                ItemId = item.Id,
+                NonceHash = HashNonce(Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant()),
+                RequestedObjectIdentity = "identity-unavailable",
+                RequestedPath = path,
+                Phase = PlaybackPreparationAttemptPhase.Failed,
+                CreatedAtUtc = now,
+                LeaseExpiresAtUtc = now,
+                Outcome = PlaybackPreparationContract.UnprobeableOutcome,
+                ReasonCode = "planner_unprobeable",
+                CompletedAtUtc = now
+            });
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return null;
+        }
+
+        var requestId = Guid.NewGuid();
+        var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+        var leaseExpires = now + LeaseDuration;
+        db.PlaybackPreparationAttempts.Add(new PlaybackPreparationAttemptEntity
+        {
+            RequestId = requestId,
+            ItemId = item.Id,
+            NonceHash = HashNonce(nonce),
+            RequestedObjectIdentity = identity,
+            RequestedPath = path,
+            Phase = PlaybackPreparationAttemptPhase.Claimed,
+            CreatedAtUtc = now,
+            LeaseExpiresAtUtc = leaseExpires
+        });
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return NewRequest(requestId, nonce, item.Id, path, identity);
+    }
+
+    public async Task SubmitResultAsync(Guid requestId, PlaybackPreparationResult result, CancellationToken cancellationToken)
+    {
+        var shapeRequest = new PlaybackPreparationRequest
+        {
+            ContractType = result?.ContractType,
+            ContractVersion = result?.ContractVersion ?? 0,
+            PlannerAlgorithmVersion = result?.PlannerAlgorithmVersion,
+            RequestId = result?.RequestId,
+            Nonce = result?.Nonce,
+            ItemId = result?.ItemId,
+            Path = result?.Path,
+            MediaSignature = result?.MediaSignature
+        };
+        if (!PlaybackPreparationContractValidator.TryValidateResult(shapeRequest, result, out var validationError))
+        {
+            throw new PlaybackPreparationException(400, "invalid-result", validationError ?? "Result contract is invalid.");
+        }
+
+        if (!Guid.TryParse(result!.RequestId, out var echoedRequestId) || !echoedRequestId.Equals(requestId))
+        {
+            throw new PlaybackPreparationException(409, "request-binding-mismatch", "The result requestId is not bound to this route.");
+        }
+
+        await using var db = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var attempt = await db.PlaybackPreparationAttempts.SingleOrDefaultAsync(value => value.RequestId.Equals(requestId), cancellationToken).ConfigureAwait(false);
+        if (attempt is null || attempt.Phase != PlaybackPreparationAttemptPhase.Claimed)
+        {
+            throw new PlaybackPreparationException(409, "lease-not-outstanding", "The preparation lease is not outstanding.");
+        }
+
+        if (attempt.LeaseExpiresAtUtc <= now)
+        {
+            attempt.Phase = PlaybackPreparationAttemptPhase.Expired;
+            attempt.CompletedAtUtc = now;
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            throw new PlaybackPreparationException(409, "lease-expired", "The preparation lease has expired.");
+        }
+
+        if (!CryptographicOperations.FixedTimeEquals(
+                Convert.FromHexString(attempt.NonceHash),
+                Convert.FromHexString(HashNonce(result.Nonce!)))
+            || !string.Equals(result.ItemId, attempt.ItemId.ToString(), StringComparison.Ordinal)
+            || !string.Equals(result.Path, attempt.RequestedPath, StringComparison.Ordinal)
+            || !string.Equals(result.MediaSignature, attempt.RequestedObjectIdentity, StringComparison.Ordinal))
+        {
+            throw new PlaybackPreparationException(409, "request-binding-mismatch", "The result does not match the leased item.");
+        }
+
+        var item = await db.BaseItems.SingleOrDefaultAsync(value => value.Id.Equals(attempt.ItemId), cancellationToken).ConfigureAwait(false);
+        var currentIdentity = item?.Path is null ? null : PermalinkObjectIdentity.Read(_appHost.ExpandVirtualPath(item.Path));
+        if (item is null || !string.Equals(currentIdentity, attempt.RequestedObjectIdentity, StringComparison.Ordinal))
+        {
+            if (item is not null)
+            {
+                item.PlaybackReadiness = PlaybackReadiness.Pending;
+                item.PlaybackReadyObjectIdentity = null;
+                item.PlaybackReadyAlgorithmVersion = null;
+            }
+
+            attempt.Phase = PlaybackPreparationAttemptPhase.Expired;
+            attempt.CompletedAtUtc = now;
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            throw new PlaybackPreparationException(409, "media-changed", "The media object changed after claim.");
+        }
+
+        var consumed = await db.PlaybackPreparationAttempts
+            .Where(value => value.RequestId.Equals(requestId)
+                && value.Phase == PlaybackPreparationAttemptPhase.Claimed
+                && value.LeaseExpiresAtUtc > now)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.Phase, PlaybackPreparationAttemptPhase.Preparing), cancellationToken)
+            .ConfigureAwait(false);
+        if (consumed != 1)
+        {
+            throw new PlaybackPreparationException(409, "lease-not-outstanding", "The preparation lease was already consumed.");
+        }
+
+        attempt.Outcome = result.Outcome;
+        attempt.ReasonCode = result.ReasonCode;
+        attempt.PlanJson = result.Plan is null ? null : JsonSerializer.Serialize(result.Plan);
+        attempt.CompletedAtUtc = now;
+        if (result.Outcome == PlaybackPreparationContract.CompatibleOutcome)
+        {
+            item!.PlaybackReadiness = PlaybackReadiness.Ready;
+            item.PlaybackReadyObjectIdentity = currentIdentity;
+            item.PlaybackReadyAlgorithmVersion = PlaybackPreparationContract.PlannerAlgorithmVersion;
+            attempt.Phase = PlaybackPreparationAttemptPhase.Completed;
+        }
+        else if (result.Outcome == PlaybackPreparationContract.NeedsPreparationOutcome)
+        {
+            item!.PlaybackReadiness = PlaybackReadiness.Pending;
+            attempt.Phase = PlaybackPreparationAttemptPhase.Preparing;
+            attempt.LeaseExpiresAtUtc = now + LeaseDuration;
+            attempt.CompletedAtUtc = null;
+        }
+        else
+        {
+            item!.PlaybackReadiness = PlaybackReadiness.Failed;
+            item.PlaybackReadyObjectIdentity = null;
+            item.PlaybackReadyAlgorithmVersion = null;
+            attempt.Phase = PlaybackPreparationAttemptPhase.Failed;
+        }
+
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task InvalidateReadinessIfChangedAsync(
+        System.Collections.Generic.IReadOnlyCollection<Guid> itemIds,
+        CancellationToken cancellationToken)
+    {
+        if (itemIds.Count == 0)
+        {
+            return;
+        }
+
+        await using var db = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var items = await db.BaseItems.Where(value => itemIds.Contains(value.Id)).ToListAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var item in items)
+        {
+            if (item.PlaybackReadiness != PlaybackReadiness.Ready
+                || string.IsNullOrEmpty(item.PlaybackReadyObjectIdentity)
+                || item.Path is null)
+            {
+                continue;
+            }
+
+            var current = PermalinkObjectIdentity.Read(_appHost.ExpandVirtualPath(item.Path));
+            if (!string.Equals(item.PlaybackReadyAlgorithmVersion, PlaybackPreparationContract.PlannerAlgorithmVersion, StringComparison.Ordinal)
+                || !string.Equals(current, item.PlaybackReadyObjectIdentity, StringComparison.Ordinal))
+            {
+                item.PlaybackReadiness = PlaybackReadiness.Pending;
+                item.PlaybackReadyObjectIdentity = null;
+                item.PlaybackReadyAlgorithmVersion = null;
+            }
+        }
+
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<System.Collections.Generic.IReadOnlyCollection<Guid>> FindChangedReadinessAsync(
+        System.Collections.Generic.IReadOnlyCollection<BaseItem> items,
+        CancellationToken cancellationToken)
+    {
+        if (items.Count == 0)
+        {
+            return Array.Empty<Guid>();
+        }
+
+        await using var db = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var itemIds = items.Select(value => value.Id).ToArray();
+        var persistedItems = await db.BaseItems.Where(value => itemIds.Contains(value.Id)).ToDictionaryAsync(value => value.Id, cancellationToken).ConfigureAwait(false);
+        return items
+            .Where(candidate => persistedItems.TryGetValue(candidate.Id, out var persisted)
+                && persisted.PlaybackReadiness == PlaybackReadiness.Ready
+                && !string.IsNullOrEmpty(persisted.PlaybackReadyObjectIdentity)
+                && candidate.Path is not null
+                && (!string.Equals(persisted.PlaybackReadyAlgorithmVersion, PlaybackPreparationContract.PlannerAlgorithmVersion, StringComparison.Ordinal)
+                    || !string.Equals(
+                        PermalinkObjectIdentity.Read(_appHost.ExpandVirtualPath(candidate.Path!)),
+                        persisted.PlaybackReadyObjectIdentity,
+                        StringComparison.Ordinal)))
+            .Select(item => item.Id)
+            .ToArray();
+    }
+
+    private static PlaybackPreparationRequest NewRequest(Guid requestId, string nonce, Guid itemId, string path, string identity)
+        => new()
+        {
+            ContractType = PlaybackPreparationContract.ContractType,
+            ContractVersion = PlaybackPreparationContract.ContractVersion,
+            PlannerAlgorithmVersion = PlaybackPreparationContract.PlannerAlgorithmVersion,
+            RequestId = requestId.ToString(),
+            Nonce = nonce,
+            ItemId = itemId.ToString(),
+            Path = path,
+            MediaSignature = identity
+        };
+
+    private static string HashNonce(string nonce)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(nonce))).ToLowerInvariant();
+}

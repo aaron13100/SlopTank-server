@@ -39,6 +39,7 @@ using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Persistence;
+using MediaBrowser.Controller.PlaybackPreparation;
 using MediaBrowser.Controller.Playlists;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Resolvers;
@@ -93,6 +94,7 @@ namespace Emby.Server.Implementations.Library
         private readonly IMediaStreamRepository _mediaStreamRepository;
         private readonly Lazy<IExternalDataManager> _externalDataManagerFactory;
         private readonly Lazy<IPermalinkIdentityMutationAdapter> _identityMutationAdapter;
+        private readonly IPlaybackPreparationService _playbackPreparationService;
 
         /// <summary>
         /// The _root folder sync lock.
@@ -138,6 +140,7 @@ namespace Emby.Server.Implementations.Library
         /// <param name="mediaStreamRepository">The media stream repository.</param>
         /// <param name="externalDataManagerFactory">The external data manager (lazy, to break the DI cycle through ChapterManager).</param>
         /// <param name="identityMutationAdapter">The durable identity mutation adapter.</param>
+        /// <param name="playbackPreparationService">The playback preparation admission service.</param>
         public LibraryManager(
             IServerApplicationHost appHost,
             ILoggerFactory loggerFactory,
@@ -163,7 +166,8 @@ namespace Emby.Server.Implementations.Library
             DotIgnoreIgnoreRule dotIgnoreIgnoreRule,
             IMediaStreamRepository mediaStreamRepository,
             Lazy<IExternalDataManager> externalDataManagerFactory,
-            Lazy<IPermalinkIdentityMutationAdapter> identityMutationAdapter)
+            Lazy<IPermalinkIdentityMutationAdapter> identityMutationAdapter,
+            IPlaybackPreparationService playbackPreparationService)
         {
             _appHost = appHost;
             _logger = loggerFactory.CreateLogger<LibraryManager>();
@@ -196,6 +200,7 @@ namespace Emby.Server.Implementations.Library
             _mediaStreamRepository = mediaStreamRepository;
             _externalDataManagerFactory = externalDataManagerFactory;
             _identityMutationAdapter = identityMutationAdapter;
+            _playbackPreparationService = playbackPreparationService;
 
             RecordConfigurationValues(_configurationManager.Configuration);
         }
@@ -2407,6 +2412,12 @@ namespace Emby.Server.Implementations.Library
                             var altVideo = ResolveAlternateVersion(path, videoType, parentFolder, parentCollectionType);
                             if (altVideo is not null)
                             {
+                                if (altVideo is Movie or Episode)
+                                {
+                                    altVideo.IngestState = IngestState.Pending;
+                                    altVideo.PlaybackReadiness = PlaybackReadiness.Pending;
+                                }
+
                                 altVideo.OwnerId = video.Id;
                                 altVideo.SetPrimaryVersionId(video.Id);
                                 // ResolveAlternateVersion only sees the alternate's primary file.
@@ -2634,6 +2645,12 @@ namespace Emby.Server.Implementations.Library
                             var altVideo = ResolveAlternateVersion(path, videoType, parentFolder, parentCollectionType);
                             if (altVideo is not null)
                             {
+                                if (altVideo is Movie or Episode)
+                                {
+                                    altVideo.IngestState = IngestState.Pending;
+                                    altVideo.PlaybackReadiness = PlaybackReadiness.Pending;
+                                }
+
                                 altVideo.OwnerId = video.Id;
                                 altVideo.SetPrimaryVersionId(video.Id);
                                 // ResolveAlternateVersion only sees the alternate's primary file.
@@ -2645,6 +2662,16 @@ namespace Emby.Server.Implementations.Library
                         }
                     }
                 }
+            }
+
+            var changedReadinessIds = await _playbackPreparationService.FindChangedReadinessAsync(
+                allItems,
+                cancellationToken).ConfigureAwait(false);
+            foreach (var item in allItems.Where(item => changedReadinessIds.Contains(item.Id)))
+            {
+                item.PlaybackReadiness = PlaybackReadiness.Pending;
+                item.PlaybackReadyObjectIdentity = null;
+                item.PlaybackReadyAlgorithmVersion = null;
             }
 
             _persistenceService.SaveItems(allItems, cancellationToken);

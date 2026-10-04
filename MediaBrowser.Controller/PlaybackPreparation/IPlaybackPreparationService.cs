@@ -15,6 +15,8 @@ public interface IPlaybackPreparationService
 
     Task SubmitResultAsync(Guid requestId, PlaybackPreparationResult result, CancellationToken cancellationToken);
 
+    Task<bool> VerifyPlaybackReadinessAsync(BaseItem item, CancellationToken cancellationToken);
+
     Task InvalidateReadinessIfChangedAsync(System.Collections.Generic.IReadOnlyCollection<Guid> itemIds, CancellationToken cancellationToken);
 
     Task<System.Collections.Generic.IReadOnlyCollection<Guid>> FindChangedReadinessAsync(

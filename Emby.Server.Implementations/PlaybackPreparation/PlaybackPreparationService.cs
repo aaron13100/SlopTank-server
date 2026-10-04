@@ -4,6 +4,7 @@
 #pragma warning disable SA1116
 #pragma warning disable SA1117
 using System;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -25,6 +26,7 @@ namespace Emby.Server.Implementations.PlaybackPreparation;
 public sealed class PlaybackPreparationService : IPlaybackPreparationService
 {
     private static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(30);
+    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> ResultGates = new();
     private readonly IDbContextFactory<JellyfinDbContext> _dbProvider;
     private readonly IServerApplicationHost _appHost;
     private readonly TimeProvider _timeProvider;
@@ -137,6 +139,20 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
 
     public async Task SubmitResultAsync(Guid requestId, PlaybackPreparationResult result, CancellationToken cancellationToken)
     {
+        var gate = ResultGates.GetOrAdd(requestId, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await SubmitResultCoreAsync(requestId, result, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task SubmitResultCoreAsync(Guid requestId, PlaybackPreparationResult result, CancellationToken cancellationToken)
+    {
         var shapeRequest = new PlaybackPreparationRequest
         {
             ContractType = result?.ContractType,
@@ -243,6 +259,47 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool> VerifyPlaybackReadinessAsync(BaseItem item, CancellationToken cancellationToken)
+    {
+        if (item.PlaybackReadiness != PlaybackReadiness.Ready)
+        {
+            return false;
+        }
+
+        // Ready rows created before attestation deliberately remain visible until audit.
+        if (string.IsNullOrEmpty(item.PlaybackReadyObjectIdentity))
+        {
+            return true;
+        }
+
+        var currentIdentity = item.Path is null
+            ? null
+            : PermalinkObjectIdentity.Read(_appHost.ExpandVirtualPath(item.Path));
+        var valid = string.Equals(
+                item.PlaybackReadyAlgorithmVersion,
+                PlaybackPreparationContract.PlannerAlgorithmVersion,
+                StringComparison.Ordinal)
+            && currentIdentity is not null
+            && string.Equals(currentIdentity, item.PlaybackReadyObjectIdentity, StringComparison.Ordinal);
+        if (valid)
+        {
+            return true;
+        }
+
+        await using var db = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await db.BaseItems
+            .Where(value => value.Id.Equals(item.Id)
+                && value.PlaybackReadiness == PlaybackReadiness.Ready
+                && value.PlaybackReadyObjectIdentity == item.PlaybackReadyObjectIdentity
+                && value.PlaybackReadyAlgorithmVersion == item.PlaybackReadyAlgorithmVersion)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(value => value.PlaybackReadiness, PlaybackReadiness.Pending)
+                .SetProperty(value => value.PlaybackReadyObjectIdentity, (string?)null)
+                .SetProperty(value => value.PlaybackReadyAlgorithmVersion, (string?)null), cancellationToken)
+            .ConfigureAwait(false);
+        return false;
     }
 
     public async Task InvalidateReadinessIfChangedAsync(

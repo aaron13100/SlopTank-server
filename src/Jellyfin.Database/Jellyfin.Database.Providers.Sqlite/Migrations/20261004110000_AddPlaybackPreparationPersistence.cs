@@ -40,10 +40,6 @@ public partial class AddPlaybackPreparationPersistence : Migration
             },
             constraints: table => table.PrimaryKey("PK_PlaybackPreparationAttempts", x => x.RequestId));
         migrationBuilder.CreateIndex(
-            name: "IX_PlaybackPreparationAttempts_ItemId",
-            table: "PlaybackPreparationAttempts",
-            column: "ItemId");
-        migrationBuilder.CreateIndex(
             name: "IX_PlaybackPreparationAttempts_ItemId_Phase_LeaseExpiresAtUtc",
             table: "PlaybackPreparationAttempts",
             columns: new[] { "ItemId", "Phase", "LeaseExpiresAtUtc" });
@@ -52,7 +48,7 @@ public partial class AddPlaybackPreparationPersistence : Migration
             table: "PlaybackPreparationAttempts",
             column: "ItemId",
             unique: true,
-            filter: "Phase IN (0, 1)");
+            filter: "\"Phase\" IN (0, 1)");
     }
 
     protected override void Down(MigrationBuilder migrationBuilder)

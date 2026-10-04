@@ -14,6 +14,8 @@ using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Querying;
 using Microsoft.EntityFrameworkCore;
@@ -414,9 +416,11 @@ public sealed partial class BaseItemRepository
             return baseQuery;
         }
 
+        var movieType = typeof(Movie).FullName!;
+        var episodeType = typeof(Episode).FullName!;
         return baseQuery.Where(e =>
             e.IngestState == IngestState.Complete
-            && ((e.Type != "Movie" && e.Type != "Episode") || e.PlaybackReadiness == PlaybackReadiness.Ready));
+            && ((e.Type != movieType && e.Type != episodeType) || e.PlaybackReadiness == PlaybackReadiness.Ready));
     }
 
     /// <summary>

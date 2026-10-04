@@ -123,6 +123,10 @@ public class BaseItemEntity
     /// </summary>
     public Enums.PlaybackReadiness PlaybackReadiness { get; set; }
 
+    public string? PlaybackReadyObjectIdentity { get; set; }
+
+    public string? PlaybackReadyAlgorithmVersion { get; set; }
+
     public string? SeriesName { get; set; }
 
     public string? SeasonName { get; set; }

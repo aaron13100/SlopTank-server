@@ -229,6 +229,12 @@ namespace Jellyfin.Server.Implementations.Migrations
                     b.Property<int>("PlaybackReadiness")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("PlaybackReadyAlgorithmVersion")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PlaybackReadyObjectIdentity")
+                        .HasColumnType("TEXT");
+
                     b.Property<int?>("InheritedParentalRatingSubValue")
                         .HasColumnType("INTEGER");
 
@@ -441,6 +447,59 @@ namespace Jellyfin.Server.Implementations.Migrations
                             Name = "This is a placeholder item for UserData that has been detached from its original item",
                             Type = "PLACEHOLDER"
                         });
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.PlaybackPreparationAttemptEntity", b =>
+                {
+                    b.Property<Guid>("RequestId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("CompletedAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ItemId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("LeaseExpiresAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("NonceHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Outcome")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PlanJson")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Phase")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RequestedObjectIdentity")
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RequestedPath")
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("RequestId");
+                    b.HasIndex("ItemId");
+                    b.HasIndex("ItemId", "Phase", "LeaseExpiresAtUtc");
+                    b.HasIndex("ItemId")
+                        .IsUnique()
+                        .HasFilter("\"Phase\" IN (0, 1)");
+                    b.ToTable("PlaybackPreparationAttempts");
                 });
 
             modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.BaseItemImageInfo", b =>

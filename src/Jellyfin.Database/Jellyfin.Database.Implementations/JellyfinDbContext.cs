@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04.
 using System;
 using System.Data.Common;
 using System.Linq;
@@ -112,6 +113,9 @@ public class JellyfinDbContext(DbContextOptions<JellyfinDbContext> options, ILog
     /// Gets the <see cref="DbSet{TEntity}"/> containing the user data.
     /// </summary>
     public DbSet<BaseItemEntity> BaseItems => Set<BaseItemEntity>();
+
+    /// <summary>Gets the playback preparation attempts.</summary>
+    public DbSet<PlaybackPreparationAttemptEntity> PlaybackPreparationAttempts => Set<PlaybackPreparationAttemptEntity>();
 
     /// <summary>
     /// Gets the <see cref="DbSet{TEntity}"/> containing the user data.

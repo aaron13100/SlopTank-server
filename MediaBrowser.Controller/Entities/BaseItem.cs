@@ -154,6 +154,12 @@ namespace MediaBrowser.Controller.Entities
         [JsonIgnore]
         public PlaybackReadiness PlaybackReadiness { get; set; }
 
+        [JsonIgnore]
+        public string PlaybackReadyObjectIdentity { get; set; }
+
+        [JsonIgnore]
+        public string PlaybackReadyAlgorithmVersion { get; set; }
+
         /// <summary>
         /// Gets or sets the album.
         /// </summary>

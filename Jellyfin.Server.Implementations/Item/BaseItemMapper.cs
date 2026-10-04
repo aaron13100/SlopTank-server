@@ -76,6 +76,8 @@ public static class BaseItemMapper
         dto.IsVirtualItem = entity.IsVirtualItem;
         dto.IngestState = entity.IngestState;
         dto.PlaybackReadiness = entity.PlaybackReadiness;
+        dto.PlaybackReadyObjectIdentity = entity.PlaybackReadyObjectIdentity;
+        dto.PlaybackReadyAlgorithmVersion = entity.PlaybackReadyAlgorithmVersion;
         dto.ExternalSeriesId = entity.ExternalSeriesId;
         dto.Tagline = entity.Tagline;
         dto.TotalBitrate = entity.TotalBitrate;
@@ -254,6 +256,8 @@ public static class BaseItemMapper
         entity.IsVirtualItem = dto.IsVirtualItem;
         entity.IngestState = dto.IngestState;
         entity.PlaybackReadiness = dto.PlaybackReadiness;
+        entity.PlaybackReadyObjectIdentity = dto.PlaybackReadyObjectIdentity;
+        entity.PlaybackReadyAlgorithmVersion = dto.PlaybackReadyAlgorithmVersion;
         entity.ExternalSeriesId = dto.ExternalSeriesId;
         entity.Tagline = dto.Tagline;
         entity.TotalBitrate = dto.TotalBitrate;

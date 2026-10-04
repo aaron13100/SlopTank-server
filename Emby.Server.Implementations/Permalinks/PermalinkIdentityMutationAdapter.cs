@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
+using MediaBrowser.Controller.PlaybackPreparation;
 
 namespace Emby.Server.Implementations.Permalinks;
 
@@ -23,19 +24,22 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
     private readonly PermalinkPendingIdentityMutation _pending;
     private readonly ILibraryManager _libraryManager;
     private readonly PermalinkEvidence _evidence;
+    private readonly IPlaybackPreparationService _playbackPreparationService;
 
     public PermalinkIdentityMutationAdapter(
         IPermalinkMutationCoordinator coordinator,
         PermalinkBindingIndex bindings,
         PermalinkPendingIdentityMutation pending,
         ILibraryManager libraryManager,
-        PermalinkEvidence evidence)
+        PermalinkEvidence evidence,
+        IPlaybackPreparationService playbackPreparationService)
     {
         _coordinator = coordinator;
         _bindings = bindings;
         _pending = pending;
         _libraryManager = libraryManager;
         _evidence = evidence;
+        _playbackPreparationService = playbackPreparationService;
     }
 
     /// <inheritdoc />
@@ -130,6 +134,9 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
                 preparedItems,
                 effectiveKind,
                 mutation,
+                cancellationToken).ConfigureAwait(false);
+            await _playbackPreparationService.InvalidateReadinessIfChangedAsync(
+                mutationItems.Select(value => value.Id).ToArray(),
                 cancellationToken).ConfigureAwait(false);
             await PublishMutationAsync(
                 preparedItems,

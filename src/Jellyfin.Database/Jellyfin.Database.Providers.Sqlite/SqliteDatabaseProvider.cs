@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-24, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-24, 2026-10-03, 2026-10-05.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -196,16 +196,13 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
             FlushFile(stagingFile);
 
             // Restore is only called while startup migration work is quiesced. Pool clearing
-            // prevents a later borrower from retaining the previous database generation; an
-            // independently active connection will make this commit fail on platforms that
-            // enforce file locks and must be treated as a failed rollback.
+            // prevents a later borrower from retaining the previous database generation.
             SqliteConnection.ClearAllPools();
 
-            // Once the commit begins, finish it without observing cancellation. A WAL, SHM, or
-            // rollback journal from the replaced database must never be attached to the
-            // validated replacement.
-            DeleteDatabaseSidecars(path);
-            File.Move(stagingFile, path, true);
+            // Commit through SQLite so a failed backup rolls back without detaching the live
+            // database's WAL, SHM, or rollback journal. Once this transaction begins, finish
+            // it without observing cancellation.
+            CreateValidatedSnapshot(stagingFile, path, CancellationToken.None);
             SqliteConnection.ClearAllPools();
             return Task.CompletedTask;
         }

@@ -98,7 +98,7 @@ public class MediaInfoHelper
         // audit and retry; this gate intentionally does not duplicate codec policy.
         if (user is not null
             && item is (MediaBrowser.Controller.Entities.Movies.Movie or MediaBrowser.Controller.Entities.TV.Episode)
-            && item.PlaybackReadiness != PlaybackReadiness.Ready)
+            && (item.IngestState != IngestState.Complete || item.PlaybackReadiness != PlaybackReadiness.Ready))
         {
             result.MediaSources = Array.Empty<MediaSourceInfo>();
             result.ErrorCode = PlaybackErrorCode.NoCompatibleStream;

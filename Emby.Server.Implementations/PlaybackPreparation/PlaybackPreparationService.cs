@@ -376,4 +376,119 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
 
     private static string HashNonce(string nonce)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(nonce))).ToLowerInvariant();
+
+    public async Task RenewAsync(Guid requestId, PlaybackPreparationRequest request, CancellationToken cancellationToken)
+    {
+        var gate = ResultGates.GetOrAdd(requestId, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var db = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            var now = _timeProvider.GetUtcNow().UtcDateTime;
+            var attempt = await LoadBoundPreparingAttemptAsync(db, requestId, request, now, cancellationToken).ConfigureAwait(false);
+            attempt.LeaseExpiresAtUtc = now + LeaseDuration;
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    public async Task<PlaybackPreparationRequest> RecheckAsync(Guid requestId, PlaybackPreparationRequest request, CancellationToken cancellationToken)
+    {
+        var gate = ResultGates.GetOrAdd(requestId, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var db = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            var now = _timeProvider.GetUtcNow().UtcDateTime;
+            var attempt = await LoadBoundPreparingAttemptAsync(db, requestId, request, now, cancellationToken).ConfigureAwait(false);
+            var item = await db.BaseItems.SingleOrDefaultAsync(value => value.Id.Equals(attempt.ItemId), cancellationToken).ConfigureAwait(false);
+            var path = item?.Path is null ? null : _appHost.ExpandVirtualPath(item.Path);
+            var identity = path is null ? null : PermalinkObjectIdentity.Read(path);
+            if (item is null || path is null || identity is null)
+            {
+                if (item is not null)
+                {
+                    item.PlaybackReadiness = PlaybackReadiness.Failed;
+                    item.PlaybackReadyObjectIdentity = null;
+                    item.PlaybackReadyAlgorithmVersion = null;
+                }
+
+                attempt.Phase = PlaybackPreparationAttemptPhase.Failed;
+                attempt.Outcome = PlaybackPreparationContract.UnprobeableOutcome;
+                attempt.ReasonCode = "planner_unprobeable";
+                attempt.CompletedAtUtc = now;
+                await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                throw new PlaybackPreparationException(409, "media-unavailable", "The current media object cannot be identified.");
+            }
+
+            var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+            attempt.NonceHash = HashNonce(nonce);
+            attempt.RequestedPath = path;
+            attempt.RequestedObjectIdentity = identity;
+            attempt.Phase = PlaybackPreparationAttemptPhase.Claimed;
+            attempt.Outcome = null;
+            attempt.ReasonCode = null;
+            attempt.PlanJson = null;
+            attempt.CompletedAtUtc = null;
+            attempt.LeaseExpiresAtUtc = now + LeaseDuration;
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return NewRequest(requestId, nonce, attempt.ItemId, path, identity);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task<PlaybackPreparationAttemptEntity> LoadBoundPreparingAttemptAsync(
+        JellyfinDbContext db,
+        Guid requestId,
+        PlaybackPreparationRequest request,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        if (!PlaybackPreparationContractValidator.TryValidateRequest(request, out var validationError))
+        {
+            throw new PlaybackPreparationException(400, "invalid-request", validationError ?? "Request contract is invalid.");
+        }
+
+        if (!Guid.TryParse(request.RequestId, out var echoedRequestId) || !echoedRequestId.Equals(requestId))
+        {
+            throw new PlaybackPreparationException(409, "request-binding-mismatch", "The requestId is not bound to this route.");
+        }
+
+        var attempt = await db.PlaybackPreparationAttempts
+            .SingleOrDefaultAsync(value => value.RequestId.Equals(requestId), cancellationToken)
+            .ConfigureAwait(false);
+        if (attempt is null || attempt.Phase != PlaybackPreparationAttemptPhase.Preparing)
+        {
+            throw new PlaybackPreparationException(409, "lease-not-preparing", "The preparation lease is not in the preparing phase.");
+        }
+
+        if (attempt.LeaseExpiresAtUtc <= now)
+        {
+            throw new PlaybackPreparationException(409, "lease-expired", "The preparation lease has expired.");
+        }
+
+        var nonceMatches = CryptographicOperations.FixedTimeEquals(
+            Convert.FromHexString(attempt.NonceHash),
+            Convert.FromHexString(HashNonce(request.Nonce!)));
+        if (!nonceMatches
+            || !string.Equals(request.ItemId, attempt.ItemId.ToString(), StringComparison.Ordinal)
+            || !string.Equals(request.Path, attempt.RequestedPath, StringComparison.Ordinal)
+            || !string.Equals(request.MediaSignature, attempt.RequestedObjectIdentity, StringComparison.Ordinal))
+        {
+            throw new PlaybackPreparationException(409, "request-binding-mismatch", "The request does not match the preparing lease.");
+        }
+
+        return attempt;
+    }
 }

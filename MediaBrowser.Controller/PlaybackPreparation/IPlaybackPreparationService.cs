@@ -15,6 +15,10 @@ public interface IPlaybackPreparationService
 
     Task SubmitResultAsync(Guid requestId, PlaybackPreparationResult result, CancellationToken cancellationToken);
 
+    Task RenewAsync(Guid requestId, PlaybackPreparationRequest request, CancellationToken cancellationToken);
+
+    Task<PlaybackPreparationRequest> RecheckAsync(Guid requestId, PlaybackPreparationRequest request, CancellationToken cancellationToken);
+
     Task<bool> VerifyPlaybackReadinessAsync(BaseItem item, CancellationToken cancellationToken);
 
     Task InvalidateReadinessIfChangedAsync(System.Collections.Generic.IReadOnlyCollection<Guid> itemIds, CancellationToken cancellationToken);

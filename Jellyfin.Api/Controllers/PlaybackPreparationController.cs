@@ -52,4 +52,33 @@ public sealed class PlaybackPreparationController : ControllerBase
                 detail: exception.Message);
         }
     }
+
+    [HttpPost("{requestId:guid}/Renew")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> Renew(Guid requestId, [FromBody] PlaybackPreparationRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _service.RenewAsync(requestId, request, cancellationToken).ConfigureAwait(false);
+            return NoContent();
+        }
+        catch (PlaybackPreparationException exception)
+        {
+            return Problem(statusCode: exception.StatusCode, title: exception.Code, detail: exception.Message);
+        }
+    }
+
+    [HttpPost("{requestId:guid}/Recheck")]
+    [ProducesResponseType(typeof(PlaybackPreparationRequest), StatusCodes.Status200OK)]
+    public async Task<ActionResult<PlaybackPreparationRequest>> Recheck(Guid requestId, [FromBody] PlaybackPreparationRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return Ok(await _service.RecheckAsync(requestId, request, cancellationToken).ConfigureAwait(false));
+        }
+        catch (PlaybackPreparationException exception)
+        {
+            return Problem(statusCode: exception.StatusCode, title: exception.Code, detail: exception.Message);
+        }
+    }
 }

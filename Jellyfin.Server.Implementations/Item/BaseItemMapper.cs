@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-04.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -75,6 +75,7 @@ public static class BaseItemMapper
         dto.NormalizationGain = entity.NormalizationGain;
         dto.IsVirtualItem = entity.IsVirtualItem;
         dto.IngestState = entity.IngestState;
+        dto.PlaybackReadiness = entity.PlaybackReadiness;
         dto.ExternalSeriesId = entity.ExternalSeriesId;
         dto.Tagline = entity.Tagline;
         dto.TotalBitrate = entity.TotalBitrate;
@@ -252,6 +253,7 @@ public static class BaseItemMapper
         entity.NormalizationGain = dto.NormalizationGain;
         entity.IsVirtualItem = dto.IsVirtualItem;
         entity.IngestState = dto.IngestState;
+        entity.PlaybackReadiness = dto.PlaybackReadiness;
         entity.ExternalSeriesId = dto.ExternalSeriesId;
         entity.Tagline = dto.Tagline;
         entity.TotalBitrate = dto.TotalBitrate;

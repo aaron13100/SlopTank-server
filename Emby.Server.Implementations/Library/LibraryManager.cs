@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01, 2026-10-04.
 #pragma warning disable CS1591
 #pragma warning disable CA5394
 
@@ -2427,6 +2427,10 @@ namespace Emby.Server.Implementations.Library
                 if (item.DateLastRefreshed == DateTime.MinValue && MediaBrowser.Providers.MediaInfo.ProbeProvider.Supports(item))
                 {
                     item.IngestState = IngestState.Pending;
+                    if (item is Movie or Episode)
+                    {
+                        item.PlaybackReadiness = PlaybackReadiness.Pending;
+                    }
                 }
             }
 

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-04.
 #nullable disable
 
 #pragma warning disable CS1591, SA1401
@@ -145,6 +145,14 @@ namespace MediaBrowser.Controller.Entities
         /// <value>The ingest state.</value>
         [JsonIgnore]
         public IngestState IngestState { get; set; }
+
+        /// <summary>
+        /// Gets or sets whether a primary playable video has passed compatibility preparation.
+        /// This is separate from <see cref="IngestState"/>: a successful media probe does not make
+        /// the item eligible for user playback.
+        /// </summary>
+        [JsonIgnore]
+        public PlaybackReadiness PlaybackReadiness { get; set; }
 
         /// <summary>
         /// Gets or sets the album.

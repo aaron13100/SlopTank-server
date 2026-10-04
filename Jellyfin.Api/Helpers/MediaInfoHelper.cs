@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04.
 using System;
 using System.Globalization;
 using System.Linq;
@@ -91,6 +92,18 @@ public class MediaInfoHelper
         string? liveStreamId = null)
     {
         var result = new PlaybackInfoResponse();
+
+        // User playback is admitted only after the out-of-process compatibility authority has
+        // verified the primary Movie/Episode. Internal callers (user == null) retain access for
+        // audit and retry; this gate intentionally does not duplicate codec policy.
+        if (user is not null
+            && item is (MediaBrowser.Controller.Entities.Movies.Movie or MediaBrowser.Controller.Entities.TV.Episode)
+            && item.PlaybackReadiness != PlaybackReadiness.Ready)
+        {
+            result.MediaSources = Array.Empty<MediaSourceInfo>();
+            result.ErrorCode = PlaybackErrorCode.NoCompatibleStream;
+            return result;
+        }
 
         MediaSourceInfo[] mediaSources;
         if (string.IsNullOrWhiteSpace(liveStreamId))

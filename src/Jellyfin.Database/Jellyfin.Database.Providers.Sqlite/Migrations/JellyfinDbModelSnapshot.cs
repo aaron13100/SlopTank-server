@@ -16,7 +16,7 @@ namespace Jellyfin.Server.Implementations.Migrations
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder.HasAnnotation("ProductVersion", "10.0.12");
+            modelBuilder.HasAnnotation("ProductVersion", "10.0.10");
 
             modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.AccessSchedule", b =>
                 {
@@ -226,15 +226,6 @@ namespace Jellyfin.Server.Implementations.Migrations
                     b.Property<int>("IngestState")
                         .HasColumnType("INTEGER");
 
-                    b.Property<int>("PlaybackReadiness")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("PlaybackReadyAlgorithmVersion")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("PlaybackReadyObjectIdentity")
-                        .HasColumnType("TEXT");
-
                     b.Property<int?>("InheritedParentalRatingSubValue")
                         .HasColumnType("INTEGER");
 
@@ -296,6 +287,15 @@ namespace Jellyfin.Server.Implementations.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("Path")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("PlaybackReadiness")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PlaybackReadyAlgorithmVersion")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PlaybackReadyObjectIdentity")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("PreferredMetadataCountryCode")
@@ -436,7 +436,6 @@ namespace Jellyfin.Server.Implementations.Migrations
                         {
                             Id = new Guid("00000000-0000-0000-0000-000000000001"),
                             IngestState = 0,
-                            PlaybackReadiness = 0,
                             IsFolder = false,
                             IsInMixedFolder = false,
                             IsLocked = false,
@@ -445,61 +444,9 @@ namespace Jellyfin.Server.Implementations.Migrations
                             IsSeries = false,
                             IsVirtualItem = false,
                             Name = "This is a placeholder item for UserData that has been detached from its original item",
+                            PlaybackReadiness = 0,
                             Type = "PLACEHOLDER"
                         });
-                });
-
-            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.PlaybackPreparationAttemptEntity", b =>
-                {
-                    b.Property<Guid>("RequestId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime?>("CompletedAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid>("ItemId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime>("LeaseExpiresAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("NonceHash")
-                        .HasMaxLength(64)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Outcome")
-                        .HasMaxLength(32)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("PlanJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("Phase")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("ReasonCode")
-                        .HasMaxLength(64)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("RequestedObjectIdentity")
-                        .HasMaxLength(1024)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("RequestedPath")
-                        .HasMaxLength(4096)
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("RequestId");
-                    b.HasIndex("ItemId");
-                    b.HasIndex("ItemId", "Phase", "LeaseExpiresAtUtc");
-                    b.HasIndex("ItemId")
-                        .IsUnique()
-                        .HasFilter("\"Phase\" IN (0, 1)");
-                    b.ToTable("PlaybackPreparationAttempts");
                 });
 
             modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.BaseItemImageInfo", b =>
@@ -1165,6 +1112,67 @@ namespace Jellyfin.Server.Implementations.Migrations
                         .HasFilter("[UserId] IS NOT NULL");
 
                     b.ToTable("Permissions");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.PlaybackPreparationAttemptEntity", b =>
+                {
+                    b.Property<Guid>("RequestId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("CompletedAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ItemId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("LeaseExpiresAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("NonceHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Outcome")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Phase")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PlanJson")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RequestedObjectIdentity")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RequestedPath")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("RequestId");
+
+                    b.HasIndex("ItemId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_PlaybackPreparationAttempts_ActiveItem")
+                        .HasFilter("\"Phase\" IN (0, 1)");
+
+                    b.HasIndex("ItemId", "Phase", "LeaseExpiresAtUtc");
+
+                    b.ToTable("PlaybackPreparationAttempts");
 
                     b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
                 });

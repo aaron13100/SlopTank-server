@@ -17,10 +17,10 @@ public sealed class PlaybackPreparationAttemptConfiguration : IEntityTypeConfigu
         builder.Property(value => value.RequestedPath).HasMaxLength(4096).IsRequired();
         builder.Property(value => value.Outcome).HasMaxLength(32);
         builder.Property(value => value.ReasonCode).HasMaxLength(64);
-        builder.HasIndex(value => value.ItemId);
         builder.HasIndex(value => new { value.ItemId, value.Phase, value.LeaseExpiresAtUtc });
         builder.HasIndex(value => value.ItemId)
             .IsUnique()
+            .HasDatabaseName("IX_PlaybackPreparationAttempts_ActiveItem")
             .HasFilter("\"Phase\" IN (0, 1)");
     }
 }

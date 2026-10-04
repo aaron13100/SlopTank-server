@@ -21,6 +21,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.PlaybackPreparation;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -45,6 +46,7 @@ public class MediaInfoHelper
     private readonly ILogger<MediaInfoHelper> _logger;
     private readonly INetworkManager _networkManager;
     private readonly IDeviceManager _deviceManager;
+    private readonly IPlaybackPreparationService _playbackPreparationService;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MediaInfoHelper"/> class.
@@ -57,6 +59,7 @@ public class MediaInfoHelper
     /// <param name="logger">Instance of the <see cref="ILogger{MediaInfoHelper}"/> interface.</param>
     /// <param name="networkManager">Instance of the <see cref="INetworkManager"/> interface.</param>
     /// <param name="deviceManager">Instance of the <see cref="IDeviceManager"/> interface.</param>
+    /// <param name="playbackPreparationService">The playback preparation admission service.</param>
     public MediaInfoHelper(
         IUserManager userManager,
         ILibraryManager libraryManager,
@@ -65,7 +68,8 @@ public class MediaInfoHelper
         IServerConfigurationManager serverConfigurationManager,
         ILogger<MediaInfoHelper> logger,
         INetworkManager networkManager,
-        IDeviceManager deviceManager)
+        IDeviceManager deviceManager,
+        IPlaybackPreparationService playbackPreparationService)
     {
         _userManager = userManager;
         _libraryManager = libraryManager;
@@ -75,6 +79,7 @@ public class MediaInfoHelper
         _logger = logger;
         _networkManager = networkManager;
         _deviceManager = deviceManager;
+        _playbackPreparationService = playbackPreparationService;
     }
 
     /// <summary>
@@ -98,7 +103,9 @@ public class MediaInfoHelper
         // audit and retry; this gate intentionally does not duplicate codec policy.
         if (user is not null
             && item is (MediaBrowser.Controller.Entities.Movies.Movie or MediaBrowser.Controller.Entities.TV.Episode)
-            && (item.IngestState != IngestState.Complete || item.PlaybackReadiness != PlaybackReadiness.Ready))
+            && (item.IngestState != IngestState.Complete
+                || item.PlaybackReadiness != PlaybackReadiness.Ready
+                || !await _playbackPreparationService.VerifyPlaybackReadinessAsync(item, CancellationToken.None).ConfigureAwait(false)))
         {
             result.MediaSources = Array.Empty<MediaSourceInfo>();
             result.ErrorCode = PlaybackErrorCode.NoCompatibleStream;

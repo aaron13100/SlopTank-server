@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-27, 2026-09-28, 2026-10-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-06.
 #nullable disable
 
 #pragma warning disable CS1591
@@ -50,6 +50,7 @@ using Jellyfin.Server.Implementations.FullSystemBackup;
 using Jellyfin.Server.Implementations.Item;
 using Jellyfin.Server.Implementations.MediaSegments;
 using Jellyfin.Server.Implementations.SystemBackupService;
+using Jellyfin.Server.Implementations.Users;
 using MediaBrowser.Common;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Events;
@@ -86,6 +87,7 @@ using MediaBrowser.Controller.Sorting;
 using MediaBrowser.Controller.Subtitles;
 using MediaBrowser.Controller.SyncPlay;
 using MediaBrowser.Controller.TV;
+using MediaBrowser.Controller.Watchlist;
 using MediaBrowser.LocalMetadata.Savers;
 using MediaBrowser.MediaEncoding.BdInfo;
 using MediaBrowser.MediaEncoding.Subtitles;
@@ -610,6 +612,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IPermalinkRemovalCoordinator, PermalinkRemovalCoordinator>();
             serviceCollection.AddSingleton<IPermalinkIdentityMutationAdapter, PermalinkIdentityMutationAdapter>();
             serviceCollection.AddSingleton<IPlaybackPreparationService, PlaybackPreparationService>();
+            serviceCollection.AddSingleton<IWatchlistManager, WatchlistManager>();
             serviceCollection.AddSingleton<PermalinkLeaseStore>();
             serviceCollection.AddSingleton<PermalinkPlaybackDocumentStore>();
             serviceCollection.AddSingleton<PermalinkPlaybackPlanStore>();

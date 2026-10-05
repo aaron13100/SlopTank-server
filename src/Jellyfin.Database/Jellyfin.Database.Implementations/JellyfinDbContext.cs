@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-06.
 using System;
 using System.Data.Common;
 using System.Linq;
@@ -98,6 +98,11 @@ public class JellyfinDbContext(DbContextOptions<JellyfinDbContext> options, ILog
     /// Gets the <see cref="DbSet{TEntity}"/> containing the user data.
     /// </summary>
     public DbSet<UserData> UserData => Set<UserData>();
+
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the per-user watchlist ("My List") entries.
+    /// </summary>
+    public DbSet<UserWatchlist> UserWatchlists => Set<UserWatchlist>();
 
     /// <summary>
     /// Gets the <see cref="DbSet{TEntity}"/> containing the user data.

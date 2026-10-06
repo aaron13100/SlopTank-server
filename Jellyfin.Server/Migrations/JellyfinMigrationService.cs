@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-06.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -253,6 +254,11 @@ internal class JellyfinMigrationService
                                 migrationLogger.LogInformation("Attempt to rollback JellyfinDb.");
                                 try
                                 {
+                                    // RestoreBackupFast atomically changes the database file generation.
+                                    // Close this migration context first so it cannot retain the failed
+                                    // generation while the provider clears pooled handles and installs the
+                                    // validated backup.
+                                    await dbContext.Database.CloseConnectionAsync().ConfigureAwait(false);
                                     await _jellyfinDatabaseProvider.RestoreBackupFast(_backupKey.JellyfinDb, CancellationToken.None).ConfigureAwait(false);
                                 }
                                 catch (Exception inner)

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-08, 2026-09-09, 2026-10-07.
 #nullable disable
 
 using System;
@@ -59,6 +59,7 @@ namespace Emby.Server.Implementations.Session
         private readonly IDtoService _dtoService;
         private readonly IImageProcessor _imageProcessor;
         private readonly IMediaSourceManager _mediaSourceManager;
+        private readonly EpisodeContentEndPolicy _episodeContentEndPolicy;
         private readonly IServerApplicationHost _appHost;
         private readonly IDeviceManager _deviceManager;
         private readonly CancellationTokenRegistration _shutdownCallback;
@@ -91,6 +92,7 @@ namespace Emby.Server.Implementations.Session
         /// <param name="appHost">Instance of <see cref="IServerApplicationHost"/> interface.</param>
         /// <param name="deviceManager">Instance of <see cref="IDeviceManager"/> interface.</param>
         /// <param name="mediaSourceManager">Instance of <see cref="IMediaSourceManager"/> interface.</param>
+        /// <param name="episodeContentEndPolicy">Instance of <see cref="EpisodeContentEndPolicy"/>.</param>
         /// <param name="hostApplicationLifetime">Instance of <see cref="IHostApplicationLifetime"/> interface.</param>
         public SessionManager(
             ILogger<SessionManager> logger,
@@ -105,6 +107,7 @@ namespace Emby.Server.Implementations.Session
             IServerApplicationHost appHost,
             IDeviceManager deviceManager,
             IMediaSourceManager mediaSourceManager,
+            EpisodeContentEndPolicy episodeContentEndPolicy,
             IHostApplicationLifetime hostApplicationLifetime)
         {
             _logger = logger;
@@ -119,6 +122,7 @@ namespace Emby.Server.Implementations.Session
             _appHost = appHost;
             _deviceManager = deviceManager;
             _mediaSourceManager = mediaSourceManager;
+            _episodeContentEndPolicy = episodeContentEndPolicy;
             _shutdownCallback = hostApplicationLifetime.ApplicationStopping.Register(OnApplicationStopping);
 
             _deviceManager.DeviceOptionsUpdated += OnDeviceManagerDeviceOptionsUpdated;
@@ -973,7 +977,8 @@ namespace Emby.Server.Implementations.Session
 
             if (positionTicks.HasValue)
             {
-                _userDataManager.UpdatePlayState(item, data, positionTicks.Value);
+                var contentEndTicks = item is Episode episodeItem ? _episodeContentEndPolicy.GetEpisodeContentEnd(episodeItem)?.ContentEndTicks : null;
+                _userDataManager.UpdatePlayState(item, data, positionTicks.Value, contentEndTicks);
                 changed = true;
             }
 
@@ -1174,7 +1179,8 @@ namespace Emby.Server.Implementations.Session
             bool playedToCompletion;
             if (positionTicks.HasValue)
             {
-                playedToCompletion = _userDataManager.UpdatePlayState(item, data, positionTicks.Value);
+                var contentEndTicks = item is Episode episodeItem ? _episodeContentEndPolicy.GetEpisodeContentEnd(episodeItem)?.ContentEndTicks : null;
+                playedToCompletion = _userDataManager.UpdatePlayState(item, data, positionTicks.Value, contentEndTicks);
             }
             else
             {

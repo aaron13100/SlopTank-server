@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-07.
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -224,35 +225,66 @@ public class MediaSegmentManager : IMediaSegmentManager
         var db = await _dbProvider.CreateDbContextAsync().ConfigureAwait(false);
         await using (db.ConfigureAwait(false))
         {
-            var query = db.MediaSegments
-                .Where(e => e.ItemId.Equals(item.Id));
-
-            if (typeFilter is not null)
-            {
-                query = query.Where(e => typeFilter.Contains(e.Type));
-            }
-
-            if (filterByProvider)
-            {
-                var providerIds = _segmentProviders
-                    .Where(e => !libraryOptions.DisabledMediaSegmentProviders.Contains(e.Name, StringComparer.OrdinalIgnoreCase))
-                    .Select(f => GetProviderId(f.Name))
-                    .ToArray();
-                if (providerIds.Length == 0)
-                {
-                    return [];
-                }
-
-                query = query.Where(e => providerIds.Contains(e.SegmentProviderId));
-            }
-
-            return query
+            return BuildSegmentsQuery(db, item, typeFilter, libraryOptions, _segmentProviders, filterByProvider)
                 .OrderBy(e => e.StartTicks)
                 .AsNoTracking()
                 .AsEnumerable()
                 .Select(Map)
                 .ToArray();
         }
+    }
+
+    /// <inheritdoc />
+    public IEnumerable<MediaSegmentDto> GetSegments(BaseItem? item, IEnumerable<MediaSegmentType>? typeFilter, LibraryOptions? libraryOptions, bool filterByProvider = true)
+    {
+        if (item is null)
+        {
+            _logger.LogError("Tried to request segments for an invalid item");
+            return [];
+        }
+
+        using var db = _dbProvider.CreateDbContext();
+        return BuildSegmentsQuery(db, item, typeFilter, libraryOptions, _segmentProviders, filterByProvider)
+            .OrderBy(e => e.StartTicks)
+            .AsNoTracking()
+            .AsEnumerable()
+            .Select(Map)
+            .ToArray();
+    }
+
+    /// <summary>
+    /// Builds the single shared segment query used by both the async and the synchronous
+    /// segment lookups, so the provider-filter logic exists exactly once.
+    /// </summary>
+    /// <param name="db">The database context to query.</param>
+    /// <param name="item">The item whose segments are queried.</param>
+    /// <param name="typeFilter">Optional filter restricting the segment types returned.</param>
+    /// <param name="libraryOptions">The library options, required when <paramref name="filterByProvider"/> is set.</param>
+    /// <param name="providers">The registered media segment providers.</param>
+    /// <param name="filterByProvider">When set, restricts segments to currently enabled providers.</param>
+    /// <returns>The query. A filter that excludes every provider yields an empty result.</returns>
+    private static IQueryable<MediaSegment> BuildSegmentsQuery(JellyfinDbContext db, BaseItem item, IEnumerable<MediaSegmentType>? typeFilter, LibraryOptions? libraryOptions, IMediaSegmentProvider[] providers, bool filterByProvider)
+    {
+        var query = db.MediaSegments
+            .Where(e => e.ItemId.Equals(item.Id));
+
+        if (typeFilter is not null)
+        {
+            query = query.Where(e => typeFilter.Contains(e.Type));
+        }
+
+        if (filterByProvider)
+        {
+            // Contains over an empty array translates to a false predicate, so a library
+            // with every provider disabled observably returns no segments, as before.
+            var providerIds = providers
+                .Where(e => !libraryOptions!.DisabledMediaSegmentProviders.Contains(e.Name, StringComparer.OrdinalIgnoreCase))
+                .Select(f => GetProviderId(f.Name))
+                .ToArray();
+            query = query.Where(e => providerIds.Contains(e.SegmentProviderId));
+        }
+
+        return query;
     }
 
     private static MediaSegmentDto Map(MediaSegment segment)
@@ -305,7 +337,7 @@ public class MediaSegmentManager : IMediaSegmentManager
             .Select(p => (p.Name, GetProviderId(p.Name)));
     }
 
-    private string GetProviderId(string name)
+    private static string GetProviderId(string name)
         => name.ToLowerInvariant()
             .GetMD5()
             .ToString("N", CultureInfo.InvariantCulture);

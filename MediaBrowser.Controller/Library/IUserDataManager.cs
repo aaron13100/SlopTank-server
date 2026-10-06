@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-07.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -98,6 +99,18 @@ namespace MediaBrowser.Controller.Library
         /// <param name="reportedPositionTicks">New playstate.</param>
         /// <returns>True if playstate was updated.</returns>
         bool UpdatePlayState(BaseItem item, UserItemData data, long? reportedPositionTicks);
+
+        /// <summary>
+        /// Updates playstate for an item and returns true or false indicating if it was played to completion.
+        /// For episodes, the caller may pass the canonical content-end boundary so that crossing it
+        /// marks the episode watched even when the reported position is below MaxResumePct.
+        /// </summary>
+        /// <param name="item">Item to update.</param>
+        /// <param name="data">Data to update.</param>
+        /// <param name="reportedPositionTicks">New playstate.</param>
+        /// <param name="episodeContentEndTicks">The canonical episode content-end boundary in ticks, when the item is an episode; otherwise <c>null</c>.</param>
+        /// <returns>True if playstate was updated.</returns>
+        bool UpdatePlayState(BaseItem item, UserItemData data, long? reportedPositionTicks, long? episodeContentEndTicks);
 
         /// <summary>
         /// Clears any stored audio and subtitle stream selections for the given user/item pair.

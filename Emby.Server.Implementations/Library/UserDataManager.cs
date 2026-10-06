@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-07.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -11,6 +12,7 @@ using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -413,6 +415,12 @@ namespace Emby.Server.Implementations.Library
         /// <inheritdoc />
         public bool UpdatePlayState(BaseItem item, UserItemData data, long? reportedPositionTicks)
         {
+            return UpdatePlayState(item, data, reportedPositionTicks, null);
+        }
+
+        /// <inheritdoc />
+        public bool UpdatePlayState(BaseItem item, UserItemData data, long? reportedPositionTicks, long? episodeContentEndTicks)
+        {
             var playedToCompletion = false;
 
             var runtimeTicks = item.GetRunTimeTicksForPlayState();
@@ -430,8 +438,13 @@ namespace Emby.Server.Implementations.Library
                     // ignore progress during the beginning
                     positionTicks = 0;
                 }
-                else if (pctIn > _config.Configuration.MaxResumePct || positionTicks >= (runtimeTicks - TimeSpan.TicksPerSecond))
+                else if (pctIn > _config.Configuration.MaxResumePct
+                    || (item is Episode && episodeContentEndTicks is long outroEnd && outroEnd > 0 && positionTicks >= outroEnd)
+                    || positionTicks >= (runtimeTicks - TimeSpan.TicksPerSecond))
                 {
+                    // Crossing the canonical episode content-end boundary (terminal Outro start,
+                    // else the MaxResumePct fallback) marks the episode watched; the Up Next prompt
+                    // is an observable consequence, not the source of truth.
                     // mark as completed close to the end
                     positionTicks = 0;
                     data.Played = playedToCompletion = true;

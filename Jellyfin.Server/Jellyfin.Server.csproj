@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
+  <!-- SlopTank modification notice: added or changed by SlopTank on 2026-10-06. -->
   <!-- ProjectGuid is only included as a requirement for SonarQube analysis -->
   <PropertyGroup>
     <ProjectGuid>{07E39F42-A2C6-4B32-AF8C-725F957A73FF}</ProjectGuid>
@@ -66,6 +67,7 @@
     <ProjectReference Include="..\Jellyfin.Server.Implementations\Jellyfin.Server.Implementations.csproj" />
     <ProjectReference Include="..\src\Jellyfin.MediaEncoding.Hls\Jellyfin.MediaEncoding.Hls.csproj" />
     <ProjectReference Include="..\src\Jellyfin.Database\Jellyfin.Database.Implementations\Jellyfin.Database.Implementations.csproj" />
+    <ProjectReference Include="..\src\Jellyfin.Database\Jellyfin.Database.Providers.Sqlite\Jellyfin.Database.Providers.Sqlite.csproj" />
   </ItemGroup>
 
   <ItemGroup>

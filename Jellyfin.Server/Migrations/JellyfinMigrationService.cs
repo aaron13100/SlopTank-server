@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Emby.Server.Implementations.Serialization;
 using Jellyfin.Database.Implementations;
+using Jellyfin.Database.Providers.Sqlite;
 using Jellyfin.Server.Implementations.SystemBackupService;
 using Jellyfin.Server.Migrations.Stages;
 using Jellyfin.Server.ServerSetupApp;
@@ -241,7 +242,11 @@ internal class JellyfinMigrationService
                                 try
                                 {
                                     var libraryDbPath = Path.Combine(_applicationPaths.DataPath, DbFilename);
-                                    File.Move(_backupKey.LibraryDb, libraryDbPath, true);
+                                    // Restore uses the same validated, transaction-committed transfer as
+                                    // RestoreBackupFast; a bare move-over could replay a stale WAL over
+                                    // the restored file (t_261003_173359_838).
+                                    await dbContext.Database.CloseConnectionAsync().ConfigureAwait(false);
+                                    ValidatedSqliteFileTransfer.RestoreOver(_backupKey.LibraryDb, libraryDbPath, CancellationToken.None);
                                 }
                                 catch (Exception inner)
                                 {
@@ -376,7 +381,7 @@ internal class JellyfinMigrationService
                         try
                         {
                             logger.LogInformation("Backing up {Library} to {BackupPath}", DbFilename, bakPath);
-                            File.Copy(libraryDbPath, bakPath);
+                            ValidatedSqliteFileTransfer.WriteSnapshot(libraryDbPath, bakPath, CancellationToken.None);
                             _backupKey = (bakPath, _backupKey.JellyfinDb, _backupKey.FullBackup);
                             logger.LogInformation("{Library} backed up to {BackupPath}", DbFilename, bakPath);
                             break;

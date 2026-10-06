@@ -159,19 +159,8 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
         Directory.CreateDirectory(backupDirectory);
 
         var backupFile = GetBackupPath(backupDirectory, key);
-        var stagingFile = CreateStagingPath(backupFile);
-        try
-        {
-            CreateValidatedSnapshot(path, stagingFile, cancellationToken);
-            cancellationToken.ThrowIfCancellationRequested();
-            FlushFile(stagingFile);
-            File.Move(stagingFile, backupFile);
-            return Task.FromResult(key);
-        }
-        finally
-        {
-            DeleteDatabaseFiles(stagingFile);
-        }
+        ValidatedSqliteFileTransfer.WriteSnapshot(path, backupFile, cancellationToken);
+        return Task.FromResult(key);
     }
 
     /// <inheritdoc />
@@ -188,28 +177,8 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
             throw new FileNotFoundException("The SQLite migration backup does not exist.", backupFile);
         }
 
-        var stagingFile = CreateStagingPath(path);
-        try
-        {
-            CreateValidatedSnapshot(backupFile, stagingFile, cancellationToken);
-            cancellationToken.ThrowIfCancellationRequested();
-            FlushFile(stagingFile);
-
-            // Restore is only called while startup migration work is quiesced. Pool clearing
-            // prevents a later borrower from retaining the previous database generation.
-            SqliteConnection.ClearAllPools();
-
-            // Commit through SQLite so a failed backup rolls back without detaching the live
-            // database's WAL, SHM, or rollback journal. Once this transaction begins, finish
-            // it without observing cancellation.
-            CreateValidatedSnapshot(stagingFile, path, CancellationToken.None);
-            SqliteConnection.ClearAllPools();
-            return Task.CompletedTask;
-        }
-        finally
-        {
-            DeleteDatabaseFiles(stagingFile);
-        }
+        ValidatedSqliteFileTransfer.RestoreOver(backupFile, path, cancellationToken);
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc />
@@ -246,95 +215,6 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
         }
 
         return Path.Combine(backupDirectory, $"{key}_jellyfin.db");
-    }
-
-    private static string CreateStagingPath(string destinationPath)
-    {
-        var directory = Path.GetDirectoryName(destinationPath)
-            ?? throw new InvalidOperationException("The SQLite destination path has no parent directory.");
-        return Path.Combine(directory, $".{Path.GetFileName(destinationPath)}.{Guid.NewGuid():N}.staging");
-    }
-
-    private static void CreateValidatedSnapshot(string sourcePath, string destinationPath, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-
-        var sourceConnectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = sourcePath,
-            Mode = SqliteOpenMode.ReadOnly,
-            Cache = SqliteCacheMode.Private,
-            Pooling = false
-        }.ToString();
-        var destinationConnectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = destinationPath,
-            Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Private,
-            Pooling = false
-        }.ToString();
-
-        using (var source = new SqliteConnection(sourceConnectionString))
-        using (var destination = new SqliteConnection(destinationConnectionString))
-        {
-            source.Open();
-            destination.Open();
-            cancellationToken.ThrowIfCancellationRequested();
-            source.BackupDatabase(destination);
-        }
-
-        ValidateDatabase(destinationPath);
-    }
-
-    private static void ValidateDatabase(string path)
-    {
-        var connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = path,
-            Mode = SqliteOpenMode.ReadOnly,
-            Cache = SqliteCacheMode.Private,
-            Pooling = false
-        }.ToString();
-
-        using var connection = new SqliteConnection(connectionString);
-        connection.Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = "PRAGMA integrity_check;";
-        using var reader = command.ExecuteReader();
-
-        var resultCount = 0;
-        while (reader.Read())
-        {
-            resultCount++;
-            if (!string.Equals(reader.GetString(0), "ok", StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidDataException("The staged SQLite database failed its integrity check.");
-            }
-        }
-
-        if (resultCount != 1)
-        {
-            throw new InvalidDataException("The staged SQLite database returned an unexpected integrity-check result.");
-        }
-    }
-
-    private static void FlushFile(string path)
-    {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
-        stream.Flush(flushToDisk: true);
-    }
-
-    private static void DeleteDatabaseSidecars(string path)
-    {
-        File.Delete(path + "-wal");
-        File.Delete(path + "-shm");
-        File.Delete(path + "-journal");
-    }
-
-    private static void DeleteDatabaseFiles(string path)
-    {
-        File.Delete(path);
-        DeleteDatabaseSidecars(path);
     }
 
     private string GetDatabasePath()

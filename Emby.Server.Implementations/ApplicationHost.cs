@@ -572,6 +572,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton(TimeProvider.System);
             serviceCollection.AddSingleton<MacPermalinkMountPolicy>();
             serviceCollection.AddSingleton<IPermalinkAtomicFileSystem, MacPermalinkAtomicFileSystem>();
+            serviceCollection.AddSingleton<IPermalinkAuthorityRootProvider, ConfigurationPermalinkAuthorityRootProvider>();
             serviceCollection.AddSingleton<PermalinkAuthorityStore>();
             serviceCollection.AddSingleton<PermalinkTransitionStore>();
             serviceCollection.AddSingleton<PermalinkBindingIndex>();
@@ -581,14 +582,14 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkContentReadMeter>();
 
             // Both are built by hand rather than by convention: the digest
-            // cache needs the authority root, which only the authority store
-            // resolves, and an unconfigured authority has to disable
-            // persistence instead of throwing on the way up.
+            // cache resolves the authority root through the provider seam so
+            // it follows an authority scope switch rather than the store, and
+            // an unconfigured authority has to disable persistence instead of
+            // throwing on the way up.
             serviceCollection.AddSingleton(provider =>
             {
-                var authority = provider.GetRequiredService<PermalinkAuthorityStore>();
                 return new PermalinkContentDigestCache(
-                    authority.IsConfigured ? authority.Root : null,
+                    provider.GetRequiredService<IPermalinkAuthorityRootProvider>(),
                     provider.GetRequiredService<ILogger<PermalinkContentDigestCache>>());
             });
             serviceCollection.AddSingleton(provider => new PermalinkEvidence(

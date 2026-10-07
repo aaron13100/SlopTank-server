@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-28.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-28, 2026-10-07.
 using System;
 using System.Globalization;
 using System.IO;
@@ -52,7 +52,7 @@ internal sealed class PermalinkContentDigestCache
         WriteIndented = false,
     };
 
-    private readonly string? _cacheRoot;
+    private readonly IPermalinkAuthorityRootProvider? _authorityRootProvider;
     private readonly ILogger<PermalinkContentDigestCache> _logger;
     private readonly int _maximumEntriesPerShard;
     private readonly object _writeGate = new();
@@ -60,11 +60,36 @@ internal sealed class PermalinkContentDigestCache
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkContentDigestCache"/> class.
     /// </summary>
+    /// <param name="authorityRootProvider">
+    /// The provider supplying the permalink authority root, resolved on every
+    /// use so the cache follows an authority scope switch. A provider whose
+    /// root is null or empty disables persistence entirely, which leaves
+    /// evidence computation behaving exactly as it did before this cache
+    /// existed rather than failing.
+    /// </param>
+    /// <param name="logger">The logger.</param>
+    /// <param name="maximumEntriesPerShard">Maximum number of cache-owned or hostile entries accepted in one shard.</param>
+    public PermalinkContentDigestCache(
+        IPermalinkAuthorityRootProvider? authorityRootProvider,
+        ILogger<PermalinkContentDigestCache> logger,
+        int maximumEntriesPerShard = DefaultMaximumEntriesPerShard)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumEntriesPerShard);
+
+        _authorityRootProvider = authorityRootProvider;
+        _logger = logger;
+        _maximumEntriesPerShard = maximumEntriesPerShard;
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="PermalinkContentDigestCache"/> class
+    /// against a fixed authority root.
+    /// </summary>
     /// <param name="authorityRoot">
-    /// The configured permalink authority root, or null when permalink
-    /// authority is not configured. A null root disables persistence entirely,
-    /// which leaves evidence computation behaving exactly as it did before this
-    /// cache existed rather than failing.
+    /// The permalink authority root, or null when permalink authority is not
+    /// configured. A null root disables persistence entirely, which leaves
+    /// evidence computation behaving exactly as it did before this cache
+    /// existed rather than failing.
     /// </param>
     /// <param name="logger">The logger.</param>
     /// <param name="maximumEntriesPerShard">Maximum number of cache-owned or hostile entries accepted in one shard.</param>
@@ -72,20 +97,34 @@ internal sealed class PermalinkContentDigestCache
         string? authorityRoot,
         ILogger<PermalinkContentDigestCache> logger,
         int maximumEntriesPerShard = DefaultMaximumEntriesPerShard)
+        : this(
+            string.IsNullOrWhiteSpace(authorityRoot)
+                ? null
+                : new FixedAuthorityRootProvider(authorityRoot),
+            logger,
+            maximumEntriesPerShard)
     {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumEntriesPerShard);
-
-        _cacheRoot = string.IsNullOrWhiteSpace(authorityRoot)
-            ? null
-            : Path.Combine(authorityRoot, ".sloptank", "content-digests");
-        _logger = logger;
-        _maximumEntriesPerShard = maximumEntriesPerShard;
     }
 
     /// <summary>
     /// Gets a value indicating whether entries are persisted at all.
     /// </summary>
-    public bool IsEnabled => _cacheRoot is not null;
+    public bool IsEnabled => CacheRoot is not null;
+
+    /// <summary>
+    /// Gets the directory digest shards live under, resolved from the provider
+    /// on every use, or null when the authority root is not configured.
+    /// </summary>
+    private string? CacheRoot
+    {
+        get
+        {
+            var root = _authorityRootProvider?.AuthorityRoot;
+            return string.IsNullOrWhiteSpace(root)
+                ? null
+                : Path.Combine(root, ".sloptank", "content-digests");
+        }
+    }
 
     /// <summary>
     /// Returns the digest recorded for a path whose change token still matches.
@@ -357,13 +396,14 @@ internal sealed class PermalinkContentDigestCache
     /// </summary>
     private string? EntryPath(string path)
     {
-        if (_cacheRoot is null)
+        var cacheRoot = CacheRoot;
+        if (cacheRoot is null)
         {
             return null;
         }
 
         var key = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(path)));
-        return Path.Combine(_cacheRoot, key[..2], key + ".json");
+        return Path.Combine(cacheRoot, key[..2], key + ".json");
     }
 
     private static bool IsCanonicalDigest(string? value)
@@ -476,5 +516,26 @@ internal sealed class PermalinkContentDigestCache
                 && ChangeTimeSeconds == token.ChangeTimeSeconds
                 && ChangeTimeNanoseconds == token.ChangeTimeNanoseconds
                 && Length == token.Length;
+    }
+
+    /// <summary>
+    /// Adapts a fixed root string to the provider seam for callers that hold
+    /// the root directly, keeping the cache's per-use resolution uniform.
+    /// </summary>
+    private sealed class FixedAuthorityRootProvider : IPermalinkAuthorityRootProvider
+    {
+        private readonly string _authorityRoot;
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="FixedAuthorityRootProvider"/> class.
+        /// </summary>
+        /// <param name="authorityRoot">The fixed authority root.</param>
+        public FixedAuthorityRootProvider(string authorityRoot)
+        {
+            _authorityRoot = authorityRoot;
+        }
+
+        /// <inheritdoc />
+        public string? AuthorityRoot => _authorityRoot;
     }
 }

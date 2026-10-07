@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-08, 2026-09-09, 2026-10-07.
 using System.Reflection;
 using System.Resources;
 using System.Runtime.CompilerServices;
@@ -17,6 +17,7 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyCulture("")]
 [assembly: NeutralResourcesLanguage("en")]
 [assembly: InternalsVisibleTo("Jellyfin.Server.Implementations.Tests")]
+[assembly: InternalsVisibleTo("Jellyfin.Server.Integration.Tests")]
 [assembly: InternalsVisibleTo("Emby.Server.Implementations.Fuzz")]
 
 // Setting ComVisible to false makes the types in this assembly not visible

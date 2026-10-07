@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-09-03, 2026-09-09, 2026-09-10.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-09-03, 2026-09-09, 2026-09-10, 2026-10-07.
 using System;
 using System.Globalization;
 using System.IO;
@@ -22,8 +22,15 @@ internal sealed class PermalinkAuthorityStore : IDisposable
 
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly TimeProvider _timeProvider;
+    private readonly IPermalinkAuthorityRootProvider _rootProvider;
     private readonly SemaphoreSlim _provisionLock = new(1, 1);
-    private readonly string? _configuredRoot;
+
+    /// <summary>
+    /// The database path the most recently opened connection used, so
+    /// <see cref="ResetTo"/> can release the pooled connections bound to a
+    /// previous root after the provider has already been swapped.
+    /// </summary>
+    private string? _lastOpenedDatabasePath;
     private bool _provisioned;
 
     /// <summary>
@@ -42,21 +49,39 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkAuthorityStore"/> class.
     /// </summary>
-    /// <param name="configuration">The server configuration.</param>
+    /// <param name="rootProvider">The provider supplying the configured authority root.</param>
     /// <param name="fileSystem">The durable permalink filesystem.</param>
     /// <param name="timeProvider">The time provider.</param>
     public PermalinkAuthorityStore(
-        IConfiguration configuration,
+        IPermalinkAuthorityRootProvider rootProvider,
         IPermalinkAtomicFileSystem fileSystem,
         TimeProvider timeProvider)
     {
-        _configuredRoot = configuration["Permalinks:AuthorityRoot"];
+        _rootProvider = rootProvider;
         _fileSystem = fileSystem;
         _timeProvider = timeProvider;
     }
 
     /// <summary>
-    /// Gets the configured authority root.
+    /// Initializes a new instance of the <see cref="PermalinkAuthorityStore"/> class
+    /// from server configuration, adapting it to the authority root provider seam.
+    /// Internal so the dependency injection container keeps exactly one public
+    /// constructor to choose from.
+    /// </summary>
+    /// <param name="configuration">The server configuration.</param>
+    /// <param name="fileSystem">The durable permalink filesystem.</param>
+    /// <param name="timeProvider">The time provider.</param>
+    internal PermalinkAuthorityStore(
+        IConfiguration configuration,
+        IPermalinkAtomicFileSystem fileSystem,
+        TimeProvider timeProvider)
+        : this(new ConfigurationPermalinkAuthorityRootProvider(configuration), fileSystem, timeProvider)
+    {
+    }
+
+    /// <summary>
+    /// Gets the configured authority root, resolved through the provider seam
+    /// on every use.
     /// </summary>
     public string Root
     {
@@ -70,14 +95,14 @@ internal sealed class PermalinkAuthorityStore : IDisposable
                     "Permalinks:AuthorityRoot is not configured.");
             }
 
-            return _configuredRoot!;
+            return _rootProvider.AuthorityRoot!;
         }
     }
 
     /// <summary>
     /// Gets a value indicating whether permalink authority is configured.
     /// </summary>
-    internal bool IsConfigured => !string.IsNullOrWhiteSpace(_configuredRoot);
+    internal bool IsConfigured => !string.IsNullOrWhiteSpace(_rootProvider.AuthorityRoot);
 
     private string AuthorityRoot => Path.Combine(Root, ".sloptank", "permalinks");
 
@@ -403,9 +428,46 @@ internal sealed class PermalinkAuthorityStore : IDisposable
             exception);
     }
 
+    /// <summary>
+    /// Moves the authority onto a root the provider has already been swapped
+    /// to, releasing everything cached against the previous one.
+    ///
+    /// The provider is the single source of the root, so this method refuses to
+    /// run while it still disagrees with the requested root: resetting anyway
+    /// would clear provision state while every derived path keeps resolving the
+    /// old root. Pooled SQLite connections belong to the previous database
+    /// path, so the pool is emptied before the derived paths re-resolve:
+    /// ClearPool closes idle pooled connections and marks in-use ones for
+    /// destruction at close, and a failure to close propagates rather than
+    /// being swallowed. Provision state and the liveness stamp are cleared so
+    /// the next operation re-provisions against the new root.
+    /// </summary>
+    /// <param name="root">The authority root the provider must already resolve to.</param>
+    internal void ResetTo(string root)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(root);
+        if (!string.Equals(_rootProvider.AuthorityRoot, root, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Cannot reset the permalink authority to '{root}': the authority root provider currently resolves '{_rootProvider.AuthorityRoot ?? "<none>"}'. Swap the provider value before calling ResetTo.");
+        }
+
+        var previousDatabasePath = _lastOpenedDatabasePath;
+        if (previousDatabasePath is not null)
+        {
+            SqliteConnection.ClearPool(new SqliteConnection($"Data Source={previousDatabasePath};Pooling=True"));
+        }
+
+        _lastOpenedDatabasePath = null;
+        _provisioned = false;
+        _lastValidatedTicks = 0;
+    }
+
     internal async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
-        var connection = new SqliteConnection($"Data Source={DatabasePath};Pooling=True");
+        var databasePath = DatabasePath;
+        _lastOpenedDatabasePath = databasePath;
+        var connection = new SqliteConnection($"Data Source={databasePath};Pooling=True");
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = OperatingSystem.IsMacOS()

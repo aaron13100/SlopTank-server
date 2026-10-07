@@ -29,7 +29,7 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _registrationLock = new(1, 1);
     private readonly ConcurrentDictionary<AuthorityRootKey, KnownRoot> _known = new();
-    private readonly ConcurrentDictionary<string, Guid> _authorityIds = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<PermalinkAuthorityNamespace, Guid> _authorityIds = new();
 
     public PermalinkRootIdentityRegistry(
         PermalinkRootIdentityStore store,
@@ -64,7 +64,7 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
             && markerPin is not null
             && string.Equals(cached.RootPin, rootPin, StringComparison.Ordinal)
             && string.Equals(cached.MarkerPin, markerPin, StringComparison.Ordinal)
-            && string.Equals(authorityNamespace, _store.AuthorityNamespace, StringComparison.Ordinal))
+            && authorityNamespace == _store.AuthorityNamespace)
         {
             return cached.Identity;
         }
@@ -98,7 +98,7 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
             cause);
 
     private async Task<PermalinkRootIdentity> ResolveLockedAsync(
-        string authorityNamespace,
+        PermalinkAuthorityNamespace authorityNamespace,
         string canonical,
         string markerPath,
         CancellationToken cancellationToken)
@@ -152,7 +152,7 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
     }
 
     private async Task<PermalinkRootIdentity> RegisterAsync(
-        string authorityNamespace,
+        PermalinkAuthorityNamespace authorityNamespace,
         string canonical,
         string markerPath,
         string rootPin,
@@ -213,7 +213,7 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
     }
 
     private async Task<Guid> ReadAuthorityIdAsync(
-        string authorityNamespace,
+        PermalinkAuthorityNamespace authorityNamespace,
         string canonical,
         CancellationToken cancellationToken)
     {
@@ -242,7 +242,7 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
     }
 
     private void Remember(
-        string authorityNamespace,
+        PermalinkAuthorityNamespace authorityNamespace,
         string canonical,
         string markerPath,
         string rootPin,
@@ -255,15 +255,17 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
         }
     }
 
-    private void RequireAuthorityNamespace(string expected, string canonical)
+    private void RequireAuthorityNamespace(PermalinkAuthorityNamespace expected, string canonical)
     {
-        if (!string.Equals(expected, _store.AuthorityNamespace, StringComparison.Ordinal))
+        if (expected != _store.AuthorityNamespace)
         {
             throw Unknown(canonical, "the authority changed while the root identity was being checked");
         }
     }
 
-    private readonly record struct AuthorityRootKey(string AuthorityNamespace, string CanonicalRoot);
+    private readonly record struct AuthorityRootKey(
+        PermalinkAuthorityNamespace AuthorityNamespace,
+        string CanonicalRoot);
 
     private sealed record KnownRoot(PermalinkRootIdentity Identity, string RootPin, string MarkerPin);
 }

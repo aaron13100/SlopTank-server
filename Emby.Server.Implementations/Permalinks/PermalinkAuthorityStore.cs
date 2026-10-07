@@ -116,9 +116,9 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// Gets an opaque cache namespace for the currently selected authority. Resetting the store
     /// advances the namespace even when a restored authority reuses the same filesystem path.
     /// </summary>
-    internal string CacheNamespace => string.Create(
-        CultureInfo.InvariantCulture,
-        $"{AuthorityRoot}\0{Volatile.Read(ref _authorityScopeGeneration)}");
+    internal PermalinkAuthorityNamespace CacheNamespace => new(string.Create(
+            CultureInfo.InvariantCulture,
+            $"{AuthorityRoot}\0{Volatile.Read(ref _authorityScopeGeneration)}"));
 
     /// <inheritdoc />
     public void Dispose()

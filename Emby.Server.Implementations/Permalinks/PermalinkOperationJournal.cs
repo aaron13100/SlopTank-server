@@ -79,6 +79,44 @@ internal sealed class PermalinkOperationJournal : IDisposable
     /// </summary>
     private static readonly TimeSpan _lookupRunGap = TimeSpan.FromSeconds(60);
 
+    private static readonly IReadOnlyDictionary<string, PermalinkR9JournalProtocol> _r9Protocols
+        = new Dictionary<string, PermalinkR9JournalProtocol>(StringComparer.Ordinal)
+        {
+            ["orphan-closure"] = new(
+                [PermalinkPhase.Prepared, PermalinkPhase.ClosureReady,
+                 PermalinkPhase.DetachedDecided, PermalinkPhase.BindingsRemoved,
+                 PermalinkPhase.Detached],
+                PermalinkPhase.DetachedDecided),
+            ["exact-restoration"] = new(
+                [PermalinkPhase.Prepared, PermalinkPhase.OldStaged,
+                 PermalinkPhase.RestorationAuthorized, PermalinkPhase.OldInstalled,
+                 PermalinkPhase.EqualityVerified, PermalinkPhase.TerminalRestored],
+                PermalinkPhase.RestorationAuthorized),
+            ["restore-with-rewrite"] = new(
+                [PermalinkPhase.Prepared, PermalinkPhase.OldStaged,
+                 PermalinkPhase.RestorationAuthorized, PermalinkPhase.OldInstalled,
+                 PermalinkPhase.EqualityVerified, PermalinkPhase.RewritePrepared,
+                 PermalinkPhase.DesiredReady, PermalinkPhase.ClaimedReady,
+                 PermalinkPhase.DesiredInstalled, PermalinkPhase.ContentPublished,
+                 PermalinkPhase.AggregatesPublished, PermalinkPhase.PathPublished,
+                 PermalinkPhase.Committed],
+                PermalinkPhase.RestorationAuthorized),
+            ["successor-mint"] = new(
+                [PermalinkPhase.Prepared, PermalinkPhase.DesiredVerified,
+                 PermalinkPhase.XattrSet, PermalinkPhase.SupersessionAuthorized,
+                 PermalinkPhase.CapsulePublished, PermalinkPhase.PathPublished,
+                 PermalinkPhase.Bound, PermalinkPhase.Committed],
+                PermalinkPhase.SupersessionAuthorized),
+            ["pending-slot"] = new(
+                [PermalinkPhase.DetachedDecided, PermalinkPhase.SlotPublished,
+                 PermalinkPhase.DetachedPending],
+                PermalinkPhase.DetachedDecided),
+            ["scratch-adoption"] = new(
+                [PermalinkPhase.Prepared, PermalinkPhase.DesiredCopied,
+                 PermalinkPhase.RegistryTransferred, PermalinkPhase.Adopted],
+                PermalinkPhase.RegistryTransferred)
+        };
+
     private readonly PermalinkAuthorityStore _authority;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly ILogger<PermalinkOperationJournal> _logger;
@@ -516,6 +554,11 @@ internal sealed class PermalinkOperationJournal : IDisposable
                 $"operation is already settled as '{settled.Name}'");
         }
 
+        if (TryValidateR9Transition(operation, operationId, phase))
+        {
+            return;
+        }
+
         var prepared = HasPhase(operationId, PermalinkPhase.Prepared);
         var ready = HasPhase(operationId, PermalinkPhase.Ready);
         var published = HasPhase(operationId, PermalinkPhase.Published);
@@ -543,6 +586,75 @@ internal sealed class PermalinkOperationJournal : IDisposable
         {
             throw InvalidTransition(operationId, phase, "required predecessor evidence is absent");
         }
+    }
+
+    private bool TryValidateR9Transition(
+        PermalinkOperationDocument operation,
+        Guid operationId,
+        PermalinkPhase phase)
+    {
+        if (!_r9Protocols.TryGetValue(operation.Kind, out var protocol))
+        {
+            return false;
+        }
+
+        if (phase == PermalinkPhase.Aborted || phase == PermalinkPhase.Cancelled)
+        {
+            var permanentBoundaryReached = protocol.PermanentBoundary is not null
+                && HasPhase(operationId, protocol.PermanentBoundary);
+            if (permanentBoundaryReached)
+            {
+                throw InvalidTransition(
+                    operationId,
+                    phase,
+                    $"permanent boundary '{protocol.PermanentBoundary!.Name}' is already durable");
+            }
+
+            return true;
+        }
+
+        if (phase == PermalinkPhase.ManualIntervention)
+        {
+            return true;
+        }
+
+        if (string.Equals(operation.Kind, "exact-restoration", StringComparison.Ordinal)
+            && phase == PermalinkPhase.HandedToRewrite)
+        {
+            if (!HasPhase(operationId, PermalinkPhase.EqualityVerified))
+            {
+                throw InvalidTransition(
+                    operationId,
+                    phase,
+                    $"required predecessor '{PermalinkPhase.EqualityVerified.Name}' is absent");
+            }
+
+            return true;
+        }
+
+        var phaseIndex = Array.FindIndex(
+            protocol.Sequence,
+            candidate => string.Equals(candidate.Name, phase.Name, StringComparison.Ordinal));
+        if (phaseIndex < 0)
+        {
+            throw InvalidTransition(operationId, phase, $"phase is not valid for kind '{operation.Kind}'");
+        }
+
+        if (phaseIndex == 0)
+        {
+            return true;
+        }
+
+        var predecessor = protocol.Sequence[phaseIndex - 1];
+        if (!HasPhase(operationId, predecessor))
+        {
+            throw InvalidTransition(
+                operationId,
+                phase,
+                $"required predecessor '{predecessor.Name}' is absent");
+        }
+
+        return true;
     }
 
     private static PermalinkException InvalidTransition(
@@ -2095,6 +2207,10 @@ internal sealed class PermalinkOperationJournal : IDisposable
 
         return false;
     }
+
+    private sealed record PermalinkR9JournalProtocol(
+        PermalinkPhase[] Sequence,
+        PermalinkPhase? PermanentBoundary);
 
     private sealed record ArchiveCandidate(
         string OperationId,

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-02, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-02, 2026-09-09, 2026-10-07.
 using System.Collections.Generic;
 using System.Globalization;
 
@@ -41,6 +41,94 @@ internal sealed class PermalinkPhase
     public static PermalinkPhase Ready { get; }
         = Declare("ready", PermalinkPhaseDisposition.Pending);
 
+    /// <summary>Gets the orphan-closure recoverability boundary.</summary>
+    public static PermalinkPhase ClosureReady { get; }
+        = Declare("closure_ready", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the durable detached/no-change authority decision.</summary>
+    public static PermalinkPhase DetachedDecided { get; }
+        = Declare("detached_decided", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the binding-removal boundary.</summary>
+    public static PermalinkPhase BindingsRemoved { get; }
+        = Declare("bindings_removed", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the exact old-byte staging boundary.</summary>
+    public static PermalinkPhase OldStaged { get; }
+        = Declare("old_staged", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the durable restoration authorization boundary.</summary>
+    public static PermalinkPhase RestorationAuthorized { get; }
+        = Declare("restoration_authorized", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the exact old-byte installation boundary.</summary>
+    public static PermalinkPhase OldInstalled { get; }
+        = Declare("old_installed", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the old-byte equality verification boundary.</summary>
+    public static PermalinkPhase EqualityVerified { get; }
+        = Declare("equality_verified", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the desired rewrite staging boundary.</summary>
+    public static PermalinkPhase RewritePrepared { get; }
+        = Declare("rewrite_prepared", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the desired-evidence boundary for a composite rewrite.</summary>
+    public static PermalinkPhase DesiredReady { get; }
+        = Declare("desired_ready", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the irreversible predecessor-claim boundary.</summary>
+    public static PermalinkPhase ClaimedReady { get; }
+        = Declare("claimed_ready", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the desired-byte installation boundary.</summary>
+    public static PermalinkPhase DesiredInstalled { get; }
+        = Declare("desired_installed", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the content-successor publication boundary.</summary>
+    public static PermalinkPhase ContentPublished { get; }
+        = Declare("content_published", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the aggregate-successor publication boundary.</summary>
+    public static PermalinkPhase AggregatesPublished { get; }
+        = Declare("aggregates_published", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the path-successor publication boundary.</summary>
+    public static PermalinkPhase PathPublished { get; }
+        = Declare("path_published", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the successor candidate verification boundary.</summary>
+    public static PermalinkPhase DesiredVerified { get; }
+        = Declare("desired_verified", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the successor anchor-write boundary.</summary>
+    public static PermalinkPhase XattrSet { get; }
+        = Declare("xattr_set", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the durable supersession authorization boundary.</summary>
+    public static PermalinkPhase SupersessionAuthorized { get; }
+        = Declare("supersession_authorized", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the successor capsule publication boundary.</summary>
+    public static PermalinkPhase CapsulePublished { get; }
+        = Declare("capsule_published", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the successor binding publication boundary.</summary>
+    public static PermalinkPhase Bound { get; }
+        = Declare("bound", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the pending-slot publication boundary.</summary>
+    public static PermalinkPhase SlotPublished { get; }
+        = Declare("slot_published", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the scratch desired-copy boundary.</summary>
+    public static PermalinkPhase DesiredCopied { get; }
+        = Declare("desired_copied", PermalinkPhaseDisposition.Pending);
+
+    /// <summary>Gets the scratch registry-transfer boundary.</summary>
+    public static PermalinkPhase RegistryTransferred { get; }
+        = Declare("registry_transferred", PermalinkPhaseDisposition.Pending);
+
     /// <summary>Gets the boundary at which desired bytes became live.</summary>
     public static PermalinkPhase Published { get; }
         = Declare("published", PermalinkPhaseDisposition.Pending);
@@ -74,6 +162,22 @@ internal sealed class PermalinkPhase
     /// <summary>Gets the unrecoverable mutation whose bindings were removed.</summary>
     public static PermalinkPhase Detached { get; }
         = Declare("detached", PermalinkPhaseDisposition.Terminal);
+
+    /// <summary>Gets an exact restoration terminal.</summary>
+    public static PermalinkPhase TerminalRestored { get; }
+        = Declare("terminal_restored", PermalinkPhaseDisposition.Terminal);
+
+    /// <summary>Gets an exact restoration handed to its composite rewrite.</summary>
+    public static PermalinkPhase HandedToRewrite { get; }
+        = Declare("handed_to_rewrite", PermalinkPhaseDisposition.Terminal);
+
+    /// <summary>Gets a detached operation whose explicit future successor slot is durable.</summary>
+    public static PermalinkPhase DetachedPending { get; }
+        = Declare("detached_pending", PermalinkPhaseDisposition.Terminal);
+
+    /// <summary>Gets a completed scratch adoption.</summary>
+    public static PermalinkPhase Adopted { get; }
+        = Declare("adopted", PermalinkPhaseDisposition.Terminal);
 
     /// <summary>
     /// Gets the closure for partial evidence whose exact old or desired assignment cannot be

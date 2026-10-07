@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-03, 2026-10-07.
 using System;
 using System.Collections.Concurrent;
 using System.Globalization;
@@ -28,8 +28,8 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
     private readonly IPermalinkPathObjects _objects;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _registrationLock = new(1, 1);
-    private readonly ConcurrentDictionary<string, KnownRoot> _known = new(StringComparer.Ordinal);
-    private Guid? _authorityId;
+    private readonly ConcurrentDictionary<AuthorityRootKey, KnownRoot> _known = new();
+    private readonly ConcurrentDictionary<string, Guid> _authorityIds = new(StringComparer.Ordinal);
 
     public PermalinkRootIdentityRegistry(
         PermalinkRootIdentityStore store,
@@ -55,13 +55,16 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
         var canonical = _objects.CanonicalizeDirectory(configuredRoot)
             ?? throw Unknown(configuredRoot, "the configured root does not exist or cannot be resolved");
         var markerPath = Path.Combine(canonical, PermalinkRootMarker.FileName);
+        var authorityNamespace = _store.AuthorityNamespace;
+        var cacheKey = new AuthorityRootKey(authorityNamespace, canonical);
         var rootPin = _objects.ReadPinnedIdentityNoFollow(canonical);
         var markerPin = _objects.ReadPinnedIdentityNoFollow(markerPath);
-        if (_known.TryGetValue(canonical, out var cached)
+        if (_known.TryGetValue(cacheKey, out var cached)
             && rootPin is not null
             && markerPin is not null
             && string.Equals(cached.RootPin, rootPin, StringComparison.Ordinal)
-            && string.Equals(cached.MarkerPin, markerPin, StringComparison.Ordinal))
+            && string.Equals(cached.MarkerPin, markerPin, StringComparison.Ordinal)
+            && string.Equals(authorityNamespace, _store.AuthorityNamespace, StringComparison.Ordinal))
         {
             return cached.Identity;
         }
@@ -69,7 +72,8 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
         await _registrationLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await ResolveLockedAsync(canonical, markerPath, cancellationToken).ConfigureAwait(false);
+            RequireAuthorityNamespace(authorityNamespace, canonical);
+            return await ResolveLockedAsync(authorityNamespace, canonical, markerPath, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -94,6 +98,7 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
             cause);
 
     private async Task<PermalinkRootIdentity> ResolveLockedAsync(
+        string authorityNamespace,
         string canonical,
         string markerPath,
         CancellationToken cancellationToken)
@@ -101,7 +106,8 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
         var rootPin = _objects.ReadPinnedIdentityNoFollow(canonical)
             ?? throw Unknown(canonical, "the configured root cannot be inspected");
         var markerBytes = _objects.ReadFileIfExists(markerPath);
-        var rowForRoot = await _store.FindByRootAsync(canonical, cancellationToken).ConfigureAwait(false);
+        var rowForRoot = await _store.FindByRootAsync(canonical, authorityNamespace, cancellationToken).ConfigureAwait(false);
+        RequireAuthorityNamespace(authorityNamespace, canonical);
         if (markerBytes is null)
         {
             if (rowForRoot is not null)
@@ -109,19 +115,20 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
                 throw Unknown(canonical, "the registry has this root but its marker file is missing");
             }
 
-            return await RegisterAsync(canonical, markerPath, rootPin, cancellationToken).ConfigureAwait(false);
+            return await RegisterAsync(authorityNamespace, canonical, markerPath, rootPin, cancellationToken).ConfigureAwait(false);
         }
 
         var marker = CanonicalJson.Deserialize<PermalinkRootMarker>(markerBytes, markerPath);
-        _authorityId ??= await _store.ReadAuthorityIdAsync(cancellationToken).ConfigureAwait(false);
-        if (!string.Equals(marker.AuthorityId.ToString("D"), _authorityId.Value.ToString("D"), StringComparison.Ordinal))
+        var authorityId = await ReadAuthorityIdAsync(authorityNamespace, canonical, cancellationToken).ConfigureAwait(false);
+        if (!string.Equals(marker.AuthorityId.ToString("D"), authorityId.ToString("D"), StringComparison.Ordinal))
         {
             throw Unknown(canonical, "the marker belongs to a different authority");
         }
 
         var markerId = marker.RootIdentityId.ToString("D");
-        var row = await _store.FindByIdAsync(markerId, cancellationToken).ConfigureAwait(false)
+        var row = await _store.FindByIdAsync(markerId, authorityNamespace, cancellationToken).ConfigureAwait(false)
             ?? throw Unknown(canonical, "the marker names a root identity the registry does not have");
+        RequireAuthorityNamespace(authorityNamespace, canonical);
         var digest = CanonicalJson.Digest(markerBytes);
         var (expectedDigest, expectedPin) = SplitAttestation(row.Attestation);
         if (marker.Generation != row.Generation
@@ -138,31 +145,41 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
         }
 
         var identity = new PermalinkRootIdentity(row.RootIdentityId, row.Generation, canonical);
-        Remember(canonical, markerPath, rootPin, identity);
+        RequireAuthorityNamespace(authorityNamespace, canonical);
+        Remember(authorityNamespace, canonical, markerPath, rootPin, identity);
+        RequireAuthorityNamespace(authorityNamespace, canonical);
         return identity;
     }
 
     private async Task<PermalinkRootIdentity> RegisterAsync(
+        string authorityNamespace,
         string canonical,
         string markerPath,
         string rootPin,
         CancellationToken cancellationToken)
     {
-        _authorityId ??= await _store.ReadAuthorityIdAsync(cancellationToken).ConfigureAwait(false);
+        var authorityId = await ReadAuthorityIdAsync(authorityNamespace, canonical, cancellationToken).ConfigureAwait(false);
         var identityId = Guid.NewGuid();
         var marker = new PermalinkRootMarker(
-            _authorityId.Value,
+            authorityId,
             identityId,
             1,
             _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture));
         var bytes = CanonicalJson.Serialize(marker);
         try
         {
+            RequireAuthorityNamespace(authorityNamespace, canonical);
             await _fileSystem.PublishImmutableAsync(markerPath, bytes, cancellationToken).ConfigureAwait(false);
+            RequireAuthorityNamespace(authorityNamespace, canonical);
         }
         catch (PermalinkException exception) when (exception.Code == "publish-exclusive")
         {
             throw Unknown(canonical, "a marker appeared while registering this root", exception);
+        }
+        catch
+        {
+            RemoveOwnMarker(markerPath, bytes);
+            throw;
         }
 
         var row = new PermalinkRootIdentityRow(
@@ -172,7 +189,7 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
             CanonicalJson.Digest(bytes) + "|" + rootPin);
         try
         {
-            await _store.InsertAsync(row, cancellationToken).ConfigureAwait(false);
+            await _store.InsertAsync(row, authorityNamespace, cancellationToken).ConfigureAwait(false);
         }
         catch (SqliteException exception) when (exception.SqliteExtendedErrorCode == SqliteUniqueConstraintExtendedCode)
         {
@@ -185,9 +202,31 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
             throw;
         }
 
+        // The scoped store guarantees the row went to the expected database. If ResetTo occurred
+        // after that write, leave its matching marker and row intact in the old authority and
+        // refuse to return either identity in the newly selected authority.
+        RequireAuthorityNamespace(authorityNamespace, canonical);
         var identity = new PermalinkRootIdentity(row.RootIdentityId, 1, canonical);
-        Remember(canonical, markerPath, rootPin, identity);
+        Remember(authorityNamespace, canonical, markerPath, rootPin, identity);
+        RequireAuthorityNamespace(authorityNamespace, canonical);
         return identity;
+    }
+
+    private async Task<Guid> ReadAuthorityIdAsync(
+        string authorityNamespace,
+        string canonical,
+        CancellationToken cancellationToken)
+    {
+        if (_authorityIds.TryGetValue(authorityNamespace, out var cached))
+        {
+            RequireAuthorityNamespace(authorityNamespace, canonical);
+            return cached;
+        }
+
+        var authorityId = await _store.ReadAuthorityIdAsync(authorityNamespace, cancellationToken).ConfigureAwait(false);
+        RequireAuthorityNamespace(authorityNamespace, canonical);
+
+        return _authorityIds.GetOrAdd(authorityNamespace, authorityId);
     }
 
     private void RemoveOwnMarker(string markerPath, ReadOnlyMemory<byte> written)
@@ -202,14 +241,29 @@ internal sealed class PermalinkRootIdentityRegistry : IDisposable
         }
     }
 
-    private void Remember(string canonical, string markerPath, string rootPin, PermalinkRootIdentity identity)
+    private void Remember(
+        string authorityNamespace,
+        string canonical,
+        string markerPath,
+        string rootPin,
+        PermalinkRootIdentity identity)
     {
         var markerPin = _objects.ReadPinnedIdentityNoFollow(markerPath);
         if (markerPin is not null)
         {
-            _known[canonical] = new KnownRoot(identity, rootPin, markerPin);
+            _known[new AuthorityRootKey(authorityNamespace, canonical)] = new KnownRoot(identity, rootPin, markerPin);
         }
     }
+
+    private void RequireAuthorityNamespace(string expected, string canonical)
+    {
+        if (!string.Equals(expected, _store.AuthorityNamespace, StringComparison.Ordinal))
+        {
+            throw Unknown(canonical, "the authority changed while the root identity was being checked");
+        }
+    }
+
+    private readonly record struct AuthorityRootKey(string AuthorityNamespace, string CanonicalRoot);
 
     private sealed record KnownRoot(PermalinkRootIdentity Identity, string RootPin, string MarkerPin);
 }

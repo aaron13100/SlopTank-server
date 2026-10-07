@@ -33,6 +33,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// </summary>
     private string? _lastOpenedDatabasePath;
     private bool _provisioned;
+    private long _authorityScopeGeneration;
 
     /// <summary>
     /// When the authority volume was last proven writable, as UTC ticks.
@@ -110,6 +111,14 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     internal string DatabasePath => Path.Combine(AuthorityRoot, "authority.db");
 
     internal string IssuedRoot => Path.Combine(AuthorityRoot, "issued");
+
+    /// <summary>
+    /// Gets an opaque cache namespace for the currently selected authority. Resetting the store
+    /// advances the namespace even when a restored authority reuses the same filesystem path.
+    /// </summary>
+    internal string CacheNamespace => string.Create(
+        CultureInfo.InvariantCulture,
+        $"{AuthorityRoot}\0{Volatile.Read(ref _authorityScopeGeneration)}");
 
     /// <inheritdoc />
     public void Dispose()
@@ -506,6 +515,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         _lastOpenedDatabasePath = null;
         _provisioned = false;
         _lastValidatedTicks = 0;
+        _ = Interlocked.Increment(ref _authorityScopeGeneration);
     }
 
     internal async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken)

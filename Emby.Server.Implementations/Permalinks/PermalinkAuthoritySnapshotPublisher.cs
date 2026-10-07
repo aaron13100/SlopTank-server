@@ -77,10 +77,10 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IPermalinkAuthorityG
                 .ConfigureAwait(false);
             var metadata = await AllocateGenerationAsync(source, cancellationToken)
                 .ConfigureAwait(false);
-            // The pin must be a DEFERRED (read) transaction. BeginTransactionAsync() defaults to
-            // Serializable, which Microsoft.Data.Sqlite maps to BEGIN IMMEDIATE, a write
-            // transaction; SQLite's online backup returns SQLITE_BUSY ("database is locked") at
-            // once when its source connection is in a write transaction.
+            // The pin must be a DEFERRED serializable read transaction. Microsoft.Data.Sqlite
+            // 10.0.10 has no async overload that preserves both properties, so the helper contains
+            // its unavoidable synchronous transaction-construction boundary. BEGIN IMMEDIATE
+            // would make SQLite's online backup return SQLITE_BUSY ("database is locked") at once.
             await using var pinned = PermalinkSqliteTransactions.BeginDeferredSerializable(source);
             await PinGenerationAsync(source, pinned, metadata, cancellationToken)
                 .ConfigureAwait(false);

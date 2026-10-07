@@ -1,10 +1,11 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-03, 2026-10-07.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using MediaBrowser.Controller.Permalinks;
 
 namespace Emby.Server.Implementations.Permalinks;
 
@@ -20,6 +21,9 @@ internal sealed class PermalinkRootIdentityStore
         _timeProvider = timeProvider;
     }
 
+    /// <summary>Gets the opaque cache namespace of the currently selected authority.</summary>
+    public string AuthorityNamespace => _authority.CacheNamespace;
+
     /// <summary>Reads the identity of the authority that owns the database.</summary>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The authority id.</returns>
@@ -28,6 +32,21 @@ internal sealed class PermalinkRootIdentityStore
         await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
         var path = Path.Combine(_authority.AuthorityRoot, "authority.json");
         var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+        return CanonicalJson.Deserialize<PermalinkAuthorityDocument>(bytes, path).AuthorityId;
+    }
+
+    /// <summary>Reads the authority id only while the expected cache namespace remains selected.</summary>
+    /// <param name="authorityNamespace">The opaque authority namespace captured by the caller.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The authority id.</returns>
+    public async Task<Guid> ReadAuthorityIdAsync(string authorityNamespace, CancellationToken cancellationToken)
+    {
+        RequireNamespace(authorityNamespace);
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        RequireNamespace(authorityNamespace);
+        var path = Path.Combine(_authority.AuthorityRoot, "authority.json");
+        var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+        RequireNamespace(authorityNamespace);
         return CanonicalJson.Deserialize<PermalinkAuthorityDocument>(bytes, path).AuthorityId;
     }
 
@@ -44,6 +63,28 @@ internal sealed class PermalinkRootIdentityStore
     /// <returns>The row, or null.</returns>
     public Task<PermalinkRootIdentityRow?> FindByRootAsync(string canonicalRoot, CancellationToken cancellationToken)
         => FindAsync("canonical_root = $key", canonicalRoot, cancellationToken);
+
+    /// <summary>Finds a row by root only while the expected authority remains selected.</summary>
+    /// <param name="canonicalRoot">The canonical root path.</param>
+    /// <param name="authorityNamespace">The opaque authority namespace captured by the caller.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The row, or null.</returns>
+    public Task<PermalinkRootIdentityRow?> FindByRootAsync(
+        string canonicalRoot,
+        string authorityNamespace,
+        CancellationToken cancellationToken)
+        => FindAsync("canonical_root = $key", canonicalRoot, authorityNamespace, cancellationToken);
+
+    /// <summary>Finds a row by id only while the expected authority remains selected.</summary>
+    /// <param name="rootIdentityId">The identity.</param>
+    /// <param name="authorityNamespace">The opaque authority namespace captured by the caller.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The row, or null.</returns>
+    public Task<PermalinkRootIdentityRow?> FindByIdAsync(
+        string rootIdentityId,
+        string authorityNamespace,
+        CancellationToken cancellationToken)
+        => FindAsync("root_identity_id = $key", rootIdentityId, authorityNamespace, cancellationToken);
 
     /// <summary>Lists every canonical root ever registered, including roots no longer configured.</summary>
     /// <param name="cancellationToken">The cancellation token.</param>
@@ -68,8 +109,37 @@ internal sealed class PermalinkRootIdentityStore
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task representing the write.</returns>
     public async Task InsertAsync(PermalinkRootIdentityRow row, CancellationToken cancellationToken)
+        => await InsertCoreAsync(row, authorityNamespace: null, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Inserts a registration only into the expected authority namespace.</summary>
+    /// <param name="row">The row.</param>
+    /// <param name="authorityNamespace">The opaque authority namespace captured by the caller.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the write.</returns>
+    public Task InsertAsync(
+        PermalinkRootIdentityRow row,
+        string authorityNamespace,
+        CancellationToken cancellationToken)
+        => InsertCoreAsync(row, authorityNamespace, cancellationToken);
+
+    private async Task InsertCoreAsync(
+        PermalinkRootIdentityRow row,
+        string? authorityNamespace,
+        CancellationToken cancellationToken)
     {
+        if (authorityNamespace is not null)
+        {
+            RequireNamespace(authorityNamespace);
+        }
+
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        if (authorityNamespace is not null)
+        {
+            // From this point the connection is pinned to the expected database. A later ResetTo
+            // can change the selected namespace, but it cannot redirect this insert into it.
+            RequireNamespace(authorityNamespace);
+        }
+
         using var scope = await _authority.BeginAuthorizedWriteAsync(
             connection,
             Guid.NewGuid(),
@@ -77,6 +147,13 @@ internal sealed class PermalinkRootIdentityStore
             "INSERT",
             row.RootIdentityId,
             cancellationToken).ConfigureAwait(false);
+        if (authorityNamespace is not null)
+        {
+            // Do not begin a root write after the caller's authority selection has gone stale.
+            // Once execution starts below, the open connection keeps the write on the old database.
+            RequireNamespace(authorityNamespace);
+        }
+
         await using var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO PermalinkRootIdentities
@@ -94,8 +171,25 @@ internal sealed class PermalinkRootIdentityStore
     }
 
     private async Task<PermalinkRootIdentityRow?> FindAsync(string where, string key, CancellationToken cancellationToken)
+        => await FindAsync(where, key, authorityNamespace: null, cancellationToken).ConfigureAwait(false);
+
+    private async Task<PermalinkRootIdentityRow?> FindAsync(
+        string where,
+        string key,
+        string? authorityNamespace,
+        CancellationToken cancellationToken)
     {
+        if (authorityNamespace is not null)
+        {
+            RequireNamespace(authorityNamespace);
+        }
+
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        if (authorityNamespace is not null)
+        {
+            RequireNamespace(authorityNamespace);
+        }
+
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
             SELECT root_identity_id, generation, canonical_root, attestation
@@ -105,13 +199,35 @@ internal sealed class PermalinkRootIdentityStore
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
+            if (authorityNamespace is not null)
+            {
+                RequireNamespace(authorityNamespace);
+            }
+
             return null;
         }
 
-        return new PermalinkRootIdentityRow(
+        var row = new PermalinkRootIdentityRow(
             reader.GetString(0),
             reader.GetInt64(1),
             reader.GetString(2),
             reader.GetString(3));
+        if (authorityNamespace is not null)
+        {
+            RequireNamespace(authorityNamespace);
+        }
+
+        return row;
+    }
+
+    private void RequireNamespace(string expected)
+    {
+        if (!string.Equals(expected, AuthorityNamespace, StringComparison.Ordinal))
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                PermalinkRootIdentityRegistry.UnknownCode,
+                "The permalink authority changed while a root identity was being checked.");
+        }
     }
 }

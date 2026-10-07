@@ -68,6 +68,11 @@ internal sealed class PermalinkEvidencePopulationCoordinator
             await PopulateSourceAsync(populationId, snapshot, cancellationToken).ConfigureAwait(false);
         }
 
+        // Bind the final filesystem/root census to the exact authority generation it validates.
+        // Any managed writer after this point advances at least authority_sequence and makes the
+        // sealing transaction refuse rather than certifying evidence it did not traverse.
+        var sealToken = await _store.CaptureSealTokenAsync(cancellationToken).ConfigureAwait(false);
+
         foreach (var snapshot in snapshots)
         {
             var after = await _sourceCensus.ReadAsync(snapshot.Request, cancellationToken).ConfigureAwait(false);
@@ -87,7 +92,7 @@ internal sealed class PermalinkEvidencePopulationCoordinator
                 "The attested root generation set changed before the population could be sealed.");
         }
 
-        await _store.CompleteAsync(populationId, cancellationToken).ConfigureAwait(false);
+        await _store.CompleteAsync(populationId, sealToken, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task PopulateSourceAsync(

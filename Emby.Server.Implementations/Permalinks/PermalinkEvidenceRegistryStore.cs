@@ -50,6 +50,43 @@ internal sealed class PermalinkEvidenceRegistryStore
         MutationIntent
     }
 
+    /// <summary>Captures the authority generation immediately before the final physical census.</summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The exact authority facts the sealing transaction must still observe.</returns>
+    public async Task<PermalinkPopulationSealToken> CaptureSealTokenAsync(
+        CancellationToken cancellationToken)
+    {
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        var authorityNamespace = _authority.CacheNamespace;
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT authority_sequence, content_epoch, journal_counter,
+                   (SELECT protocol_epoch FROM AuthorityProtocolState WHERE singleton = 1)
+              FROM AuthorityCounters WHERE singleton = 1
+            """;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidOperationException("The authority counter row is missing.");
+        }
+
+        var token = new PermalinkPopulationSealToken(
+            authorityNamespace,
+            reader.GetInt64(0),
+            reader.GetInt64(1),
+            reader.GetInt64(2),
+            reader.GetInt64(3));
+        if (_authority.CacheNamespace != authorityNamespace)
+        {
+            throw Conflict(
+                "registry-population-authority-changed",
+                "The authority namespace changed while its population seal token was captured.");
+        }
+
+        return token;
+    }
+
     /// <summary>Creates or resumes one exact population plan without replacing its source generations.</summary>
     /// <param name="populationId">The stable population identifier.</param>
     /// <param name="sources">The complete typed source plan.</param>
@@ -348,11 +385,23 @@ internal sealed class PermalinkEvidenceRegistryStore
 
     /// <summary>Seals one population after every source checkpoint is complete.</summary>
     /// <param name="populationId">The running population identifier.</param>
+    /// <param name="expected">The authority generation captured before the final physical census.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task representing the operation.</returns>
-    public async Task CompleteAsync(string populationId, CancellationToken cancellationToken)
+    public async Task CompleteAsync(
+        string populationId,
+        PermalinkPopulationSealToken expected,
+        CancellationToken cancellationToken)
     {
         RequireText(populationId, nameof(populationId));
+        ArgumentNullException.ThrowIfNull(expected);
+        if (_authority.CacheNamespace != expected.Namespace)
+        {
+            throw Conflict(
+                "registry-population-authority-changed",
+                "The authority namespace changed before the population could be sealed.");
+        }
+
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -374,13 +423,14 @@ internal sealed class PermalinkEvidenceRegistryStore
             }
         }
 
-        long contentEpoch;
         long cardinality;
         await using (var facts = connection.CreateCommand())
         {
             facts.Transaction = transaction;
             facts.CommandText = """
-                SELECT content_epoch, (SELECT COUNT(*) FROM PermalinkEvidenceRegistry)
+                SELECT authority_sequence, content_epoch, journal_counter,
+                       (SELECT protocol_epoch FROM AuthorityProtocolState WHERE singleton = 1),
+                       (SELECT COUNT(*) FROM PermalinkEvidenceRegistry)
                   FROM AuthorityCounters WHERE singleton = 1
                 """;
             await using var reader = await facts.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -389,8 +439,18 @@ internal sealed class PermalinkEvidenceRegistryStore
                 throw new InvalidOperationException("The authority counter row is missing.");
             }
 
-            contentEpoch = reader.GetInt64(0);
-            cardinality = reader.GetInt64(1);
+            if (reader.GetInt64(0) != expected.AuthoritySequence
+                || reader.GetInt64(1) != expected.ContentEpoch
+                || reader.GetInt64(2) != expected.JournalCounter
+                || reader.GetInt64(3) != expected.ProtocolEpoch
+                || _authority.CacheNamespace != expected.Namespace)
+            {
+                throw Conflict(
+                    "registry-population-authority-changed",
+                    "The authority generation changed after the final population census began.");
+            }
+
+            cardinality = reader.GetInt64(4);
         }
 
         using (var scope = await _authority.BeginAuthorizedWriteAsync(
@@ -410,7 +470,7 @@ internal sealed class PermalinkEvidenceRegistryStore
                        registry_cardinality = $cardinality, updated_at = $now
                  WHERE population_id = $population AND status = 'running'
                 """;
-            update.Parameters.AddWithValue("$epoch", contentEpoch);
+            update.Parameters.AddWithValue("$epoch", expected.ContentEpoch);
             update.Parameters.AddWithValue("$cardinality", cardinality);
             update.Parameters.AddWithValue("$now", Now());
             update.Parameters.AddWithValue("$population", populationId);
@@ -421,6 +481,12 @@ internal sealed class PermalinkEvidenceRegistryStore
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        if (_authority.CacheNamespace != expected.Namespace)
+        {
+            throw Conflict(
+                "registry-population-authority-changed",
+                "The authority namespace changed while the population was sealed.");
+        }
     }
 
     private async Task InsertCheckpointAsync(
@@ -654,6 +720,14 @@ internal sealed class PermalinkEvidenceRegistryStore
             PermalinkErrorKind.VersionRefused,
             "registry-population-writer-version",
             $"Registry population writer version {version} is not supported by this binary ({WriterVersion}).");
+
+    /// <summary>Opaque authority facts binding the final census to its sealing transaction.</summary>
+    internal sealed record PermalinkPopulationSealToken(
+        PermalinkAuthorityNamespace Namespace,
+        long AuthoritySequence,
+        long ContentEpoch,
+        long JournalCounter,
+        long ProtocolEpoch);
 
     /// <summary>One immutable source identity and generation in a population plan.</summary>
     internal sealed record PermalinkPopulationSource(

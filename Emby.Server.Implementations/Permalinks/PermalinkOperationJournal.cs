@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-20, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-20, 2026-10-03, 2026-10-07.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -90,6 +90,11 @@ internal sealed class PermalinkOperationJournal : IDisposable
     private readonly int _operationJournalArchiveMaximumOperationsPerPass;
     private readonly int _operationScratchReclaimMaximumOperationsPerPass;
     private readonly SemaphoreSlim _pendingIndexLock = new(1, 1);
+
+    private readonly SemaphoreSlim[] _phaseWriteGates = Enumerable.Range(0, 257)
+        .Select(_ => new SemaphoreSlim(1, 1))
+        .ToArray();
+
     private Dictionary<Guid, PermalinkOperationDocument>? _pendingOperations;
     private int _runLookups;
     private int _runWalks;
@@ -387,6 +392,27 @@ internal sealed class PermalinkOperationJournal : IDisposable
         PermalinkOperationPhase document,
         CancellationToken cancellationToken)
     {
+        var gate = _phaseWriteGates[(int)((uint)operationId.GetHashCode() % _phaseWriteGates.Length)];
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await ValidateTransitionAsync(operationId, phase, document, cancellationToken)
+                .ConfigureAwait(false);
+            await WritePhaseCoreAsync(operationId, phase, document, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task WritePhaseCoreAsync(
+        Guid operationId,
+        PermalinkPhase phase,
+        PermalinkOperationPhase document,
+        CancellationToken cancellationToken)
+    {
         if (phase.Disposition == PermalinkPhaseDisposition.Terminal)
         {
             await QueueArchiveCandidateAsync(
@@ -460,6 +486,74 @@ internal sealed class PermalinkOperationJournal : IDisposable
             _pendingIndexLock.Release();
         }
     }
+
+    private async Task ValidateTransitionAsync(
+        Guid operationId,
+        PermalinkPhase phase,
+        PermalinkOperationPhase document,
+        CancellationToken cancellationToken)
+    {
+        if (!document.OperationId.Equals(operationId)
+            || !string.Equals(document.State, phase.Name, StringComparison.Ordinal))
+        {
+            throw InvalidTransition(operationId, phase, "phase document identity does not match");
+        }
+
+        // Exact-byte replays remain legal after later phases. WritePhaseCoreAsync performs the
+        // create-exclusive byte comparison, so this branch cannot rewrite existing evidence.
+        if (HasPhase(operationId, phase))
+        {
+            return;
+        }
+
+        var operation = await ReadAsync(operationId, cancellationToken).ConfigureAwait(false)
+            ?? throw InvalidTransition(operationId, phase, "operation.json is missing");
+        if (GetSettledPhase(operationId) is { } settled)
+        {
+            throw InvalidTransition(
+                operationId,
+                phase,
+                $"operation is already settled as '{settled.Name}'");
+        }
+
+        var prepared = HasPhase(operationId, PermalinkPhase.Prepared);
+        var ready = HasPhase(operationId, PermalinkPhase.Ready);
+        var published = HasPhase(operationId, PermalinkPhase.Published);
+        var claimed = HasPhase(operationId, PermalinkPhase.ClaimedPending);
+        var valid = phase.Name switch
+        {
+            "prepared" => !ready && !published && !claimed,
+            "ready" => prepared,
+            "published" => ready,
+            "committed" => published
+                || string.Equals(
+                    operation.Kind,
+                    PermalinkAdoptionJournalRecord.OperationKind,
+                    StringComparison.Ordinal),
+            "aborted" => !ready && !published && !claimed,
+            "cancelled" => prepared && !ready && !published && !claimed,
+            "claimed_pending" => ready && !published,
+            "manual_intervention" => prepared,
+            "restored" => prepared,
+            "detached" => ready,
+            "assignment_unknown" => published,
+            _ => phase.Name.StartsWith("part-", StringComparison.Ordinal) && ready
+        };
+        if (!valid)
+        {
+            throw InvalidTransition(operationId, phase, "required predecessor evidence is absent");
+        }
+    }
+
+    private static PermalinkException InvalidTransition(
+        Guid operationId,
+        PermalinkPhase phase,
+        string reason)
+        => new(
+            PermalinkErrorKind.Conflict,
+            "journal-transition-invalid",
+            $"Operation '{operationId}' cannot publish phase '{phase.Name}': {reason}.",
+            operationId: operationId);
 
     public bool HasPhase(Guid operationId, PermalinkPhase phase)
     {
@@ -1955,6 +2049,10 @@ internal sealed class PermalinkOperationJournal : IDisposable
     {
         FlushLookupRun();
         _pendingIndexLock.Dispose();
+        foreach (var gate in _phaseWriteGates)
+        {
+            gate.Dispose();
+        }
     }
 
     /// <summary>Publishes bytes create-exclusively, tolerating an exact-byte-identical retry.</summary>

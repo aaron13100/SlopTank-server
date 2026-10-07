@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-09, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-09, 2026-10-03, 2026-10-07.
 using System;
 using System.Globalization;
 using System.IO;
@@ -55,6 +55,8 @@ internal sealed class PermalinkMediaRecovery
         {
             throw Conflict("ready-missing", "Operation-owned desired evidence is missing.");
         }
+
+        PermalinkMediaMutation.ValidateReadyFormat(ready);
 
         var bundle = PermalinkMediaMutation.RequireBundle(operation);
         bool finalize;
@@ -135,6 +137,11 @@ internal sealed class PermalinkMediaRecovery
             operation.OperationId,
             PermalinkPhase.Ready,
             cancellationToken).ConfigureAwait(false);
+        if (ready is not null)
+        {
+            PermalinkMediaMutation.ValidateReadyFormat(ready);
+        }
+
         var desiredRoot = ready?.ContentRoot;
         var evidence = await ObserveAsync(operation, item, desiredRoot, cancellationToken)
             .ConfigureAwait(false);

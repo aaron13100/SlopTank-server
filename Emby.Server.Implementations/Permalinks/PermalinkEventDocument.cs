@@ -1,6 +1,8 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-10-07.
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using MediaBrowser.Controller.Permalinks;
 
 namespace Emby.Server.Implementations.Permalinks;
@@ -41,4 +43,8 @@ internal sealed record PermalinkEventDocument(
     public string Type { get; init; } = "sloptank.permalink-event";
 
     public int Version { get; init; } = 1;
+
+    /// <summary>Gets forward-compatible opaque event metadata preserved across exact replay.</summary>
+    [JsonExtensionData]
+    public IDictionary<string, JsonElement>? Extensions { get; init; }
 }

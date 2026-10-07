@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-27.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-27, 2026-10-07.
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
@@ -42,4 +42,8 @@ internal sealed record PermalinkOperationDocument(
     /// <summary>Gets the removal-only frozen intent. Absent from all version-one documents.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public PermalinkRemovalIntent? Removal { get; init; }
+
+    /// <summary>Gets the immutable old and desired relation states for aggregate recovery.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<PermalinkAggregateMembershipPlan>? AggregateMembership { get; init; }
 }

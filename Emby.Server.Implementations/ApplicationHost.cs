@@ -568,6 +568,8 @@ namespace Emby.Server.Implementations
             serviceCollection.AddTransient(provider => new Lazy<IExternalDataManager>(provider.GetRequiredService<IExternalDataManager>));
             serviceCollection.AddTransient(provider => new Lazy<IPermalinkIdentityMutationAdapter>(
                 provider.GetRequiredService<IPermalinkIdentityMutationAdapter>));
+            serviceCollection.AddTransient(provider => new Lazy<IPermalinkAggregateMutationAdapter>(
+                provider.GetRequiredService<IPermalinkAggregateMutationAdapter>));
             serviceCollection.AddSingleton<ILibraryManager, LibraryManager>();
             serviceCollection.AddSingleton(TimeProvider.System);
             serviceCollection.AddSingleton<MacPermalinkMountPolicy>();
@@ -643,6 +645,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkRemovalEvidenceVerifier>();
             serviceCollection.AddSingleton<IPermalinkRemovalCoordinator, PermalinkRemovalCoordinator>();
             serviceCollection.AddSingleton<IPermalinkIdentityMutationAdapter, PermalinkIdentityMutationAdapter>();
+            serviceCollection.AddSingleton<IPermalinkAggregateMutationAdapter, PermalinkAggregateMutationAdapter>();
             serviceCollection.AddSingleton<IPlaybackPreparationService, PlaybackPreparationService>();
             serviceCollection.AddSingleton<IWatchlistManager, WatchlistManager>();
             serviceCollection.AddSingleton<PermalinkLeaseStore>();

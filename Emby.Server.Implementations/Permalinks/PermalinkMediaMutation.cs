@@ -236,6 +236,7 @@ internal sealed class PermalinkMediaMutation
             cancellationToken).ConfigureAwait(false);
         if (existingReady is not null)
         {
+            ValidateReadyFormat(existingReady);
             if (!string.Equals(
                     existingReady.ContentRoot,
                     desired.ContentRoot,
@@ -357,6 +358,7 @@ internal sealed class PermalinkMediaMutation
             PermalinkPhase.Ready,
             cancellationToken).ConfigureAwait(false)
             ?? throw Conflict("ready-missing", "Operation-owned desired evidence is missing.");
+        ValidateReadyFormat(ready);
         if (!string.Equals(ready.ContentRoot, desired.ContentRoot, StringComparison.Ordinal))
         {
             throw Conflict(
@@ -385,6 +387,7 @@ internal sealed class PermalinkMediaMutation
             RequireBundle(operation),
             operation.OperationId,
             successors,
+            "ready",
             cancellationToken).ConfigureAwait(false);
         await AppendContentAsync(operation, item, successors, cancellationToken, heldLeases, permit)
             .ConfigureAwait(false);
@@ -501,6 +504,12 @@ internal sealed class PermalinkMediaMutation
                     cancellationToken).ConfigureAwait(false);
             if (preparedSnapshot.ContentHead.EventId.Equals(prepared.Event.EventId))
             {
+                var expectedBytes = CanonicalJson.Serialize(prepared.Event);
+                await _capsules.VerifyContentEventAsync(
+                    preparedPath,
+                    prepared.Event,
+                    expectedBytes,
+                    cancellationToken).ConfigureAwait(false);
                 await _bindings.UpdateContentRootAsync(
                     prepared.ItemId,
                     prepared.Event.ContentRoot,
@@ -559,6 +568,16 @@ internal sealed class PermalinkMediaMutation
         }
 
         return successors;
+    }
+
+    internal static void ValidateReadyFormat(PermalinkOperationPhase ready)
+    {
+        if (ready.Version >= 3 && ready.PreparedSuccessors is null)
+        {
+            throw Conflict(
+                "prepared-successors-missing",
+                "Ready phase declares frozen successor evidence but has no successor decisions.");
+        }
     }
 
     private static void RequireLegacySingleClaim(PermalinkOperationDocument operation)

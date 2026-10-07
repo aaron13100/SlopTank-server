@@ -153,12 +153,14 @@ internal sealed class PermalinkMutationClaimStore
     /// <param name="bundle">The immutable claimed bundle.</param>
     /// <param name="operationId">The durable operation identifier.</param>
     /// <param name="successors">The exact successor events.</param>
+    /// <param name="decision">The terminal decision represented by those events.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task representing the asynchronous operation.</returns>
     public async Task FinalizePreparedAsync(
         PermalinkMutationBundle bundle,
         Guid operationId,
         IReadOnlyList<PermalinkPreparedContentSuccessor> successors,
+        string decision,
         CancellationToken cancellationToken)
     {
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
@@ -193,7 +195,7 @@ internal sealed class PermalinkMutationClaimStore
                 transaction,
                 claim,
                 operationId,
-                "ready",
+                decision,
                 successor.Event.EventId,
                 "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes.Span)),
                 cancellationToken).ConfigureAwait(false);

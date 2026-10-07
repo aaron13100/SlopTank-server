@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01, 2026-10-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01, 2026-10-04, 2026-10-07.
 #pragma warning disable CS1591
 #pragma warning disable CA5394
 
@@ -94,6 +94,7 @@ namespace Emby.Server.Implementations.Library
         private readonly IMediaStreamRepository _mediaStreamRepository;
         private readonly Lazy<IExternalDataManager> _externalDataManagerFactory;
         private readonly Lazy<IPermalinkIdentityMutationAdapter> _identityMutationAdapter;
+        private readonly Lazy<IPermalinkAggregateMutationAdapter> _aggregateMutationAdapter;
         private readonly IPlaybackPreparationService _playbackPreparationService;
 
         /// <summary>
@@ -140,6 +141,7 @@ namespace Emby.Server.Implementations.Library
         /// <param name="mediaStreamRepository">The media stream repository.</param>
         /// <param name="externalDataManagerFactory">The external data manager (lazy, to break the DI cycle through ChapterManager).</param>
         /// <param name="identityMutationAdapter">The durable identity mutation adapter.</param>
+        /// <param name="aggregateMutationAdapter">The durable aggregate membership mutation adapter.</param>
         /// <param name="playbackPreparationService">The playback preparation admission service.</param>
         public LibraryManager(
             IServerApplicationHost appHost,
@@ -167,6 +169,7 @@ namespace Emby.Server.Implementations.Library
             IMediaStreamRepository mediaStreamRepository,
             Lazy<IExternalDataManager> externalDataManagerFactory,
             Lazy<IPermalinkIdentityMutationAdapter> identityMutationAdapter,
+            Lazy<IPermalinkAggregateMutationAdapter> aggregateMutationAdapter,
             IPlaybackPreparationService playbackPreparationService)
         {
             _appHost = appHost;
@@ -200,6 +203,7 @@ namespace Emby.Server.Implementations.Library
             _mediaStreamRepository = mediaStreamRepository;
             _externalDataManagerFactory = externalDataManagerFactory;
             _identityMutationAdapter = identityMutationAdapter;
+            _aggregateMutationAdapter = aggregateMutationAdapter;
             _playbackPreparationService = playbackPreparationService;
 
             RecordConfigurationValues(_configurationManager.Configuration);
@@ -417,7 +421,15 @@ namespace Emby.Server.Implementations.Library
                 externalDataManager.DeleteExternalItemFiles(item);
             }
 
-            _persistenceService.DeleteItem([.. pathMaps.Select(f => f.Item.Id)]);
+            var deletedIds = pathMaps.Select(value => value.Item.Id).ToHashSet();
+            _aggregateMutationAdapter.Value.ExecuteAsync(
+                CreateAggregateRemovalChanges(deletedIds),
+                () =>
+                {
+                    _persistenceService.DeleteItem([.. deletedIds]);
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None).GetAwaiter().GetResult();
         }
 
         public void DeleteItem(BaseItem item, DeleteOptions options, BaseItem parent, bool notifyParentItem)
@@ -617,7 +629,15 @@ namespace Emby.Server.Implementations.Library
                 externalDataManager.DeleteExternalItemFiles(child);
             }
 
-            _persistenceService.DeleteItem([item.Id, .. children.Select(f => f.Id)]);
+            var deletedIds = children.Select(value => value.Id).Append(item.Id).ToHashSet();
+            _aggregateMutationAdapter.Value.ExecuteAsync(
+                CreateAggregateRemovalChanges(deletedIds),
+                () =>
+                {
+                    _persistenceService.DeleteItem([.. deletedIds]);
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None).GetAwaiter().GetResult();
             _cache.TryRemove(item.Id, out _);
             foreach (var child in children)
             {
@@ -2674,7 +2694,25 @@ namespace Emby.Server.Implementations.Library
                 item.PlaybackReadyAlgorithmVersion = null;
             }
 
-            _persistenceService.SaveItems(allItems, cancellationToken);
+            var aggregateChanges = allItems
+                .OfType<BoxSet>()
+                .Select(aggregate => new PermalinkAggregateMembershipChange(
+                    aggregate,
+                    _linkedChildrenService.GetLinkedChildrenIds(aggregate.Id)
+                        .Select(GetItemById)
+                        .Where(value => value is not null)
+                        .Cast<BaseItem>()
+                        .ToArray(),
+                    aggregate.GetLinkedChildren()))
+                .ToArray();
+            await _aggregateMutationAdapter.Value.ExecuteAsync(
+                aggregateChanges,
+                () =>
+                {
+                    _persistenceService.SaveItems(allItems, cancellationToken);
+                    return Task.CompletedTask;
+                },
+                cancellationToken).ConfigureAwait(false);
 
             foreach (var item in allItems)
             {
@@ -3932,7 +3970,16 @@ namespace Emby.Server.Implementations.Library
         /// <inheritdoc />
         public async Task RerouteLinkedChildReferencesAsync(Guid fromChildId, Guid toChildId)
         {
-            var affectedParentIds = _linkedChildrenService.RerouteLinkedChildren(fromChildId, toChildId);
+            var aggregateChanges = CreateAggregateRerouteChanges(fromChildId, toChildId);
+            IReadOnlyList<Guid> affectedParentIds = [];
+            await _aggregateMutationAdapter.Value.ExecuteAsync(
+                aggregateChanges,
+                () =>
+                {
+                    affectedParentIds = _linkedChildrenService.RerouteLinkedChildren(fromChildId, toChildId);
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None).ConfigureAwait(false);
 
             // Update in-memory LinkedChildren and re-save metadata (NFO) for affected parents
             foreach (var parentId in affectedParentIds)
@@ -3950,6 +3997,57 @@ namespace Emby.Server.Implementations.Library
                     await RunMetadataSavers(parent, ItemUpdateType.MetadataEdit).ConfigureAwait(false);
                 }
             }
+        }
+
+        private IReadOnlyList<PermalinkAggregateMembershipChange> CreateAggregateRerouteChanges(
+            Guid fromChildId,
+            Guid toChildId)
+        {
+            var replacement = GetItemById(toChildId);
+            if (replacement is null)
+            {
+                return [];
+            }
+
+            return _linkedChildrenService.GetManualLinkedParentIds(fromChildId, BaseItemKind.BoxSet)
+                .Select(GetItemById)
+                .OfType<BoxSet>()
+                .Select(aggregate =>
+                {
+                    var previous = _linkedChildrenService.GetLinkedChildrenIds(aggregate.Id)
+                        .Select(GetItemById)
+                        .Where(value => value is not null)
+                        .Cast<BaseItem>()
+                        .ToArray();
+                    var desired = previous
+                        .Select(value => value.Id.Equals(fromChildId) ? replacement : value)
+                        .DistinctBy(value => value.Id)
+                        .ToArray();
+                    return new PermalinkAggregateMembershipChange(aggregate, previous, desired);
+                })
+                .ToArray();
+        }
+
+        private IReadOnlyList<PermalinkAggregateMembershipChange> CreateAggregateRemovalChanges(
+            IReadOnlySet<Guid> deletedIds)
+        {
+            return deletedIds
+                .SelectMany(id => _linkedChildrenService.GetManualLinkedParentIds(id, BaseItemKind.BoxSet))
+                .Distinct()
+                .Select(GetItemById)
+                .OfType<BoxSet>()
+                .Where(aggregate => !deletedIds.Contains(aggregate.Id))
+                .Select(aggregate =>
+                {
+                    var previous = _linkedChildrenService.GetLinkedChildrenIds(aggregate.Id)
+                        .Select(GetItemById)
+                        .Where(value => value is not null)
+                        .Cast<BaseItem>()
+                        .ToArray();
+                    var desired = previous.Where(value => !deletedIds.Contains(value.Id)).ToArray();
+                    return new PermalinkAggregateMembershipChange(aggregate, previous, desired);
+                })
+                .ToArray();
         }
 
         /// <inheritdoc />

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-30.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-30, 2026-10-07.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -170,6 +170,36 @@ internal sealed class PermalinkCapsuleStore
             eventPath,
             eventJson,
             cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Requires an already-published event to equal the frozen canonical bytes.</summary>
+    /// <param name="capsulePath">The durable capsule path.</param>
+    /// <param name="successor">The frozen successor document.</param>
+    /// <param name="expectedJson">The frozen canonical bytes.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    public async Task VerifyContentEventAsync(
+        string capsulePath,
+        PermalinkEventDocument successor,
+        ReadOnlyMemory<byte> expectedJson,
+        CancellationToken cancellationToken)
+    {
+        var eventPath = Path.Combine(
+            capsulePath,
+            "events",
+            successor.EventId.ToString("D") + ".json");
+        if (!File.Exists(eventPath))
+        {
+            throw Conflict("successor-event-missing", $"Prepared event '{successor.EventId}' is missing.");
+        }
+
+        var actual = await File.ReadAllBytesAsync(eventPath, cancellationToken).ConfigureAwait(false);
+        if (!actual.AsSpan().SequenceEqual(expectedJson.Span))
+        {
+            throw Conflict(
+                "successor-event-mismatch",
+                $"Prepared event '{successor.EventId}' does not match its frozen canonical bytes.");
+        }
     }
 
     /// <summary>

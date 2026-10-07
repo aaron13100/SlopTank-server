@@ -590,7 +590,12 @@ internal sealed class PermalinkOperationJournal : IDisposable
                     PermalinkAdoptionJournalRecord.OperationKind,
                     StringComparison.Ordinal),
             "aborted" => !ready && !published && !claimed,
-            "cancelled" => prepared && !ready && !published && !claimed,
+            "cancelled" => prepared
+                && ((!ready && !published && !claimed)
+                    || (published && string.Equals(
+                        operation.Kind,
+                        "aggregate-membership",
+                        StringComparison.Ordinal))),
             "claimed_pending" => ready && !published,
             "manual_intervention" => prepared,
             "restored" => prepared,

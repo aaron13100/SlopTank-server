@@ -27,6 +27,8 @@ internal sealed record PermalinkOperationPhase(
     string CreatedAt,
     IReadOnlyList<PermalinkLeaf>? Leaves = null)
 {
+    private int? _declaredVersion;
+
     public string Type { get; init; } = "sloptank.permalink-operation-phase";
 
     /// <summary>
@@ -35,7 +37,11 @@ internal sealed record PermalinkOperationPhase(
     /// byte identity, observed-state records declare version 2, and records that freeze exact
     /// relation successors declare version 3.
     /// </summary>
-    public int Version => PreparedSuccessors is not null ? 3 : ObservedState is null ? 1 : 2;
+    public int Version
+    {
+        get => _declaredVersion ?? (PreparedSuccessors is not null ? 3 : ObservedState is null ? 1 : 2);
+        init => _declaredVersion = value;
+    }
 
     /// <summary>
     /// Gets the canonical observed-evidence snapshot recorded by a phase that closes an operation
@@ -50,4 +56,8 @@ internal sealed record PermalinkOperationPhase(
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<PermalinkPreparedContentSuccessor>? PreparedSuccessors { get; init; }
+
+    /// <summary>Gets the exact predecessor-preserving events used when the item DB write fails.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<PermalinkPreparedContentSuccessor>? RollbackSuccessors { get; init; }
 }

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20, 2026-09-27, 2026-09-30, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20, 2026-09-27, 2026-09-30, 2026-10-03, 2026-10-07.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -56,6 +56,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     private readonly PermalinkPathMutation _pathMutation;
     private readonly PermalinkItemStateMutation _itemStateMutation;
     private readonly PermalinkContentAdoption _contentAdoption;
+    private readonly IPermalinkAggregateMutationAdapter _aggregateMutation;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<PermalinkMutationCoordinator> _logger;
     private readonly SemaphoreSlim[] _operationGates = Enumerable.Range(0, OperationGateCount)
@@ -78,6 +79,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     /// <param name="pathMutation">The path mutation.</param>
     /// <param name="itemStateMutation">The journal-only item-state mutation service.</param>
     /// <param name="contentAdoption">The elevated leaf content adoption service.</param>
+    /// <param name="aggregateMutation">The protected aggregate membership adapter.</param>
     /// <param name="timeProvider">The time provider.</param>
     /// <param name="logger">The logger.</param>
     public PermalinkMutationCoordinator(
@@ -94,6 +96,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         PermalinkPathMutation pathMutation,
         PermalinkItemStateMutation itemStateMutation,
         PermalinkContentAdoption contentAdoption,
+        IPermalinkAggregateMutationAdapter aggregateMutation,
         TimeProvider timeProvider,
         ILogger<PermalinkMutationCoordinator> logger)
     {
@@ -111,6 +114,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         _pathMutation = pathMutation;
         _itemStateMutation = itemStateMutation;
         _contentAdoption = contentAdoption;
+        _aggregateMutation = aggregateMutation;
         _timeProvider = timeProvider;
     }
 
@@ -332,6 +336,12 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
                 operation,
                 RequireItem(operation.ItemId),
                 cancellationToken).ConfigureAwait(false);
+        }
+
+        if (string.Equals(operation.Kind, "aggregate-membership", StringComparison.Ordinal))
+        {
+            return await _aggregateMutation.RecoverAsync(operationId, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         if (operation.Kind is "deletion" or "promotion" or "kind-reclassification"

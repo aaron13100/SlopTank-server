@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-07.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -33,6 +33,7 @@ internal sealed class PermalinkPathLease : IPermalinkPathLease
         string normalizedRelativePath,
         string pinnedObjectIdentity,
         string anchorToken,
+        Guid capsuleId,
         Guid? intentId,
         long reservationGeneration,
         long contentEpochAtAcquire,
@@ -46,6 +47,7 @@ internal sealed class PermalinkPathLease : IPermalinkPathLease
         NormalizedRelativePath = normalizedRelativePath;
         PinnedObjectIdentity = pinnedObjectIdentity;
         AnchorToken = anchorToken;
+        CapsuleId = capsuleId;
         _intentId = intentId;
         ReservationGeneration = reservationGeneration;
         ContentEpochAtAcquire = contentEpochAtAcquire;
@@ -54,6 +56,9 @@ internal sealed class PermalinkPathLease : IPermalinkPathLease
         _evidence = evidence;
         _settlement = new PermalinkAnchorIntentSettlement(evidence, fileSystem, objects);
     }
+
+    /// <inheritdoc />
+    public Guid CapsuleId { get; }
 
     /// <inheritdoc />
     public string RootIdentityId { get; }

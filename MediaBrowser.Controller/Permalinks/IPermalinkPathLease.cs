@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-07.
 using System;
 
 namespace MediaBrowser.Controller.Permalinks;
@@ -11,6 +11,9 @@ namespace MediaBrowser.Controller.Permalinks;
 /// </summary>
 public interface IPermalinkPathLease : IAsyncDisposable
 {
+    /// <summary>Gets the elected existing or preallocated genesis capsule identity.</summary>
+    Guid CapsuleId { get; }
+
     /// <summary>Gets the registered content-root identity the key is relative to.</summary>
     string RootIdentityId { get; }
 

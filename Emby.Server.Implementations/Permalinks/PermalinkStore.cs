@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-03, 2026-10-07.
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -147,6 +147,13 @@ internal sealed class PermalinkStore : IPermalinkStore
                 .ConfigureAwait(false);
         }
 
+        if (!reservation.CapsuleId.Equals(pathLease.CapsuleId))
+        {
+            throw Conflict(
+                "lease-capsule-mismatch",
+                "The authority reservation changed after the content-identity lease was acquired.");
+        }
+
         tReservation = stepWatch.ElapsedMilliseconds;
 
         stepWatch.Restart();
@@ -231,7 +238,7 @@ internal sealed class PermalinkStore : IPermalinkStore
         var issuance = request.PublishAlias && request.PreferredAlias is null
             ? await _transitions.AllocateAsync(cancellationToken).ConfigureAwait(false)
             : null;
-        var capsuleId = Guid.NewGuid();
+        var capsuleId = lease.CapsuleId;
         var capsulePath = _capsules.GetCapsulePath(
             root,
             request.Path,

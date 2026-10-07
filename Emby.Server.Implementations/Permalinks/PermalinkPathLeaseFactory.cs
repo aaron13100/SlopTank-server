@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-07.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -79,6 +79,9 @@ internal sealed class PermalinkPathLeaseFactory
                     .ConfigureAwait(false);
             }
 
+            var existing = await _authority.FindByAnchorAsync(anchor, cancellationToken).ConfigureAwait(false);
+            var capsuleId = existing?.CapsuleId ?? Guid.NewGuid();
+
             return new PermalinkPathLease(
                 keyLock,
                 path,
@@ -86,6 +89,7 @@ internal sealed class PermalinkPathLeaseFactory
                 relative,
                 pin,
                 anchor,
+                capsuleId,
                 intent,
                 generation,
                 epoch,

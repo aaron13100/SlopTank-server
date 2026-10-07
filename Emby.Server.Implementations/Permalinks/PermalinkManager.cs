@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-03, 2026-09-08, 2026-09-09, 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-07.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -108,23 +108,36 @@ public sealed class PermalinkManager : IPermalinkManager
                         mutationCancellationToken).ConfigureAwait(false);
                 }
 
-                var evidence = item switch
+                PermalinkEvidenceResult evidence;
+                if (item is BoxSet boxSet)
                 {
-                    Series series => await ComputeSeriesAsync(
-                        series,
-                        ancestry,
-                        mutationCancellationToken).ConfigureAwait(false),
-                    Season season => await ComputeSeasonAsync(
-                        season,
-                        ancestry,
-                        mutationCancellationToken).ConfigureAwait(false),
-                    BoxSet boxSet => await ComputeBoxSetAsync(
+                    var members = await ComputeBoxSetMembersAsync(
                         boxSet,
                         ancestry,
-                        mutationCancellationToken).ConfigureAwait(false),
-                    _ => await _evidence.ComputeContentItemAsync(item, mutationCancellationToken)
-                        .ConfigureAwait(false)
-                };
+                        mutationCancellationToken).ConfigureAwait(false);
+                    lease = await _store.BeginContentIdentityAsync(
+                        path,
+                        item.GetType().Name,
+                        mutationCancellationToken).ConfigureAwait(false);
+                    evidence = _evidence.ComputeBoxSetManifest(lease.CapsuleId, members);
+                }
+                else
+                {
+                    evidence = item switch
+                    {
+                        Series series => await ComputeSeriesAsync(
+                            series,
+                            ancestry,
+                            mutationCancellationToken).ConfigureAwait(false),
+                        Season season => await ComputeSeasonAsync(
+                            season,
+                            ancestry,
+                            mutationCancellationToken).ConfigureAwait(false),
+                        _ => await _evidence.ComputeContentItemAsync(item, mutationCancellationToken)
+                            .ConfigureAwait(false)
+                    };
+                }
+
                 if (evidence.Leaves.Count == 0)
                 {
                     throw new PermalinkException(
@@ -249,7 +262,7 @@ public sealed class PermalinkManager : IPermalinkManager
         return result.Values.ToList();
     }
 
-    private async Task<PermalinkEvidenceResult> ComputeBoxSetAsync(
+    private async Task<IReadOnlyList<(BaseItem Item, PermalinkStoredState State)>> ComputeBoxSetMembersAsync(
         BoxSet boxSet,
         HashSet<Guid> ancestry,
         CancellationToken cancellationToken)
@@ -266,7 +279,7 @@ public sealed class PermalinkManager : IPermalinkManager
             members.Add((member, state));
         }
 
-        return _evidence.ComputeBoxSetManifest(boxSet.Id, members);
+        return members;
     }
 
     private static void ValidateEligibility(BaseItem item)

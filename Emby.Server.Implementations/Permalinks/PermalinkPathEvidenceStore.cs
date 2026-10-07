@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-07.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -449,7 +449,7 @@ internal sealed class PermalinkPathEvidenceStore
                 Guid.Parse(reader.GetString(0)),
                 reader.GetString(1),
                 reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3)));
+                await reader.IsDBNullAsync(3, cancellationToken).ConfigureAwait(false) ? null : reader.GetString(3)));
         }
 
         return rows;

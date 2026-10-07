@@ -363,7 +363,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
                 }
             }
 
-            await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var connection = await OpenRawConnectionAsync(cancellationToken).ConfigureAwait(false);
             await PermalinkAuthoritySchema.ValidateProtocolEpochAsync(
                 connection,
                 cancellationToken).ConfigureAwait(false);
@@ -518,19 +518,48 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         _ = Interlocked.Increment(ref _authorityScopeGeneration);
     }
 
+    /// <summary>Opens an initialized authority connection with typed availability failures.</summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The initialized connection, owned by the caller.</returns>
     internal async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        await EnsureProvisionedAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await OpenRawConnectionAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException
+                or SqliteException)
+        {
+            throw AuthorityUnavailable(exception);
+        }
+    }
+
+    // Provisioning is the only caller allowed to bypass the checked opener: it needs a
+    // connection to install the schema that OpenConnectionAsync promises to every caller.
+    private async Task<SqliteConnection> OpenRawConnectionAsync(CancellationToken cancellationToken)
     {
         var databasePath = DatabasePath;
         _lastOpenedDatabasePath = databasePath;
         var connection = new SqliteConnection($"Data Source={databasePath};Pooling=True");
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        _capability.Register(connection);
-        await using var command = connection.CreateCommand();
-        command.CommandText = OperatingSystem.IsMacOS()
-            ? "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON;"
-            : "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;";
-        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        return connection;
+        try
+        {
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            _capability.Register(connection);
+            await using var command = connection.CreateCommand();
+            command.CommandText = OperatingSystem.IsMacOS()
+                ? "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON;"
+                : "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;";
+            _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            return connection;
+        }
+        catch
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <summary>Begins one exact protected-table write scope.</summary>

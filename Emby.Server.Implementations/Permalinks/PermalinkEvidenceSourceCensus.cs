@@ -231,6 +231,11 @@ internal sealed class PermalinkEvidenceSourceCensus : IPermalinkEvidenceSourceCe
 
     private static EvidenceKind Classify(SourceKind kind, string relativePath)
     {
+        if (kind is SourceKind.EvidenceRoot)
+        {
+            return EvidenceKind.RetirementCopy;
+        }
+
         if (kind is SourceKind.JournalHot or SourceKind.JournalArchive)
         {
             if (relativePath.Contains("/staging/", StringComparison.Ordinal))
@@ -241,6 +246,11 @@ internal sealed class PermalinkEvidenceSourceCensus : IPermalinkEvidenceSourceCe
             if (relativePath.Contains("/quarantine/", StringComparison.Ordinal))
             {
                 return EvidenceKind.JournalQuarantine;
+            }
+
+            if (string.Equals(Path.GetFileName(relativePath), "operation.json", StringComparison.Ordinal))
+            {
+                return EvidenceKind.MutationIntent;
             }
         }
 

@@ -579,6 +579,13 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkRootIdentityRegistry>();
             serviceCollection.AddSingleton<PermalinkContentRoots>();
             serviceCollection.AddSingleton<PermalinkEvidenceRoots>();
+            serviceCollection.AddSingleton<PermalinkEvidenceRegistryStore>();
+            serviceCollection.AddSingleton<PermalinkEvidenceSourceCensus>();
+            serviceCollection.AddSingleton<IPermalinkEvidenceSourceCensus>(provider =>
+                provider.GetRequiredService<PermalinkEvidenceSourceCensus>());
+            serviceCollection.AddSingleton<PermalinkEvidencePopulationCoordinator>();
+            serviceCollection.AddSingleton<PermalinkEvidencePopulationPlan>();
+            serviceCollection.AddSingleton<IPermalinkEvidencePopulationService, PermalinkEvidencePopulationService>();
             serviceCollection.AddSingleton<PermalinkPathLocks>();
             serviceCollection.AddSingleton<PermalinkPathEvidenceStore>();
             serviceCollection.AddSingleton<PermalinkPathLeaseFactory>();

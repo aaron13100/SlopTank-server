@@ -1,4 +1,7 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-04, 2026-10-07.
+using System;
+using System.IO;
+
 namespace MediaBrowser.Controller.Permalinks;
 
 /// <summary>
@@ -37,6 +40,13 @@ public interface IPermalinkPathObjects
     /// <param name="path">The path to inspect.</param>
     /// <returns>The pinned object, or null only when the path is definitely absent.</returns>
     PermalinkPinnedObject? ReadPinnedObjectNoFollowExact(string path);
+
+    /// <summary>Opens one regular file without following its final component and pins the opened descriptor.</summary>
+    /// <param name="path">The file path.</param>
+    /// <param name="pinnedIdentity">The device and inode read from the opened descriptor.</param>
+    /// <returns>The opened stream, or null only when the path is absent.</returns>
+    FileStream? OpenReadNoFollowExact(string path, out string pinnedIdentity)
+        => throw new NotSupportedException("This path inspector cannot open pinned no-follow files.");
 
     /// <summary>
     /// Reads a small regular file, or reports that it is absent.

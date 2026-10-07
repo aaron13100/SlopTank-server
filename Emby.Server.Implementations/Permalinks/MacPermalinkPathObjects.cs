@@ -1,9 +1,10 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-02, 2026-10-04, 2026-10-07.
 using System;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using MediaBrowser.Controller.Permalinks;
+using Microsoft.Win32.SafeHandles;
 
 namespace Emby.Server.Implementations.Permalinks;
 
@@ -24,6 +25,9 @@ public sealed class MacPermalinkPathObjects : IPermalinkPathObjects
     private const int PathMax = 1024;
     private const int NoEntryError = 2;
     private const int NotDirectoryError = 20;
+    private const int OpenNoFollow = 0x00000100;
+    private const int OpenCloseOnExec = 0x01000000;
+    private const int RegularFileType = 0x8000;
 
     /// <inheritdoc />
     public string? CanonicalizeDirectory(string path)
@@ -52,6 +56,51 @@ public sealed class MacPermalinkPathObjects : IPermalinkPathObjects
 
     /// <inheritdoc />
     public PermalinkPinnedObject? ReadPinnedObjectNoFollowExact(string path) => ReadPinnedObjectNoFollow(path, exactAbsence: true);
+
+    /// <inheritdoc />
+    public FileStream? OpenReadNoFollowExact(string path, out string pinnedIdentity)
+    {
+        var descriptor = Open(path, OpenNoFollow | OpenCloseOnExec);
+        if (descriptor < 0)
+        {
+            var error = Marshal.GetLastPInvokeError();
+            if (error is NoEntryError or NotDirectoryError)
+            {
+                pinnedIdentity = string.Empty;
+                return null;
+            }
+
+            throw new IOException($"open(O_NOFOLLOW) failed for '{path}' with errno {error}.");
+        }
+
+        var handle = new SafeFileHandle(new IntPtr(descriptor), ownsHandle: true);
+        var buffer = Marshal.AllocHGlobal(StatBufferSize);
+        try
+        {
+            if (FStat(descriptor, buffer) != 0)
+            {
+                var error = Marshal.GetLastPInvokeError();
+                handle.Dispose();
+                throw new IOException($"fstat failed for '{path}' with errno {error}.");
+            }
+
+            var mode = unchecked((ushort)Marshal.ReadInt16(buffer, ModeOffset));
+            if ((mode & FileTypeMask) != RegularFileType)
+            {
+                handle.Dispose();
+                throw new IOException($"No-follow evidence path '{path}' is not a regular file.");
+            }
+
+            var device = Marshal.ReadInt32(buffer, DeviceOffset);
+            var inode = unchecked((ulong)Marshal.ReadInt64(buffer, InodeOffset));
+            pinnedIdentity = string.Create(CultureInfo.InvariantCulture, $"{device}:{inode}");
+            return new FileStream(handle, FileAccess.Read, bufferSize: 131072, isAsync: false);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
 
     private static PermalinkPinnedObject? ReadPinnedObjectNoFollow(string path, bool exactAbsence)
     {
@@ -101,6 +150,12 @@ public sealed class MacPermalinkPathObjects : IPermalinkPathObjects
 
     [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "lstat$INODE64", SetLastError = true)]
     private static extern int LStat(string path, IntPtr buffer);
+
+    [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "open", SetLastError = true)]
+    private static extern int Open(string path, int flags);
+
+    [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "fstat$INODE64", SetLastError = true)]
+    private static extern int FStat(int descriptor, IntPtr buffer);
 
     [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "realpath", SetLastError = true)]
     private static extern IntPtr RealPath(string path, IntPtr resolved);

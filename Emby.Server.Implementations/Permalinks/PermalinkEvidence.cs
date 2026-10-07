@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-27, 2026-09-28.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-27, 2026-09-28, 2026-10-07.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -155,7 +155,7 @@ public sealed class PermalinkEvidence
                     cancellationToken).ConfigureAwait(false));
             }
 
-            return Build(leaves);
+            return BuildManifest(leaves);
         }
         catch (FileNotFoundException exception)
         {
@@ -191,7 +191,7 @@ public sealed class PermalinkEvidence
                 relativePath: null,
                 path,
                 cancellationToken).ConfigureAwait(false);
-            return Build([leaf]);
+            return BuildManifest([leaf]);
         }
         catch (FileNotFoundException exception)
         {
@@ -253,7 +253,7 @@ public sealed class PermalinkEvidence
                     cancellationToken).ConfigureAwait(false));
             }
 
-            return Build(leaves);
+            return BuildManifest(leaves);
         }
         catch (PermalinkException)
         {
@@ -295,7 +295,7 @@ public sealed class PermalinkEvidence
                 1))
             .OrderBy(leaf => leaf.Path, StringComparer.Ordinal)
             .ToArray();
-        return Build(leaves);
+        return BuildManifest(leaves);
     }
 
     /// <summary>
@@ -326,7 +326,7 @@ public sealed class PermalinkEvidence
             pair.State.ContentRoot,
             0,
             1)));
-        return Build(leaves);
+        return BuildManifest(leaves);
     }
 
     private async Task<PermalinkEvidenceResult> ComputeOpticalAsync(
@@ -382,7 +382,7 @@ public sealed class PermalinkEvidence
                 cancellationToken).ConfigureAwait(false));
         }
 
-        return Build(leaves);
+        return BuildManifest(leaves);
     }
 
     private async Task<PermalinkLeaf> HashFileAsync(
@@ -567,7 +567,7 @@ public sealed class PermalinkEvidence
         }
     }
 
-    private static PermalinkEvidenceResult Build(IReadOnlyList<PermalinkLeaf> source)
+    internal static PermalinkEvidenceResult BuildManifest(IReadOnlyList<PermalinkLeaf> source)
     {
         var leaves = source
             .OrderBy(leaf => leaf.Kind, StringComparer.Ordinal)

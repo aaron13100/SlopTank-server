@@ -554,6 +554,22 @@ internal sealed class PermalinkOperationJournal : IDisposable
                 $"operation is already settled as '{settled.Name}'");
         }
 
+        if (_r9Protocols.TryGetValue(operation.Kind, out var r9Protocol))
+        {
+            var evidencePhase = r9Protocol.Sequence[0];
+            var evidence = string.Equals(phase.Name, evidencePhase.Name, StringComparison.Ordinal)
+                ? document
+                : await ReadPhaseAsync(operationId, evidencePhase, cancellationToken)
+                    .ConfigureAwait(false);
+            if (!HasCanonicalEvidence(evidence))
+            {
+                throw InvalidTransition(
+                    operationId,
+                    phase,
+                    $"kind '{operation.Kind}' has no canonical prepared evidence");
+            }
+        }
+
         if (TryValidateR9Transition(operation, operationId, phase))
         {
             return;
@@ -586,6 +602,53 @@ internal sealed class PermalinkOperationJournal : IDisposable
         {
             throw InvalidTransition(operationId, phase, "required predecessor evidence is absent");
         }
+    }
+
+    private static bool HasCanonicalEvidence(PermalinkOperationPhase? document)
+    {
+        if (document?.Leaves is not { Count: > 0 } leaves
+            || !IsSha256(document.ContentRoot)
+            || leaves.Any(leaf => string.IsNullOrEmpty(leaf.Kind)
+                || leaf.Kind.Contains('\0', StringComparison.Ordinal)
+                || string.IsNullOrEmpty(leaf.Role)
+                || leaf.Role.Contains('\0', StringComparison.Ordinal)
+                || (leaf.Path?.Contains('\0', StringComparison.Ordinal) ?? false)
+                || !IsSha256(leaf.Digest)
+                || leaf.ByteLength < 0
+                || leaf.Count <= 0))
+        {
+            return false;
+        }
+
+        try
+        {
+            return string.Equals(
+                document.ContentRoot,
+                PermalinkEvidence.BuildManifest(leaves).ContentRoot,
+                StringComparison.Ordinal);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsSha256(string? value)
+    {
+        if (value is null || value.Length != 71 || !value.StartsWith("sha256:", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        foreach (var character in value.AsSpan(7))
+        {
+            if (character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private bool TryValidateR9Transition(

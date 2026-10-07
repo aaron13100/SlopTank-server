@@ -43,10 +43,16 @@ public interface IPermalinkPathObjects
 
     /// <summary>Opens one regular file without following its final component and pins the opened descriptor.</summary>
     /// <param name="path">The file path.</param>
-    /// <param name="pinnedIdentity">The device and inode read from the opened descriptor.</param>
+    /// <param name="pinnedIdentity">The object and content identity read from the opened descriptor.</param>
     /// <returns>The opened stream, or null only when the path is absent.</returns>
-    FileStream? OpenReadNoFollowExact(string path, out string pinnedIdentity)
+    FileStream? OpenReadNoFollowExact(string path, out PermalinkOpenedFileIdentity pinnedIdentity)
         => throw new NotSupportedException("This path inspector cannot open pinned no-follow files.");
+
+    /// <summary>Reads the current complete identity from an already opened evidence descriptor.</summary>
+    /// <param name="stream">The stream returned by <see cref="OpenReadNoFollowExact"/>.</param>
+    /// <returns>The current object and content identity.</returns>
+    PermalinkOpenedFileIdentity ReadOpenedFileIdentity(FileStream stream)
+        => throw new NotSupportedException("This path inspector cannot inspect opened evidence files.");
 
     /// <summary>
     /// Reads a small regular file, or reports that it is absent.

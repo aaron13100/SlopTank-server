@@ -35,28 +35,16 @@ internal sealed class PermalinkEvidenceSourceCensus : IPermalinkEvidenceSourceCe
         ArgumentNullException.ThrowIfNull(request);
         try
         {
-            var sourceRoot = Path.GetFullPath(request.SourceRoot);
-            var scanRoot = Path.GetFullPath(request.ScanRoot);
-            RequireContained(sourceRoot, scanRoot);
-            var rootBefore = RequireUnlinkedObject(sourceRoot, "registry-population-root-unavailable");
-            var entries = new List<Entry>();
-            if (TryGetAttributes(scanRoot, out var attributes))
-            {
-                RequireDirectory(scanRoot, attributes);
-                await ReadDirectoryAsync(request, sourceRoot, scanRoot, entries, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-
-            var rootAfter = RequireUnlinkedObject(sourceRoot, "registry-population-root-unavailable");
-            if (!string.Equals(rootBefore.Identity, rootAfter.Identity, StringComparison.Ordinal))
+            var first = await ReadOnceAsync(request, cancellationToken).ConfigureAwait(false);
+            var second = await ReadOnceAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(first.Generation, second.Generation, StringComparison.Ordinal))
             {
                 throw Unavailable(
-                    "registry-population-root-changed",
-                    $"Population root '{sourceRoot}' changed during its census.");
+                    "registry-population-source-changed",
+                    $"Population source '{request.ScanRoot}' did not have one stable generation.");
             }
 
-            entries.Sort((left, right) => StringComparer.Ordinal.Compare(left.SourceKey, right.SourceKey));
-            return new Result(Digest(request, entries), entries);
+            return second;
         }
         catch (PermalinkException)
         {
@@ -72,6 +60,32 @@ internal sealed class PermalinkEvidenceSourceCensus : IPermalinkEvidenceSourceCe
         }
     }
 
+    private async Task<Result> ReadOnceAsync(Request request, CancellationToken cancellationToken)
+    {
+        var sourceRoot = Path.GetFullPath(request.SourceRoot);
+        var scanRoot = Path.GetFullPath(request.ScanRoot);
+        RequireContained(sourceRoot, scanRoot);
+        var rootBefore = RequireUnlinkedObject(sourceRoot, "registry-population-root-unavailable");
+        var entries = new List<Entry>();
+        if (TryGetAttributes(scanRoot, out var attributes))
+        {
+            RequireDirectory(scanRoot, attributes);
+            await ReadDirectoryAsync(request, sourceRoot, scanRoot, entries, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        var rootAfter = RequireUnlinkedObject(sourceRoot, "registry-population-root-unavailable");
+        if (!string.Equals(rootBefore.Identity, rootAfter.Identity, StringComparison.Ordinal))
+        {
+            throw Unavailable(
+                "registry-population-root-changed",
+                $"Population root '{sourceRoot}' changed during its census.");
+        }
+
+        entries.Sort((left, right) => StringComparer.Ordinal.Compare(left.SourceKey, right.SourceKey));
+        return new Result(Digest(request, entries), entries);
+    }
+
     private async Task ReadDirectoryAsync(
         Request request,
         string sourceRoot,
@@ -79,6 +93,7 @@ internal sealed class PermalinkEvidenceSourceCensus : IPermalinkEvidenceSourceCe
         List<Entry> entries,
         CancellationToken cancellationToken)
     {
+        var directoryBefore = RequireUnlinkedObject(directory, "registry-population-source-disappeared");
         foreach (var path in Directory.EnumerateFileSystemEntries(directory)
                      .OrderBy(value => Path.GetFileName(value), StringComparer.Ordinal))
         {
@@ -109,7 +124,7 @@ internal sealed class PermalinkEvidenceSourceCensus : IPermalinkEvidenceSourceCe
                 ?? throw Unavailable(
                     "registry-population-source-disappeared",
                     $"Population source entry '{path}' disappeared before it could be opened.");
-            if (!string.Equals(before.Identity, openedIdentity, StringComparison.Ordinal))
+            if (!string.Equals(before.Identity, openedIdentity.ObjectIdentity, StringComparison.Ordinal))
             {
                 throw Unavailable(
                     "registry-population-source-changed",
@@ -118,8 +133,16 @@ internal sealed class PermalinkEvidenceSourceCensus : IPermalinkEvidenceSourceCe
 
             var length = stream.Length;
             var sha256 = Convert.ToHexStringLower(await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false));
+            var openedAfter = _objects.ReadOpenedFileIdentity(stream);
+            if (openedIdentity != openedAfter)
+            {
+                throw Unavailable(
+                    "registry-population-source-changed",
+                    $"Population source entry '{path}' changed while it was being read.");
+            }
+
             var after = RequireUnlinkedObject(path, "registry-population-source-disappeared");
-            if (!string.Equals(openedIdentity, after.Identity, StringComparison.Ordinal))
+            if (!string.Equals(openedIdentity.ObjectIdentity, after.Identity, StringComparison.Ordinal))
             {
                 throw Unavailable(
                     "registry-population-source-changed",
@@ -131,9 +154,17 @@ internal sealed class PermalinkEvidenceSourceCensus : IPermalinkEvidenceSourceCe
                 relative,
                 relative,
                 OperationId(request.Kind, relative),
-                openedIdentity,
+                openedIdentity.ObjectIdentity + ":" + openedIdentity.ContentVersion,
                 length,
                 sha256));
+        }
+
+        var directoryAfter = RequireUnlinkedObject(directory, "registry-population-source-disappeared");
+        if (!string.Equals(directoryBefore.Identity, directoryAfter.Identity, StringComparison.Ordinal))
+        {
+            throw Unavailable(
+                "registry-population-source-changed",
+                $"Population source directory '{directory}' changed while it was being read.");
         }
     }
 

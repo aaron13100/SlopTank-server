@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-04, 2026-10-07.
 using System;
 using System.Linq;
 using System.Threading;
@@ -148,6 +148,21 @@ internal static class PermalinkAuthoritySchema
                     OR (status <> 'complete' AND completed_content_epoch IS NULL AND registry_cardinality IS NULL)));
             CREATE UNIQUE INDEX IF NOT EXISTS IX_PermalinkRegistryPopulations_Running
                 ON PermalinkRegistryPopulations(status) WHERE status = 'running';
+            CREATE TABLE IF NOT EXISTS PermalinkRegistryPopulationCheckpoints (
+                population_id TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                source_generation TEXT NOT NULL,
+                cursor_version INTEGER NOT NULL CHECK(cursor_version > 0),
+                cursor TEXT NULL,
+                observed_count INTEGER NOT NULL CHECK(observed_count >= 0),
+                status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'complete', 'failed')),
+                version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT NULL,
+                PRIMARY KEY(population_id, source_kind, source_key),
+                FOREIGN KEY(population_id) REFERENCES PermalinkRegistryPopulations(population_id));
             -- Watermarks are append-only seals over one completed population plus both complete
             -- operation-journal areas. They do not mutate the content facts they attest.
             CREATE TABLE IF NOT EXISTS PermalinkAbsenceWatermarks (
@@ -358,6 +373,40 @@ internal static class PermalinkAuthoritySchema
         await AddColumnIfMissingAsync(
             connection, "PermalinkEvidenceRegistry", "anchor_token", "TEXT NULL", cancellationToken)
             .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+            connection, "PermalinkEvidenceRegistry", "population_id", "TEXT NULL", cancellationToken)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+            connection, "PermalinkEvidenceRegistry", "source_key", "TEXT NULL", cancellationToken)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+            connection, "PermalinkEvidenceRegistry", "pinned_object_identity", "TEXT NULL", cancellationToken)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+            connection, "PermalinkEvidenceRegistry", "content_length", "INTEGER NULL CHECK(content_length >= 0)", cancellationToken)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+            connection, "PermalinkEvidenceRegistry", "content_sha256", "TEXT NULL", cancellationToken)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+            connection, "PermalinkEvidenceRegistry", "record_version", "INTEGER NOT NULL DEFAULT 1 CHECK(record_version > 0)", cancellationToken)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+            connection, "PermalinkEvidenceRegistry", "superseded_by_registry_id", "TEXT NULL", cancellationToken)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+            connection, "PermalinkEvidenceRegistry", "deleted_at", "TEXT NULL", cancellationToken)
+            .ConfigureAwait(false);
+        await using (var evidenceIndex = connection.CreateCommand())
+        {
+            evidenceIndex.CommandText = """
+                CREATE UNIQUE INDEX IF NOT EXISTS IX_PermalinkEvidenceRegistry_ActivePopulationSource
+                    ON PermalinkEvidenceRegistry(evidence_kind, root_identity_id, source_key)
+                    WHERE source_key IS NOT NULL AND superseded_by_registry_id IS NULL AND deleted_at IS NULL
+                """;
+            _ = await evidenceIndex.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         await InstallImmutableEvidenceAsync(connection, cancellationToken).ConfigureAwait(false);
         await InstallWriteProtectionAsync(connection, cancellationToken).ConfigureAwait(false);
     }
@@ -444,6 +493,7 @@ internal static class PermalinkAuthoritySchema
             ("PermalinkRootIdentities", "NEW.root_identity_id"),
             ("PermalinkEvidenceRegistry", "NEW.registry_id"),
             ("PermalinkRegistryPopulations", "NEW.population_id"),
+            ("PermalinkRegistryPopulationCheckpoints", "NEW.population_id || char(0) || NEW.source_kind || char(0) || NEW.source_key"),
             ("PermalinkAbsenceWatermarks", "NEW.watermark_id"),
             ("PermalinkWriterAdmissions", "NEW.admission_id"),
             ("PermalinkRetirementIntents", "NEW.operation_id"),
@@ -481,6 +531,7 @@ internal static class PermalinkAuthoritySchema
         foreach (var table in tables.Select(entry => entry.Table).Where(
                      table => table is not "SnapshotMetadata"
                          and not "PermalinkRegistryPopulations"
+                         and not "PermalinkRegistryPopulationCheckpoints"
                          and not "PermalinkAbsenceWatermarks"))
         {
             var journalIncrement = table is "OperationDecisions" or "PathOperationDecisions"

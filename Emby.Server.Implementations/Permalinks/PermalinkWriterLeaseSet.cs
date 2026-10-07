@@ -1,7 +1,6 @@
 // SlopTank modification notice: added or changed by SlopTank on 2026-10-03, 2026-10-07.
 using System;
 using System.Collections.Generic;
-using System.Data;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -208,8 +207,7 @@ internal sealed class PermalinkWriterLeaseSet : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = (Microsoft.Data.Sqlite.SqliteTransaction)await connection
-            .BeginTransactionAsync(IsolationLevel.ReadUncommitted, cancellationToken).ConfigureAwait(false);
+        await using var transaction = PermalinkSqliteTransactions.BeginDeferredSerializable(connection);
         foreach (var entry in entries)
         {
             var entryPermit = permit?.Key == entry.Key ? permit : null;

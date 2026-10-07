@@ -1,6 +1,8 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-10-07.
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -147,6 +149,59 @@ internal sealed class PermalinkMutationClaimStore
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Stores exact canonical successor decisions for every claimed predecessor.</summary>
+    /// <param name="bundle">The immutable claimed bundle.</param>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <param name="successors">The exact successor events.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    public async Task FinalizePreparedAsync(
+        PermalinkMutationBundle bundle,
+        Guid operationId,
+        IReadOnlyList<PermalinkPreparedContentSuccessor> successors,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection
+            .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var claim in bundle.Claims)
+        {
+            var owner = await ReadOwnerAsync(connection, transaction, claim, cancellationToken)
+                .ConfigureAwait(false);
+            if (!string.Equals(owner, operationId.ToString("D"), StringComparison.Ordinal))
+            {
+                throw Conflict(
+                    "claim-owner-mismatch",
+                    $"Operation '{operationId}' does not own capsule '{claim.CapsuleId}'.");
+            }
+
+            var successor = successors.SingleOrDefault(value =>
+                value.CapsuleId.Equals(claim.CapsuleId)
+                && value.ItemId.Equals(claim.ItemId)
+                && string.Equals(value.Predecessor, claim.Predecessor, StringComparison.Ordinal));
+            if (successor is null || !successor.Event.OperationId.Equals(operationId))
+            {
+                throw Conflict(
+                    "prepared-successor-missing",
+                    $"Operation '{operationId}' has no exact successor for capsule '{claim.CapsuleId}'.");
+            }
+
+            var bytes = CanonicalJson.Serialize(successor.Event);
+            await InsertDecisionAsync(
+                connection,
+                transaction,
+                claim,
+                operationId,
+                "ready",
+                successor.Event.EventId,
+                "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes.Span)),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task InsertClaimAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -191,6 +246,27 @@ internal sealed class PermalinkMutationClaimStore
             $"{operationId:D}\0{claim.CapsuleId:D}\0{claim.Predecessor}\0{decision}"));
         var eventId = new Guid(digest.AsSpan(0, 16)).ToString("D");
         var digestText = "sha256:" + Convert.ToHexStringLower(digest);
+        await InsertDecisionAsync(
+            connection,
+            transaction,
+            claim,
+            operationId,
+            decision,
+            Guid.Parse(eventId),
+            digestText,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task InsertDecisionAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        PermalinkMutationClaim claim,
+        Guid operationId,
+        string decision,
+        Guid eventId,
+        string digestText,
+        CancellationToken cancellationToken)
+    {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
@@ -205,20 +281,22 @@ internal sealed class PermalinkMutationClaimStore
         command.Parameters.AddWithValue("$capsule", claim.CapsuleId.ToString("D"));
         command.Parameters.AddWithValue("$predecessor", claim.Predecessor);
         command.Parameters.AddWithValue("$decision", decision);
-        command.Parameters.AddWithValue("$event", eventId);
+        command.Parameters.AddWithValue("$event", eventId.ToString("D"));
         command.Parameters.AddWithValue("$digest", digestText);
         command.Parameters.AddWithValue("$created", UtcNow());
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         command.CommandText = """
-            SELECT decision
+            SELECT decision, event_id, event_digest
               FROM OperationDecisions
              WHERE operation_id = $operation
                AND capsule_id = $capsule
                AND predecessor = $predecessor
             """;
-        var stored = (string?)await command.ExecuteScalarAsync(cancellationToken)
-            .ConfigureAwait(false);
-        if (!string.Equals(stored, decision, StringComparison.Ordinal))
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            || !string.Equals(reader.GetString(0), decision, StringComparison.Ordinal)
+            || !string.Equals(reader.GetString(1), eventId.ToString("D"), StringComparison.Ordinal)
+            || !string.Equals(reader.GetString(2), digestText, StringComparison.Ordinal))
         {
             throw Conflict(
                 "operation-decision-mismatch",

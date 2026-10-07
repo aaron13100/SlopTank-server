@@ -633,6 +633,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkPendingIdentityMutation>();
             serviceCollection.AddSingleton<PermalinkMutationBundleFactory>();
             serviceCollection.AddSingleton<PermalinkMutationClaimStore>();
+            serviceCollection.AddSingleton<PermalinkAggregateSuccessorPlanner>();
             serviceCollection.AddSingleton<PermalinkContentAdoption>();
             serviceCollection.AddSingleton<PermalinkMediaMutation>();
             serviceCollection.AddSingleton<PermalinkMediaRecovery>();

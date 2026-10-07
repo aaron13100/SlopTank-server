@@ -1,6 +1,8 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-07, 2026-09-09, 2026-10-01, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-07, 2026-09-09, 2026-10-01, 2026-10-03, 2026-10-07.
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
@@ -23,6 +25,7 @@ internal sealed class PermalinkMediaMutation
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly PermalinkMutationClaimStore _claims;
     private readonly PermalinkPathLeaseFactory _leases;
+    private readonly PermalinkAggregateSuccessorPlanner _successors;
 
     public PermalinkMediaMutation(
         PermalinkEvidence evidence,
@@ -34,7 +37,8 @@ internal sealed class PermalinkMediaMutation
         PermalinkBindingIndex bindings,
         IPermalinkAtomicFileSystem fileSystem,
         PermalinkMutationClaimStore claims,
-        PermalinkPathLeaseFactory leases)
+        PermalinkPathLeaseFactory leases,
+        PermalinkAggregateSuccessorPlanner successors)
     {
         _evidence = evidence;
         _authority = authority;
@@ -46,6 +50,7 @@ internal sealed class PermalinkMediaMutation
         _fileSystem = fileSystem;
         _claims = claims;
         _leases = leases;
+        _successors = successors;
     }
 
     /// <summary>
@@ -241,8 +246,23 @@ internal sealed class PermalinkMediaMutation
                     "Restaged bytes do not match the operation's immutable Ready evidence.");
             }
 
+            if (existingReady.PreparedSuccessors is not null)
+            {
+                ValidatePreparedSuccessors(operation, existingReady);
+            }
+            else
+            {
+                RequireLegacySingleClaim(operation);
+            }
+
             return staging;
         }
+
+        var successors = await _successors.PrepareAsync(
+            operation,
+            item,
+            desired,
+            cancellationToken).ConfigureAwait(false);
 
         await _journal.WritePhaseAsync(
             operation.OperationId,
@@ -252,7 +272,10 @@ internal sealed class PermalinkMediaMutation
                 PermalinkPhase.Ready.Name,
                 desired.ContentRoot,
                 operation.CreatedAt,
-                desired.Leaves),
+                desired.Leaves)
+            {
+                PreparedSuccessors = successors
+            },
             cancellationToken).ConfigureAwait(false);
         return staging;
     }
@@ -341,6 +364,14 @@ internal sealed class PermalinkMediaMutation
                 "Published media does not match the exact operation-owned Ready evidence.");
         }
 
+        var successors = ready.PreparedSuccessors is null
+            ? await _successors.PrepareLegacySingleAsync(
+                operation,
+                item,
+                desired,
+                cancellationToken).ConfigureAwait(false)
+            : ValidatePreparedSuccessors(operation, ready);
+
         await _journal.WritePhaseAsync(
             operation.OperationId,
             PermalinkPhase.Published,
@@ -350,12 +381,12 @@ internal sealed class PermalinkMediaMutation
                 desired.ContentRoot,
                 operation.CreatedAt),
             cancellationToken).ConfigureAwait(false);
-        await _claims.FinalizeAsync(
+        await _claims.FinalizePreparedAsync(
             RequireBundle(operation),
             operation.OperationId,
-            "ready",
+            successors,
             cancellationToken).ConfigureAwait(false);
-        await AppendContentAsync(operation, item, desired, cancellationToken, heldLeases, permit)
+        await AppendContentAsync(operation, item, successors, cancellationToken, heldLeases, permit)
             .ConfigureAwait(false);
         await _bindings.UpdateContentRootAsync(
             operation.ItemId,
@@ -406,7 +437,7 @@ internal sealed class PermalinkMediaMutation
     private async Task AppendContentAsync(
         PermalinkOperationDocument operation,
         BaseItem item,
-        PermalinkEvidenceResult desired,
+        IReadOnlyList<PermalinkPreparedContentSuccessor> successors,
         CancellationToken cancellationToken,
         PermalinkWriterLeaseSet? heldLeases,
         PermalinkWriterAdmissionPermit? permit)
@@ -451,27 +482,94 @@ internal sealed class PermalinkMediaMutation
             reservation.CapsuleId,
             reservation.ItemKind,
             cancellationToken).ConfigureAwait(false);
-        var storeRequest = new PermalinkStoreRequest(
-            item.Id,
-            reservation.ItemKind,
-            item.Path,
-            desired.ContentRoot,
-            desired.Leaves,
-            true,
-            null);
-        var successor = _documents.CreateControlledContentSuccessor(
-            storeRequest,
-            snapshot,
-            operation.OperationId);
-        var bytes = CanonicalJson.Serialize(successor);
-        await _transitions.AuthorizeContentTransitionAsync(
-            reservation.CapsuleId,
-            snapshot.ContentHead.EventId,
-            successor,
-            bytes,
-            cancellationToken).ConfigureAwait(false);
-        await _capsules.AppendContentAsync(capsulePath, successor, bytes, cancellationToken)
-            .ConfigureAwait(false);
+        foreach (var prepared in successors.OrderBy(value => value.CapsuleId))
+        {
+            var preparedReservation = prepared.CapsuleId.Equals(reservation.CapsuleId)
+                ? reservation
+                : await _authority.FindByCapsuleAsync(prepared.CapsuleId, cancellationToken)
+                    .ConfigureAwait(false)
+                    ?? throw Conflict("capsule-missing", $"Protected capsule '{prepared.CapsuleId}' is unknown.");
+            var preparedPath = prepared.CapsuleId.Equals(reservation.CapsuleId)
+                ? capsulePath
+                : preparedReservation.CapsulePath;
+            var preparedSnapshot = prepared.CapsuleId.Equals(reservation.CapsuleId)
+                ? snapshot
+                : await _capsules.ReadValidatedAsync(
+                    preparedPath,
+                    prepared.CapsuleId,
+                    preparedReservation.ItemKind,
+                    cancellationToken).ConfigureAwait(false);
+            if (preparedSnapshot.ContentHead.EventId.Equals(prepared.Event.EventId))
+            {
+                await _bindings.UpdateContentRootAsync(
+                    prepared.ItemId,
+                    prepared.Event.ContentRoot,
+                    cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            if (!prepared.Event.PreviousContentEventId.HasValue
+                || !preparedSnapshot.ContentHead.EventId.Equals(prepared.Event.PreviousContentEventId.Value))
+            {
+                throw Conflict(
+                    "successor-head-mismatch",
+                    $"Prepared predecessor for capsule '{prepared.CapsuleId}' is no longer current.");
+            }
+
+            var bytes = CanonicalJson.Serialize(prepared.Event);
+            await _transitions.AuthorizeContentTransitionAsync(
+                prepared.CapsuleId,
+                preparedSnapshot.ContentHead.EventId,
+                prepared.Event,
+                bytes,
+                cancellationToken).ConfigureAwait(false);
+            await _capsules.AppendContentAsync(preparedPath, prepared.Event, bytes, cancellationToken)
+                .ConfigureAwait(false);
+            await _bindings.UpdateContentRootAsync(
+                prepared.ItemId,
+                prepared.Event.ContentRoot,
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static IReadOnlyList<PermalinkPreparedContentSuccessor> ValidatePreparedSuccessors(
+        PermalinkOperationDocument operation,
+        PermalinkOperationPhase ready)
+    {
+        var bundle = RequireBundle(operation);
+        var successors = ready.PreparedSuccessors
+            ?? throw Conflict("prepared-successors-missing", "Ready phase has no exact successor decisions.");
+        if (successors.Count != bundle.Claims.Count
+            || successors.Select(value => value.CapsuleId).Distinct().Count() != successors.Count)
+        {
+            throw Conflict("prepared-successors-invalid", "Ready successors do not cover the immutable bundle once.");
+        }
+
+        foreach (var claim in bundle.Claims)
+        {
+            var successor = successors.SingleOrDefault(value => value.CapsuleId.Equals(claim.CapsuleId));
+            if (successor is null
+                || !successor.ItemId.Equals(claim.ItemId)
+                || !string.Equals(successor.Predecessor, claim.Predecessor, StringComparison.Ordinal)
+                || !successor.Event.OperationId.Equals(operation.OperationId)
+                || !string.Equals(successor.Event.ContentRoot, PermalinkEvidence.BuildManifest(successor.Event.Leaves).ContentRoot, StringComparison.Ordinal))
+            {
+                throw Conflict("prepared-successors-invalid", "Ready successor evidence does not match its claim.");
+            }
+        }
+
+        return successors;
+    }
+
+    private static void RequireLegacySingleClaim(PermalinkOperationDocument operation)
+    {
+        var bundle = RequireBundle(operation);
+        if (bundle.Claims.Count != 1 || bundle.Claims[0].Kind != "content")
+        {
+            throw Conflict(
+                "prepared-successors-missing",
+                "A relation mutation without frozen successors cannot be recovered safely.");
+        }
     }
 
     private static PermalinkException Conflict(string code, string message)

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09, 2026-10-07.
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
@@ -31,11 +31,11 @@ internal sealed record PermalinkOperationPhase(
 
     /// <summary>
     /// Gets the durable record version. It is derived rather than stored, so it can never disagree
-    /// with the content actually present: a record without <see cref="ObservedState"/> stays at
-    /// version 1 and keeps the exact bytes every already-published record has, and only a record
-    /// carrying the snapshot declares version 2.
+    /// with the content actually present: an original-shape record stays at version 1 and keeps
+    /// byte identity, observed-state records declare version 2, and records that freeze exact
+    /// relation successors declare version 3.
     /// </summary>
-    public int Version => ObservedState is null ? 1 : 2;
+    public int Version => PreparedSuccessors is not null ? 3 : ObservedState is null ? 1 : 2;
 
     /// <summary>
     /// Gets the canonical observed-evidence snapshot recorded by a phase that closes an operation
@@ -43,4 +43,11 @@ internal sealed record PermalinkOperationPhase(
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ObservedState { get; init; }
+
+    /// <summary>
+    /// Gets the exact content successor events elected before the mutation claims are acquired.
+    /// The events, rather than a later recomputation, are the durable decision for recovery.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<PermalinkPreparedContentSuccessor>? PreparedSuccessors { get; init; }
 }

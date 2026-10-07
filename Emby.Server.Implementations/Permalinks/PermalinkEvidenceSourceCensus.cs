@@ -15,7 +15,7 @@ using SourceKind = Emby.Server.Implementations.Permalinks.PermalinkEvidenceRegis
 namespace Emby.Server.Implementations.Permalinks;
 
 /// <summary>Builds deterministic, pinned and no-follow inventories for one population source.</summary>
-internal sealed class PermalinkEvidenceSourceCensus
+internal sealed class PermalinkEvidenceSourceCensus : IPermalinkEvidenceSourceCensus
 {
     private readonly IPermalinkPathObjects _objects;
 

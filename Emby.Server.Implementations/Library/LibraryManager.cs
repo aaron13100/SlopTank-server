@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01, 2026-10-04, 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01, 2026-10-04, 2026-10-07, 2026-10-08.
 #pragma warning disable CS1591
 #pragma warning disable CA5394
 
@@ -2465,7 +2465,25 @@ namespace Emby.Server.Implementations.Library
                 }
             }
 
-            _persistenceService.SaveItems(allItems, cancellationToken);
+            var aggregateChanges = allItems
+                .OfType<BoxSet>()
+                .Select(aggregate => new PermalinkAggregateMembershipChange(
+                    aggregate,
+                    _linkedChildrenService.GetLinkedChildrenIds(aggregate.Id)
+                        .Select(GetItemById)
+                        .Where(value => value is not null)
+                        .Cast<BaseItem>()
+                        .ToArray(),
+                    aggregate.GetLinkedChildren()))
+                .ToArray();
+            _aggregateMutationAdapter.Value.ExecuteAsync(
+                aggregateChanges,
+                () =>
+                {
+                    _persistenceService.SaveItems(allItems, cancellationToken);
+                    return Task.CompletedTask;
+                },
+                cancellationToken).GetAwaiter().GetResult();
 
             foreach (var item in allItems)
             {

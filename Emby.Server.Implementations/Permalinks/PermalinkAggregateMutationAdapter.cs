@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-07, 2026-10-08.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -58,6 +58,12 @@ internal sealed class PermalinkAggregateMutationAdapter : IPermalinkAggregateMut
         _linkedChildren = linkedChildren;
         _configuration = configuration;
         _timeProvider = timeProvider;
+    }
+
+    private enum AggregateMembershipOutcome
+    {
+        Previous,
+        Desired
     }
 
     /// <inheritdoc />
@@ -157,6 +163,13 @@ internal sealed class PermalinkAggregateMutationAdapter : IPermalinkAggregateMut
                 [new PermalinkMutationPart("relation", plans[0].Aggregate.Path, null)],
                 plans[0].Reservation.RootPath,
                 null);
+            var membershipPlans = plans.Select(plan => new PermalinkAggregateMembershipPlan(
+                    plan.Aggregate.Id,
+                    plan.Reservation.CapsuleId,
+                    MemberIds(plan.PreviousMembers),
+                    MemberIds(plan.DesiredMembers)))
+                .OrderBy(value => value.CapsuleId)
+                .ToArray();
             var operation = new PermalinkOperationDocument(
                 operationId,
                 plans[0].Aggregate.Id,
@@ -171,13 +184,7 @@ internal sealed class PermalinkAggregateMutationAdapter : IPermalinkAggregateMut
                 bundle,
                 createdAt)
             {
-                AggregateMembership = plans.Select(plan => new PermalinkAggregateMembershipPlan(
-                        plan.Aggregate.Id,
-                        plan.Reservation.CapsuleId,
-                        MemberIds(plan.PreviousMembers),
-                        MemberIds(plan.DesiredMembers)))
-                    .OrderBy(value => value.CapsuleId)
-                    .ToArray()
+                AggregateMembership = membershipPlans
             };
             await _journal.WriteOperationAsync(operation, cancellationToken).ConfigureAwait(false);
             await _journal.WritePhaseAsync(
@@ -221,14 +228,34 @@ internal sealed class PermalinkAggregateMutationAdapter : IPermalinkAggregateMut
                 throw new InvalidOperationException($"Aggregate mutation fault injected by {FaultAfterMutationKey}.");
             }
 
-            var selected = mutationFailure is null
+            AggregateMembershipOutcome outcome;
+            try
+            {
+                outcome = ObserveMembershipOutcome(membershipPlans);
+            }
+            catch (PermalinkException exception)
+            {
+                throw new PermalinkException(
+                    exception.Kind,
+                    exception.Code,
+                    exception.Message,
+                    mutationFailure ?? exception,
+                    operationId,
+                    plans[0].Aggregate.Id);
+            }
+
+            var selected = outcome == AggregateMembershipOutcome.Desired
                 ? plans.Select(value => value.DesiredSuccessor).ToArray()
                 : plans.Select(value => value.RollbackSuccessor).ToArray();
+            var decision = outcome == AggregateMembershipOutcome.Desired ? "ready" : "cancelled";
+            var terminal = outcome == AggregateMembershipOutcome.Desired
+                ? PermalinkPhase.Committed
+                : PermalinkPhase.Cancelled;
             await _claims.FinalizePreparedAsync(
                 bundle,
                 operationId,
                 selected,
-                mutationFailure is null ? "ready" : "cancelled",
+                decision,
                 cancellationToken).ConfigureAwait(false);
             await PublishAsync(selected, cancellationToken).ConfigureAwait(false);
             await _journal.WritePhaseAsync(
@@ -242,16 +269,26 @@ internal sealed class PermalinkAggregateMutationAdapter : IPermalinkAggregateMut
                 cancellationToken).ConfigureAwait(false);
             await _journal.WritePhaseAsync(
                 operationId,
-                mutationFailure is null ? PermalinkPhase.Committed : PermalinkPhase.Cancelled,
+                terminal,
                 new PermalinkOperationPhase(
                     operationId,
-                    mutationFailure is null ? PermalinkPhase.Committed.Name : PermalinkPhase.Cancelled.Name,
+                    terminal.Name,
                     selected[0].Event.ContentRoot,
                     createdAt),
                 cancellationToken).ConfigureAwait(false);
             if (mutationFailure is not null)
             {
                 ExceptionDispatchInfo.Capture(mutationFailure).Throw();
+            }
+
+            if (outcome == AggregateMembershipOutcome.Previous)
+            {
+                throw new PermalinkException(
+                    PermalinkErrorKind.Conflict,
+                    "aggregate-mutation-not-applied",
+                    "The aggregate database write returned without applying its frozen desired membership.",
+                    operationId: operationId,
+                    itemId: plans[0].Aggregate.Id);
             }
         }
         finally
@@ -295,38 +332,21 @@ internal sealed class PermalinkAggregateMutationAdapter : IPermalinkAggregateMut
             var desired = ValidateSuccessors(operation, ready.PreparedSuccessors, membership, "prepared");
             var rollback = ValidateSuccessors(operation, ready.RollbackSuccessors, membership, "rollback");
 
-            var matchesPrevious = true;
-            var matchesDesired = true;
-            foreach (var plan in membership)
-            {
-                var actual = _linkedChildren.GetLinkedChildrenIds(plan.ItemId)
-                    .Distinct()
-                    .Order()
-                    .ToArray();
-                matchesPrevious &= actual.SequenceEqual(plan.PreviousMemberIds.Distinct().Order());
-                matchesDesired &= actual.SequenceEqual(plan.DesiredMemberIds.Distinct().Order());
-            }
-
             IReadOnlyList<PermalinkPreparedContentSuccessor> selected;
             string decision;
             PermalinkPhase terminal;
-            if (matchesDesired)
+            var outcome = ObserveMembershipOutcome(membership);
+            if (outcome == AggregateMembershipOutcome.Desired)
             {
                 selected = desired;
                 decision = "ready";
                 terminal = PermalinkPhase.Committed;
             }
-            else if (matchesPrevious)
+            else
             {
                 selected = rollback;
                 decision = "cancelled";
                 terminal = PermalinkPhase.Cancelled;
-            }
-            else
-            {
-                throw Conflict(
-                    "aggregate-membership-unknown",
-                    "Live aggregate membership matches neither frozen operation outcome.");
             }
 
             var bundle = operation.Bundle
@@ -399,6 +419,36 @@ internal sealed class PermalinkAggregateMutationAdapter : IPermalinkAggregateMut
         }
 
         return successors;
+    }
+
+    private AggregateMembershipOutcome ObserveMembershipOutcome(
+        IReadOnlyList<PermalinkAggregateMembershipPlan> membership)
+    {
+        var matchesPrevious = true;
+        var matchesDesired = true;
+        foreach (var plan in membership)
+        {
+            var actual = _linkedChildren.GetLinkedChildrenIds(plan.ItemId)
+                .Distinct()
+                .Order()
+                .ToArray();
+            matchesPrevious &= actual.SequenceEqual(plan.PreviousMemberIds.Distinct().Order());
+            matchesDesired &= actual.SequenceEqual(plan.DesiredMemberIds.Distinct().Order());
+        }
+
+        if (matchesDesired)
+        {
+            return AggregateMembershipOutcome.Desired;
+        }
+
+        if (matchesPrevious)
+        {
+            return AggregateMembershipOutcome.Previous;
+        }
+
+        throw Conflict(
+            "aggregate-membership-unknown",
+            "Live aggregate membership matches neither frozen operation outcome.");
     }
 
     private async Task<IReadOnlyList<(MediaBrowser.Controller.Entities.BaseItem Item, PermalinkStoredState State)>> ResolveMembersAsync(

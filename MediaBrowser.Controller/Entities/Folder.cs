@@ -556,8 +556,12 @@ namespace MediaBrowser.Controller.Entities
                         // case; removing and re-creating it here is what churned every
                         // replaced item on every later scan and re-identified it from
                         // scratch. Adoption is authorized by the authority binding record
-                        // alone (see the adapter), so an unbound or divergent occupant
-                        // keeps the fail-closed removal below.
+                        // alone (see the adapter), so an occupant that fails the check
+                        // keeps the fail-closed outcome below: an UNBOUND occupant is
+                        // removed and a fresh row born, while a bound-but-divergent or
+                        // bound-but-unanchored occupant is fenced by the kind-
+                        // reclassification mutation below (SkippedConflict), which
+                        // retains the row and births no fresh row this scan.
                         if (await PermalinkIdentityMutationAdapter.ShouldAdoptOccupantAsync(
                                 staleItem,
                                 child,

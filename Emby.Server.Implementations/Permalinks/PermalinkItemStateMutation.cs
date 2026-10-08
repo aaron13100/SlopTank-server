@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-10-08.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -152,6 +152,45 @@ internal sealed class PermalinkItemStateMutation
     }
 
     /// <summary>
+    /// Settles an identity or journal-only state operation holding no phase evidence, after
+    /// verifying from the live item that the operation took no effect.
+    /// </summary>
+    /// <remarks>
+    /// The absence of phase files is not itself proof that nothing happened: the phase
+    /// directory can be lost after a successful prepare. For these kinds the durable effect IS
+    /// the live item state, so the item must still hold the complete prepared-old assignment
+    /// before the fence lifts: that is the durable record's own claim about the state the
+    /// operation started from, and agreeing with it is the proof the operation took no effect.
+    /// A live identity that contradicts the record is refused and stays fenced for sanctioned
+    /// recovery rather than being silently unfenced.
+    /// </remarks>
+    /// <param name="operation">The immutable operation reconstructed from its marker.</param>
+    /// <param name="item">The item whose identity is verified against the record.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The aborted mutation result.</returns>
+    public async Task<PermalinkMutationResult> RecoverPreparationNeverDurableAsync(
+        PermalinkOperationDocument operation,
+        BaseItem item,
+        CancellationToken cancellationToken)
+    {
+        if (!LiveIdentityMatchesPreparedOld(item, operation))
+        {
+            throw Conflict(
+                "prepared-old-mismatch",
+                "Live identity does not equal the complete prepared-old assignment of an "
+                + "operation whose preparation never became durable; it stays fenced for "
+                + "sanctioned recovery.");
+        }
+
+        await WritePhaseIfMissingAsync(
+            operation,
+            PermalinkPhase.Aborted,
+            operation.OldContentRoot,
+            cancellationToken).ConfigureAwait(false);
+        return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Aborted.Name);
+    }
+
+    /// <summary>
     /// Cancels a prepared identity mutation after verifying the restored assignment.
     /// </summary>
     /// <param name="operation">The immutable prepared operation.</param>
@@ -163,10 +202,7 @@ internal sealed class PermalinkItemStateMutation
         BaseItem item,
         CancellationToken cancellationToken)
     {
-        var oldIdentity = operation.OldIdentity;
-        if (oldIdentity is not null
-            ? !oldIdentity.Matches(item)
-            : !ProviderIdsEqual(item.ProviderIds, operation.OldProviderIds))
+        if (!LiveIdentityMatchesPreparedOld(item, operation))
         {
             throw Conflict(
                 "prepared-old-mismatch",
@@ -179,6 +215,16 @@ internal sealed class PermalinkItemStateMutation
             operation.OldContentRoot,
             cancellationToken).ConfigureAwait(false);
         return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Cancelled.Name);
+    }
+
+    private static bool LiveIdentityMatchesPreparedOld(
+        BaseItem item,
+        PermalinkOperationDocument operation)
+    {
+        var oldIdentity = operation.OldIdentity;
+        return oldIdentity is not null
+            ? oldIdentity.Matches(item)
+            : ProviderIdsEqual(item.ProviderIds, operation.OldProviderIds);
     }
 
     /// <summary>

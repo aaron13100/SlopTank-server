@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-07, 2026-10-08.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -25,6 +25,15 @@ public interface IPermalinkAggregateMutationAdapter
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The settled operation state.</returns>
     Task<PermalinkMutationResult> RecoverAsync(Guid operationId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Verifies from durable records that an aggregate operation holding no phase evidence took
+    /// no effect, so a nothing-happened terminal would be truthful.
+    /// </summary>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the verification; refusals throw.</returns>
+    Task VerifyNeverPreparedAsync(Guid operationId, CancellationToken cancellationToken);
 }
 
 /// <summary>Complete membership state for one aggregate database mutation.</summary>

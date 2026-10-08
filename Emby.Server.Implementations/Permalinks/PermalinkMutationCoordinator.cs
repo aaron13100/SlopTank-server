@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20, 2026-09-27, 2026-09-30, 2026-10-03, 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20, 2026-09-27, 2026-09-30, 2026-10-03, 2026-10-07, 2026-10-08.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -57,6 +57,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     private readonly PermalinkItemStateMutation _itemStateMutation;
     private readonly PermalinkContentAdoption _contentAdoption;
     private readonly IPermalinkAggregateMutationAdapter _aggregateMutation;
+    private readonly PermalinkMutationClaimStore _claims;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<PermalinkMutationCoordinator> _logger;
     private readonly SemaphoreSlim[] _operationGates = Enumerable.Range(0, OperationGateCount)
@@ -80,6 +81,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     /// <param name="itemStateMutation">The journal-only item-state mutation service.</param>
     /// <param name="contentAdoption">The elevated leaf content adoption service.</param>
     /// <param name="aggregateMutation">The protected aggregate membership adapter.</param>
+    /// <param name="claims">The durable mutation claim store.</param>
     /// <param name="timeProvider">The time provider.</param>
     /// <param name="logger">The logger.</param>
     public PermalinkMutationCoordinator(
@@ -97,6 +99,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         PermalinkItemStateMutation itemStateMutation,
         PermalinkContentAdoption contentAdoption,
         IPermalinkAggregateMutationAdapter aggregateMutation,
+        PermalinkMutationClaimStore claims,
         TimeProvider timeProvider,
         ILogger<PermalinkMutationCoordinator> logger)
     {
@@ -115,6 +118,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         _itemStateMutation = itemStateMutation;
         _contentAdoption = contentAdoption;
         _aggregateMutation = aggregateMutation;
+        _claims = claims;
         _timeProvider = timeProvider;
     }
 
@@ -330,6 +334,16 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
                 cancellationToken).ConfigureAwait(false);
         }
 
+        if (!_journal.HasAnyPhase(operationId))
+        {
+            // No phase evidence exists: either the marker-publication crash window (nothing
+            // happened) or journal loss after a successful prepare (claims and effects can
+            // exist outside the journal). Only the verified settle decides which, so every
+            // kind-specific route below is unreachable until its phase evidence exists.
+            return await SettleNeverPreparedCoreAsync(operation, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         if (PermalinkItemStateMutation.IsIdentityKind(operation.Kind))
         {
             return await _itemStateMutation.RecoverIdentityAsync(
@@ -440,10 +454,101 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
                 $"Operation '{operationId}' is already settled as '{settledPhase.Name}'.");
         }
 
+        if (!_journal.HasAnyPhase(operationId))
+        {
+            // The same state RecoverCoreAsync settles, through the same verified path: a cancel
+            // of an operation holding no phase evidence must not settle a nothing-happened
+            // terminal that durable claims or live effects contradict.
+            return await SettleNeverPreparedCoreAsync(operation, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         return await _itemStateMutation.CancelAsync(
             operation,
             RequireItem(operation.ItemId),
             cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Settles an operation holding no phase evidence at all, by verifying from durable records
+    /// outside the journal that the operation took no effect before writing the nothing-happened
+    /// terminal.
+    /// </summary>
+    /// <remarks>
+    /// A missing phase directory does not prove preparation never returned: journal loss after a
+    /// successful prepare leaves the same directory state while the authority still holds the
+    /// operation's claims and the item database still holds its effects. Each kind therefore
+    /// verifies against its own durable records. Kinds whose phase protocol demands canonical
+    /// prepared evidence have no durable no-effects verifier and keep their fence; the aggregate
+    /// verifies its claims and live membership; media and the path family verify the claim
+    /// boundary that precedes every effect-bearing step; identity and journal-only state kinds
+    /// verify the live item against the immutable prepared-old snapshot. Anything that cannot be
+    /// verified refuses with a typed reason and stays fenced for sanctioned recovery.
+    /// </remarks>
+    /// <param name="operation">The immutable operation document.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The terminal mutation result.</returns>
+    private async Task<PermalinkMutationResult> SettleNeverPreparedCoreAsync(
+        PermalinkOperationDocument operation,
+        CancellationToken cancellationToken)
+    {
+        if (PermalinkOperationJournal.RequiresCanonicalPreparedEvidence(operation.Kind))
+        {
+            throw Conflict(
+                "recovery-evidence-missing",
+                $"Operation '{operation.OperationId}' of kind '{operation.Kind}' cannot prove a "
+                + "no-effect settle without its canonical phase evidence; it stays fenced for "
+                + "sanctioned recovery.");
+        }
+
+        if (string.Equals(operation.Kind, "aggregate-membership", StringComparison.Ordinal))
+        {
+            await _aggregateMutation.VerifyNeverPreparedAsync(operation.OperationId, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        else if (operation.Kind is "media" or "path" or "cross-root" or "tree" or "multipart")
+        {
+            // Claims are taken before any effect-bearing step of these kinds, so a bundle this
+            // operation does not own is the authority's own record that no commit started.
+            var bundle = operation.Bundle ?? throw Conflict(
+                "mutation-bundle-missing",
+                $"Operation '{operation.OperationId}' has no mutation bundle to verify against.");
+            if (await _claims.OwnsAsync(bundle, operation.OperationId, cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                throw Conflict(
+                    "claim-evidence-present",
+                    $"Operation '{operation.OperationId}' holds durable mutation claims, so its "
+                    + "missing phase evidence is journal loss after preparation rather than "
+                    + "proof nothing happened; it stays fenced for sanctioned recovery.");
+            }
+        }
+        else if (PermalinkItemStateMutation.IsIdentityKind(operation.Kind)
+            || operation.Kind is "deletion" or "promotion" or "kind-reclassification"
+                or "aggregate" or "alias-import" or "grouping")
+        {
+            // The durable effect of these kinds is the live item state itself, so the item must
+            // exist and match the complete prepared-old snapshot the document recorded; the
+            // settle writes its own verified terminal.
+            return await _itemStateMutation.RecoverPreparationNeverDurableAsync(
+                operation,
+                RequireItem(operation.ItemId),
+                cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            throw Conflict(
+                "recovery-evidence-missing",
+                $"Operation '{operation.OperationId}' of kind '{operation.Kind}' has no durable "
+                + "no-effects verifier; it stays fenced for sanctioned recovery.");
+        }
+
+        await _journal.WritePhaseAsync(
+            operation.OperationId,
+            PermalinkPhase.Aborted,
+            Phase(operation, PermalinkPhase.Aborted, operation.OldContentRoot),
+            cancellationToken).ConfigureAwait(false);
+        return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Aborted.Name);
     }
 
     /// <inheritdoc />
@@ -482,6 +587,15 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
                 operation,
                 _libraryManager.GetItemById<BaseItem>(operation.ItemId),
                 cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!_journal.HasAnyPhase(operationId))
+        {
+            // The direct abort route reaches the same zero-evidence state as startup recovery
+            // and cancel, so it settles through the same verified path: absence of the phase
+            // directory alone must never authorize the nothing-happened terminal here either.
+            return await SettleNeverPreparedCoreAsync(operation, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         await _journal.WritePhaseAsync(

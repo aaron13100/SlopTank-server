@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-20, 2026-10-03, 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-20, 2026-10-03, 2026-10-07, 2026-10-08.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -70,6 +70,17 @@ internal sealed class PermalinkOperationJournal : IDisposable
         "Permalinks:OperationScratchReclaimMaximumOperationsPerPass";
 
     /// <summary>
+    /// A diagnostics-only fault injection point at the exact crash window between the durable
+    /// pending-marker publish and the operation.json publish inside
+    /// <see cref="WriteOperationAsync"/>. When set, the marker is durably published and the
+    /// write throws before operation.json exists, which reproduces the real process-death
+    /// disk state for restart-recovery tests without timing an actual crash. It is read at
+    /// write time so a test can arm it around one request.
+    /// </summary>
+    public const string JournalFaultAfterMarkerPublishKey =
+        "Permalinks:Diagnostics:JournalFaultAfterMarkerPublish";
+
+    /// <summary>
     /// How long the pending-check meter waits before it calls a run of lookups
     /// finished and logs its totals.
     ///
@@ -119,6 +130,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
 
     private readonly PermalinkAuthorityStore _authority;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
+    private readonly IConfiguration _configuration;
     private readonly ILogger<PermalinkOperationJournal> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly bool _pendingIndexEnabled;
@@ -150,6 +162,7 @@ internal sealed class PermalinkOperationJournal : IDisposable
     {
         _authority = authority;
         _fileSystem = fileSystem;
+        _configuration = configuration;
         _timeProvider = timeProvider;
         _logger = logger;
         _pendingIndexEnabled = !configuration.GetValue(DisablePendingIndexKey, false);
@@ -389,6 +402,17 @@ internal sealed class PermalinkOperationJournal : IDisposable
         _fileSystem.CreateDirectoryDurable(Path.GetDirectoryName(markerPath)!);
         await PublishExactAsync(markerPath, bytes, cancellationToken).ConfigureAwait(false);
 
+        if (_configuration.GetValue(JournalFaultAfterMarkerPublishKey, false))
+        {
+            // Diagnostics fault at the exact crash window this method's marker-first order
+            // exists to survive: the marker is durably published and operation.json is not.
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "journal-fault-injected",
+                $"Operation '{operation.OperationId}' faulted after its pending marker was "
+                + $"published, injected by {JournalFaultAfterMarkerPublishKey}.");
+        }
+
         var root = GetActiveOperationPath(operation.OperationId);
         _fileSystem.CreateDirectoryDurable(root);
         var createdOperation = await PublishExactAsync(
@@ -556,6 +580,13 @@ internal sealed class PermalinkOperationJournal : IDisposable
 
         if (_r9Protocols.TryGetValue(operation.Kind, out var r9Protocol))
         {
+            // The canonical-evidence requirement is unconditional, including for Aborted: the
+            // journal only knows its own directory, and an operation directory holding no phase
+            // files does not prove the operation never started (its claims, capsule events, or
+            // live effects can still exist elsewhere). A caller that has verified durable
+            // no-effects for some other kind settles through the coordinator's verified route;
+            // for these kinds no such verifier exists, so a missing evidence phase is always a
+            // refusal, never an abort.
             var evidencePhase = r9Protocol.Sequence[0];
             var evidence = string.Equals(phase.Name, evidencePhase.Name, StringComparison.Ordinal)
                 ? document
@@ -763,6 +794,56 @@ internal sealed class PermalinkOperationJournal : IDisposable
     private bool HasActivePhase(Guid operationId, PermalinkPhase phase)
     {
         return File.Exists(Path.Combine(GetActiveOperationPath(operationId), phase.Name + ".json"));
+    }
+
+    /// <summary>
+    /// Returns whether the operation's directory holds any durable journal file besides its own
+    /// operation document, resolving the one operation's location without ever enumerating the
+    /// operations root.
+    /// </summary>
+    /// <remarks>
+    /// This names the boundary between "the operation exists" and "the operation started": the
+    /// marker-first publish order in <see cref="WriteOperationAsync"/> means a process death
+    /// before the first phase write leaves an operation whose directory holds exactly one file.
+    /// Recovery uses it to recognize that earliest crash window, where no phase evidence exists
+    /// to interpret and no caller can have proceeded past a prepare that never returned.
+    /// </remarks>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <returns><see langword="true"/> when any phase or resolution file exists.</returns>
+    public bool HasAnyPhase(Guid operationId)
+    {
+        var operationPath = GetOperationPath(operationId);
+        if (!Directory.Exists(operationPath))
+        {
+            return false;
+        }
+
+        foreach (var file in Directory.EnumerateFiles(operationPath, "*.json"))
+        {
+            if (!string.Equals(Path.GetFileName(file), "operation.json", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Gets whether the kind is one whose phase protocol demands canonical prepared evidence
+    /// for every terminal write, including the nothing-happened abort.
+    /// </summary>
+    /// <remarks>
+    /// Recovery uses this as the fail-closed boundary for zero-evidence settles: these kinds
+    /// have no durable no-effects verifier (their effects live in successor capsules, path
+    /// bindings, and scratch state the journal cannot observe), so an operation of such a kind
+    /// holding no phase evidence keeps its fence rather than being settled by absence alone.
+    /// </remarks>
+    /// <param name="kind">The typed mutation kind.</param>
+    /// <returns><see langword="true"/> when the kind carries a canonical-evidence protocol.</returns>
+    public static bool RequiresCanonicalPreparedEvidence(string kind)
+    {
+        return _r9Protocols.ContainsKey(kind);
     }
 
     private PermalinkPhase? GetActiveSettledPhase(Guid operationId)

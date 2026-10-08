@@ -298,6 +298,91 @@ internal sealed class PermalinkAggregateMutationAdapter : IPermalinkAggregateMut
     }
 
     /// <inheritdoc />
+    public async Task VerifyNeverPreparedAsync(
+        Guid operationId,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var operation = await _journal.ReadAsync(operationId, cancellationToken).ConfigureAwait(false)
+                ?? throw Conflict("operation-missing", $"Operation '{operationId}' does not exist.");
+            if (!string.Equals(operation.Kind, "aggregate-membership", StringComparison.Ordinal))
+            {
+                throw Conflict(
+                    "operation-kind-invalid",
+                    $"Operation '{operationId}' is not an aggregate membership mutation.");
+            }
+
+            await VerifyNeverPreparedCoreAsync(operation, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Verifies from durable records that an aggregate operation holding no phase evidence took
+    /// no effect, so a nothing-happened terminal would be truthful.
+    /// </summary>
+    /// <remarks>
+    /// The journal's phase files are not the only durable record of an aggregate operation: the
+    /// authority holds its bundle claims and the item database holds the membership itself. An
+    /// operation directory can be lost after claims were taken and the membership was written,
+    /// so absence of phase evidence licenses nothing on its own. This check accepts only the
+    /// state the marker-only crash window can produce: no claims held by this operation and
+    /// every plan's live membership still equal to its frozen previous membership. Anything
+    /// else keeps its fence for sanctioned recovery instead of being settled by absence.
+    /// </remarks>
+    /// <param name="operation">The immutable operation document.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the verification; refusals throw.</returns>
+    private async Task VerifyNeverPreparedCoreAsync(
+        PermalinkOperationDocument operation,
+        CancellationToken cancellationToken)
+    {
+        var membership = operation.AggregateMembership
+            ?? throw Conflict(
+                "aggregate-recovery-evidence-missing",
+                "Aggregate membership recovery evidence is missing.");
+        var bundle = operation.Bundle
+            ?? throw Conflict(
+                "mutation-bundle-missing",
+                $"Operation '{operation.OperationId}' has no mutation bundle to verify against.");
+
+        if (await _claims.OwnsAsync(bundle, operation.OperationId, cancellationToken)
+                .ConfigureAwait(false))
+        {
+            throw Conflict(
+                "claim-evidence-present",
+                $"Operation '{operation.OperationId}' holds durable mutation claims, so its "
+                + "missing phase evidence is journal loss after preparation rather than proof "
+                + "nothing happened; it stays fenced for sanctioned recovery.",
+                operationId: operation.OperationId,
+                itemId: operation.ItemId);
+        }
+
+        foreach (var plan in membership)
+        {
+            var actual = _linkedChildren.GetLinkedChildrenIds(plan.ItemId)
+                .Distinct()
+                .Order()
+                .ToArray();
+            if (!actual.SequenceEqual(plan.PreviousMemberIds.Distinct().Order()))
+            {
+                throw Conflict(
+                    "membership-effect-present",
+                    $"Aggregate '{plan.ItemId}' no longer holds the frozen previous membership of "
+                    + $"operation '{operation.OperationId}', so its missing phase evidence cannot "
+                    + "settle a nothing-happened terminal; it stays fenced for sanctioned recovery.",
+                    operationId: operation.OperationId,
+                    itemId: plan.ItemId);
+            }
+        }
+    }
+
+    /// <inheritdoc />
     public async Task<PermalinkMutationResult> RecoverAsync(
         Guid operationId,
         CancellationToken cancellationToken)
@@ -554,8 +639,12 @@ internal sealed class PermalinkAggregateMutationAdapter : IPermalinkAggregateMut
         }
     }
 
-    private static PermalinkException Conflict(string code, string message)
-        => new(PermalinkErrorKind.Conflict, code, message);
+    private static PermalinkException Conflict(
+        string code,
+        string message,
+        Guid? operationId = null,
+        Guid? itemId = null)
+        => new(PermalinkErrorKind.Conflict, code, message, operationId: operationId, itemId: itemId);
 
     private static IReadOnlyList<Guid> MemberIds(
         IReadOnlyList<MediaBrowser.Controller.Entities.BaseItem> members)

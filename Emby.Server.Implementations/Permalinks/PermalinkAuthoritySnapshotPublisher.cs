@@ -1,5 +1,6 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-01, 2026-10-07, 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-01, 2026-10-07, 2026-10-08, 2026-10-09.
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -364,10 +365,34 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IPermalinkAuthorityG
         string authorityRoot,
         CancellationToken cancellationToken)
     {
-        using var document = JsonDocument.Parse(await File.ReadAllBytesAsync(
-            Path.Combine(authorityRoot, "authority.json"), cancellationToken)
-            .ConfigureAwait(false));
-        return document.RootElement.GetProperty("authority_id").GetString()
-            ?? throw new InvalidDataException("authority.json lacks authority_id");
+        try
+        {
+            using var document = JsonDocument.Parse(await File.ReadAllBytesAsync(
+                Path.Combine(authorityRoot, "authority.json"), cancellationToken)
+                .ConfigureAwait(false));
+            return document.RootElement.GetProperty("authority_id").GetString()
+                ?? throw new InvalidDataException("authority.json lacks authority_id");
+        }
+        catch (Exception exception)
+            when (exception is JsonException
+                or InvalidDataException
+                or KeyNotFoundException
+                or InvalidOperationException)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Corrupt,
+                "authority-identity-corrupt",
+                "The permalink authority identity document is malformed.",
+                exception);
+        }
+        catch (Exception exception)
+            when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "authority-identity-unavailable",
+                $"The permalink authority identity document could not be read ({exception.Message}).",
+                exception);
+        }
     }
 }

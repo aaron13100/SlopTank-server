@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09.
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -62,6 +62,18 @@ internal sealed class PermalinkAuthoritySnapshotPublicationService : IHostedServ
     /// </summary>
     internal event Action? RefreshCompleted;
 
+    /// <summary>
+    /// Test seam: runs one background refresh pass exactly as the maintenance tick and the
+    /// authorized-write signal schedule it, so a test can await the pass that must not let
+    /// an unexpected failure escape as an unobserved task exception.
+    /// </summary>
+    /// <returns>A task representing the background pass.</returns>
+    internal Task RunRefreshPassForTestAsync()
+    {
+        Interlocked.Increment(ref _refreshQueued);
+        return RunRefreshInBackgroundAsync();
+    }
+
     /// <inheritdoc />
     public async Task StartAsync(CancellationToken cancellationToken)
     {
@@ -96,7 +108,7 @@ internal sealed class PermalinkAuthoritySnapshotPublicationService : IHostedServ
         }
 
         _maintenanceTimer = new Timer(
-            _ => _ = RunRefreshInBackgroundAsync(), null, MaintenanceDueTime, MaintenanceInterval);
+            _ => QueueRefresh(), null, MaintenanceDueTime, MaintenanceInterval);
     }
 
     /// <inheritdoc />
@@ -156,6 +168,11 @@ internal sealed class PermalinkAuthoritySnapshotPublicationService : IHostedServ
         // scope: never block here, only schedule a coalesced background pass. Signals that
         // arrive while a pass is already draining are counted, not dropped: the drain loop
         // replays one pass per signal so a write that commits mid-pass still publishes.
+        QueueRefresh();
+    }
+
+    private void QueueRefresh()
+    {
         Interlocked.Increment(ref _refreshQueued);
         _ = Task.Run(RunRefreshInBackgroundAsync);
     }
@@ -197,6 +214,17 @@ internal sealed class PermalinkAuthoritySnapshotPublicationService : IHostedServ
                 "Permalink authority snapshot publication failed ({Kind} {ErrorCode}); the previously published CURRENT remains in force and readers stay fail-closed until a later pass succeeds.",
                 exception.Kind,
                 exception.Code);
+        }
+        catch (Exception exception)
+        {
+            // This task is deliberately detached from the triggering write/timer. Preserve
+            // an unexpected failure here, where it still has its stack and publication
+            // context, rather than letting it become an unobserved task exception. The next
+            // queued write or maintenance tick owns the retry; CURRENT is never rewritten by
+            // this failed pass.
+            _logger.LogError(
+                exception,
+                "Unexpected permalink authority snapshot publication failure; the previously published CURRENT remains in force and readers stay fail-closed until a later pass succeeds.");
         }
         finally
         {

@@ -1,9 +1,12 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09.
 // allow-no-test-found: covered by private HTTP suite sloptank-tests/server/tests/Jellyfin.Server.Integration.Tests/Controllers/PermalinkReplacementCoherenceTests.cs
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
@@ -44,10 +47,11 @@ internal sealed class PermalinkAdoptedGenerationProber
 
     /// <summary>
     /// Re-probes the item's media info from the generation just installed at its path.
-    /// A probe failure must not fail the surrounding commit: the destination bytes are
-    /// already installed, so the item keeps its previously probed streams, the failure
-    /// is logged with its cause, and the next library refresh retries (the file's
-    /// modification time advanced, which is ProbeProvider's change trigger).
+    /// The destination bytes are already installed, so a primary Movie/Episode first
+    /// re-enters durable Pending admission before the probe. A successful probe leaves
+    /// it Complete but Pending until the new generation is attested; a failed probe
+    /// leaves it ProbeFailed and hidden while retaining the old stream rows only for
+    /// diagnosis. The next library refresh retries the failed generation.
     /// </summary>
     /// <param name="item">The item whose current path holds the adopted generation.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
@@ -58,6 +62,16 @@ internal sealed class PermalinkAdoptedGenerationProber
         if (item is not Video video || !ProbeProvider.Supports(item))
         {
             return;
+        }
+
+        var requiresReadinessAttestation = item is Movie or Episode;
+        if (requiresReadinessAttestation)
+        {
+            item.IngestState = IngestState.Pending;
+            item.PlaybackReadiness = PlaybackReadiness.Pending;
+            item.PlaybackReadyObjectIdentity = null;
+            item.PlaybackReadyAlgorithmVersion = null;
+            await PersistStateAsync(item, cancellationToken).ConfigureAwait(false);
         }
 
         try
@@ -76,6 +90,11 @@ internal sealed class PermalinkAdoptedGenerationProber
                 "Probing replaced media at {Path} failed after the generation commit; the item keeps its previously probed streams and the next library refresh retries",
                 item.Path);
         }
+
+        if (requiresReadinessAttestation)
+        {
+            await PersistStateAsync(item, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -90,5 +109,17 @@ internal sealed class PermalinkAdoptedGenerationProber
         {
             _libraryManager.RegisterItem(committed);
         }
+    }
+
+    private async Task PersistStateAsync(BaseItem item, CancellationToken cancellationToken)
+    {
+        var parent = item.GetParent()
+            ?? throw new InvalidOperationException("A replaced library item has no parent for readiness persistence.");
+        await _libraryManager.UpdateItemAsync(
+            item,
+            parent,
+            ItemUpdateType.MetadataEdit,
+            cancellationToken).ConfigureAwait(false);
+        RefreshCachedItem(item.Id);
     }
 }

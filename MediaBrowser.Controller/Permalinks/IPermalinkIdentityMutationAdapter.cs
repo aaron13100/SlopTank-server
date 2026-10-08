@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-19.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-19, 2026-10-08.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -24,6 +24,29 @@ public interface IPermalinkIdentityMutationAdapter
     Task<bool> CanSkipScanReplacementAsync(
         BaseItem currentItem,
         BaseItem resolvedItem,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Returns whether an existing occupant at a resolved child's path is the durable
+    /// adopter of that exact path generation, so a scan must keep the occupant (its id,
+    /// UserData, images, and readiness) instead of removing it and birthing a fresh row.
+    /// This is the scan-side half of a sanctioned path adoption: the commit already
+    /// repointed the occupant to a new physical generation whose path-derived id can
+    /// never equal the occupant's, and without this check every later scan churns the
+    /// row (delete plus recreate), losing identity and re-identification metadata.
+    /// </summary>
+    /// <param name="occupant">The persisted item currently occupying the child's path.</param>
+    /// <param name="resolvedChild">The item the current scan resolved from the filesystem.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>
+    /// True only when the authority binding index records the occupant as bound at the
+    /// child's exact current path and the object at that path carries that binding's
+    /// anchor token. The authority record is the authorizer; anchor equality alone
+    /// authorizes nothing, so an unbound or divergent occupant is never adopted.
+    /// </returns>
+    Task<bool> ShouldAdoptOccupantAsync(
+        BaseItem occupant,
+        BaseItem resolvedChild,
         CancellationToken cancellationToken);
 
     /// <summary>

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-23, 2026-10-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-23, 2026-10-04, 2026-10-08.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -25,6 +25,7 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
     private readonly ILibraryManager _libraryManager;
     private readonly PermalinkEvidence _evidence;
     private readonly IPlaybackPreparationService _playbackPreparationService;
+    private readonly IPermalinkAtomicFileSystem _atomicFileSystem;
 
     public PermalinkIdentityMutationAdapter(
         IPermalinkMutationCoordinator coordinator,
@@ -32,7 +33,8 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         PermalinkPendingIdentityMutation pending,
         ILibraryManager libraryManager,
         PermalinkEvidence evidence,
-        IPlaybackPreparationService playbackPreparationService)
+        IPlaybackPreparationService playbackPreparationService,
+        IPermalinkAtomicFileSystem atomicFileSystem)
     {
         _coordinator = coordinator;
         _bindings = bindings;
@@ -40,6 +42,7 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         _libraryManager = libraryManager;
         _evidence = evidence;
         _playbackPreparationService = playbackPreparationService;
+        _atomicFileSystem = atomicFileSystem;
     }
 
     /// <inheritdoc />
@@ -73,6 +76,42 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         }
 
         return await _pending.FindPendingAsync(currentItem.Id, cancellationToken).ConfigureAwait(false) is null;
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> ShouldAdoptOccupantAsync(
+        BaseItem occupant,
+        BaseItem resolvedChild,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(occupant);
+        ArgumentNullException.ThrowIfNull(resolvedChild);
+
+        if (string.IsNullOrEmpty(resolvedChild.Path)
+            || !string.Equals(occupant.Path, resolvedChild.Path, StringComparison.OrdinalIgnoreCase)
+            || occupant.GetBaseItemKind() != resolvedChild.GetBaseItemKind())
+        {
+            return false;
+        }
+
+        // The authority record is the authorizer: only a durable path adoption advanced a
+        // binding's current path to this exact path, and those advances are written
+        // exclusively by the authenticated mutation commits. The anchor token read from
+        // the file only corroborates that the object at the path is the anchored one;
+        // anchor equality alone authorizes nothing (PROJECT_DIRECTION, rejected
+        // 2026-09-04), so an occupant with no matching binding record is never adopted
+        // and the scan keeps its previous fail-closed behavior for it.
+        var anchorToken = _atomicFileSystem.ReadAnchorToken(resolvedChild.Path);
+        if (string.IsNullOrEmpty(anchorToken))
+        {
+            return false;
+        }
+
+        var bindings = await _bindings.FindItemBindingsAsync(occupant.Id, cancellationToken)
+            .ConfigureAwait(false);
+        return bindings.Any(binding =>
+            string.Equals(binding.AnchorToken, anchorToken, StringComparison.Ordinal)
+            && string.Equals(binding.CurrentPath, resolvedChild.Path, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <inheritdoc />

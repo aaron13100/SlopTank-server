@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-30, 2026-09-04, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-26, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-30, 2026-09-04, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-26, 2026-10-03, 2026-10-08.
 #nullable disable
 
 #pragma warning disable CA1002, CA1721, CA1819, CS1591
@@ -449,6 +449,78 @@ namespace MediaBrowser.Controller.Entities
 
                 cancellationToken.ThrowIfCancellationRequested();
 
+                // One flow for every scan child that resolves onto an item the library
+                // already owns: matched by id, or matched by a durable path adoption
+                // whose repointed occupant keeps an id the resolver can never rederive.
+                async Task UpdateExistingChildAsync(BaseItem currentChild, BaseItem child)
+                {
+                    if (await PermalinkIdentityMutationAdapter.CanSkipScanReplacementAsync(
+                            currentChild,
+                            child,
+                            cancellationToken).ConfigureAwait(false))
+                    {
+                        if (currentChild.UpdateFromResolvedItem(child) > ItemUpdateType.None)
+                        {
+                            await currentChild.UpdateToRepositoryAsync(
+                                ItemUpdateType.MetadataImport,
+                                cancellationToken).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            await LibraryManager.UpdateImagesAsync(currentChild).ConfigureAwait(false);
+                        }
+
+                        accessibleChildren.Add(currentChild);
+                        rediscoveredItems.Add(currentChild);
+                        return;
+                    }
+
+                    var childUpdated = await TryExecutePermalinkChildMutationAsync(
+                        currentChild,
+                        () => PermalinkIdentityMutationAdapter.ExecuteAsync(
+                            [currentChild],
+                            new PermalinkIdentityMutationRequest(
+                                "scan-replacement",
+                                // currentChild, not child: child is the raw filesystem
+                                // resolve and can never carry identification-sourced
+                                // provider ids, so using it here recorded an empty desired
+                                // assignment on every scan-replacement prepare document
+                                // for an identified item.
+                                currentChild.ProviderIds,
+                                child.GetBaseItemKind().ToString()),
+                            async (_, ambientCancellationToken) =>
+                            {
+                                if (currentChild.UpdateFromResolvedItem(child) > ItemUpdateType.None)
+                                {
+                                    await currentChild.UpdateToRepositoryAsync(
+                                        ItemUpdateType.MetadataImport,
+                                        ambientCancellationToken).ConfigureAwait(false);
+                                }
+                                else
+                                {
+                                    await LibraryManager.UpdateImagesAsync(currentChild).ConfigureAwait(false);
+                                }
+                            },
+                            cancellationToken)).ConfigureAwait(false);
+                    if (childUpdated == PermalinkChildMutationOutcome.SkippedConflict)
+                    {
+                        permalinkConflictsSkipped++;
+                        if (currentChild is Folder)
+                        {
+                            // The fenced mutation stays skipped, but a fenced
+                            // aggregate must still be traversed: its descendants
+                            // carry the repair the fence is waiting for, and
+                            // omitting it here strands them forever.
+                            accessibleChildren.Add(currentChild);
+                        }
+                    }
+                    else
+                    {
+                        accessibleChildren.Add(currentChild);
+                        rediscoveredItems.Add(currentChild);
+                    }
+                }
+
                 foreach (var child in nonCachedChildren)
                 {
                     if (!IsLibraryFolderAccessible(directoryService, child, allowRemoveRoot))
@@ -466,71 +538,7 @@ namespace MediaBrowser.Controller.Entities
                     {
                         validChildren.Add(currentChild);
 
-                        if (await PermalinkIdentityMutationAdapter.CanSkipScanReplacementAsync(
-                                currentChild,
-                                child,
-                                cancellationToken).ConfigureAwait(false))
-                        {
-                            if (currentChild.UpdateFromResolvedItem(child) > ItemUpdateType.None)
-                            {
-                                await currentChild.UpdateToRepositoryAsync(
-                                    ItemUpdateType.MetadataImport,
-                                    cancellationToken).ConfigureAwait(false);
-                            }
-                            else
-                            {
-                                await LibraryManager.UpdateImagesAsync(currentChild).ConfigureAwait(false);
-                            }
-
-                            accessibleChildren.Add(currentChild);
-                            rediscoveredItems.Add(currentChild);
-                            continue;
-                        }
-
-                        var childUpdated = await TryExecutePermalinkChildMutationAsync(
-                            currentChild,
-                            () => PermalinkIdentityMutationAdapter.ExecuteAsync(
-                                [currentChild],
-                                new PermalinkIdentityMutationRequest(
-                                    "scan-replacement",
-                                    // currentChild, not child: child is the raw filesystem
-                                    // resolve and can never carry identification-sourced
-                                    // provider ids, so using it here recorded an empty desired
-                                    // assignment on every scan-replacement prepare document
-                                    // for an identified item.
-                                    currentChild.ProviderIds,
-                                    child.GetBaseItemKind().ToString()),
-                                async (_, ambientCancellationToken) =>
-                                {
-                                    if (currentChild.UpdateFromResolvedItem(child) > ItemUpdateType.None)
-                                    {
-                                        await currentChild.UpdateToRepositoryAsync(
-                                            ItemUpdateType.MetadataImport,
-                                            ambientCancellationToken).ConfigureAwait(false);
-                                    }
-                                    else
-                                    {
-                                        await LibraryManager.UpdateImagesAsync(currentChild).ConfigureAwait(false);
-                                    }
-                                },
-                                cancellationToken)).ConfigureAwait(false);
-                        if (childUpdated == PermalinkChildMutationOutcome.SkippedConflict)
-                        {
-                            permalinkConflictsSkipped++;
-                            if (currentChild is Folder)
-                            {
-                                // The fenced mutation stays skipped, but a fenced
-                                // aggregate must still be traversed: its descendants
-                                // carry the repair the fence is waiting for, and
-                                // omitting it here strands them forever.
-                                accessibleChildren.Add(currentChild);
-                            }
-                        }
-                        else
-                        {
-                            accessibleChildren.Add(currentChild);
-                            rediscoveredItems.Add(currentChild);
-                        }
+                        await UpdateExistingChildAsync(currentChild, child).ConfigureAwait(false);
 
                         continue;
                     }
@@ -540,6 +548,28 @@ namespace MediaBrowser.Controller.Entities
                         && currentChildrenByPath.TryGetValue(child.Path, out var staleItem)
                         && !staleItem.Id.Equals(child.Id))
                     {
+                        // A durable path adoption repointed this occupant onto a new
+                        // physical generation whose path-derived id can never equal the
+                        // occupant's own (that id was derived from the superseded path).
+                        // The scan must keep the adopted row, with its id, UserData,
+                        // images, and readiness, and refresh it exactly like the same-id
+                        // case; removing and re-creating it here is what churned every
+                        // replaced item on every later scan and re-identified it from
+                        // scratch. Adoption is authorized by the authority binding record
+                        // alone (see the adapter), so an unbound or divergent occupant
+                        // keeps the fail-closed removal below.
+                        if (await PermalinkIdentityMutationAdapter.ShouldAdoptOccupantAsync(
+                                staleItem,
+                                child,
+                                cancellationToken).ConfigureAwait(false))
+                        {
+                            validChildren.Add(staleItem);
+
+                            await UpdateExistingChildAsync(staleItem, child).ConfigureAwait(false);
+
+                            continue;
+                        }
+
                         Logger.LogInformation(
                             "Item type changed at {Path}: {OldType} -> {NewType}, removing stale entry",
                             child.Path,

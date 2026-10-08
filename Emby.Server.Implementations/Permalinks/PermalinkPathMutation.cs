@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09, 2026-10-03, 2026-10-08.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -24,6 +24,7 @@ internal sealed class PermalinkPathMutation
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly PermalinkCrossRootMutation _crossRoot;
     private readonly PermalinkPathLeaseFactory _leases;
+    private readonly PermalinkAdoptedGenerationProber _generationProber;
 
     public PermalinkPathMutation(
         ILibraryManager libraryManager,
@@ -33,7 +34,8 @@ internal sealed class PermalinkPathMutation
         PermalinkMutationClaimStore claims,
         IPermalinkAtomicFileSystem fileSystem,
         PermalinkCrossRootMutation crossRoot,
-        PermalinkPathLeaseFactory leases)
+        PermalinkPathLeaseFactory leases,
+        PermalinkAdoptedGenerationProber generationProber)
     {
         _libraryManager = libraryManager;
         _evidence = evidence;
@@ -43,6 +45,7 @@ internal sealed class PermalinkPathMutation
         _fileSystem = fileSystem;
         _crossRoot = crossRoot;
         _leases = leases;
+        _generationProber = generationProber;
     }
 
     /// <summary>Commits the exact immutable path map without replacing any destination.</summary>
@@ -179,11 +182,17 @@ internal sealed class PermalinkPathMutation
                 .ToArray();
         }
 
+        await ReprobeCurrentGenerationAsync(item, cancellationToken).ConfigureAwait(false);
         await _libraryManager.UpdateItemAsync(
             item,
             item.GetParent()!,
             ItemUpdateType.MetadataEdit,
             cancellationToken).ConfigureAwait(false);
+        // The commit repointed the row to a new physical generation: re-register the
+        // persisted row so the GetItemById-cached instance (the seam PlaybackInfo and
+        // the visible-item paths resolve) serves the same generation it just adopted.
+        _generationProber.RefreshCachedItem(item.Id);
+
         var anchor = _fileSystem.ReadAnchorToken(item.Path)
             ?? throw Conflict("anchor-missing", "Moved item lost its stable anchor.");
         await _bindings.UpdateCurrentPathAsync(anchor, item.Path, cancellationToken)
@@ -196,6 +205,18 @@ internal sealed class PermalinkPathMutation
         await WriteTerminalPhasesAsync(operation, cancellationToken).ConfigureAwait(false);
         return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
     }
+
+    /// <summary>
+    /// Re-probes the item's media info from the generation just installed at the adopted
+    /// destination: the persisted stream rows and every served media view must describe
+    /// the destination generation the moment the commit returns, not only after some
+    /// later scan refresh. See <see cref="PermalinkAdoptedGenerationProber"/> for the
+    /// shared failure contract.
+    /// </summary>
+    /// <param name="item">The item whose path was just repointed.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    private Task ReprobeCurrentGenerationAsync(BaseItem item, CancellationToken cancellationToken)
+        => _generationProber.ReprobeAsync(item, cancellationToken);
 
     /// <summary>
     /// Leases every library path a bundle will create, rename or unlink: each part's source and

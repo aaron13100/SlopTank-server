@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-07, 2026-09-09, 2026-10-01, 2026-10-03, 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-07, 2026-09-09, 2026-10-01, 2026-10-03, 2026-10-07, 2026-10-08.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -26,6 +26,7 @@ internal sealed class PermalinkMediaMutation
     private readonly PermalinkMutationClaimStore _claims;
     private readonly PermalinkPathLeaseFactory _leases;
     private readonly PermalinkAggregateSuccessorPlanner _successors;
+    private readonly PermalinkAdoptedGenerationProber _generationProber;
 
     public PermalinkMediaMutation(
         PermalinkEvidence evidence,
@@ -38,7 +39,8 @@ internal sealed class PermalinkMediaMutation
         IPermalinkAtomicFileSystem fileSystem,
         PermalinkMutationClaimStore claims,
         PermalinkPathLeaseFactory leases,
-        PermalinkAggregateSuccessorPlanner successors)
+        PermalinkAggregateSuccessorPlanner successors,
+        PermalinkAdoptedGenerationProber generationProber)
     {
         _evidence = evidence;
         _authority = authority;
@@ -51,6 +53,7 @@ internal sealed class PermalinkMediaMutation
         _claims = claims;
         _leases = leases;
         _successors = successors;
+        _generationProber = generationProber;
     }
 
     /// <summary>
@@ -404,6 +407,11 @@ internal sealed class PermalinkMediaMutation
                 desired.ContentRoot,
                 operation.CreatedAt),
             cancellationToken).ConfigureAwait(false);
+        // The swap installed a new physical generation at the item's constant path: the
+        // persisted stream rows and served media view must describe it from this moment,
+        // not only after the next scan's modification-time-triggered refresh.
+        await _generationProber.ReprobeAsync(item, cancellationToken).ConfigureAwait(false);
+        _generationProber.RefreshCachedItem(item.Id);
         return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
     }
 

@@ -646,6 +646,11 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<PermalinkMediaMutation>();
             serviceCollection.AddSingleton<PermalinkMediaRecovery>();
             serviceCollection.AddSingleton<PermalinkCrossRootMutation>();
+            // Concrete self-registration: the mutation commits probe the generation they
+            // just adopted through the same provider the library probes new rows with.
+            // Every ProbeProvider dependency is a singleton, so this composition is safe.
+            serviceCollection.AddSingleton<MediaBrowser.Providers.MediaInfo.ProbeProvider>();
+            serviceCollection.AddSingleton<PermalinkAdoptedGenerationProber>();
             serviceCollection.AddSingleton<PermalinkPathMutation>();
             serviceCollection.AddSingleton<IPermalinkMutationCoordinator, PermalinkMutationCoordinator>();
             serviceCollection.AddSingleton<PermalinkRemovalEvidenceVerifier>();

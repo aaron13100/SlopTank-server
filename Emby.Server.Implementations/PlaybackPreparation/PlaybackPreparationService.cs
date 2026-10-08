@@ -1,10 +1,11 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-08.
 // allow-no-test-found: private integration coverage is assigned to sloptank-tests/server/tests.
 #pragma warning disable CS1591
 #pragma warning disable SA1116
 #pragma warning disable SA1117
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -17,9 +18,11 @@ using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.PlaybackPreparation;
 using MediaBrowser.Model.PlaybackPreparation;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Emby.Server.Implementations.PlaybackPreparation;
 
@@ -29,15 +32,18 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> ResultGates = new();
     private readonly IDbContextFactory<JellyfinDbContext> _dbProvider;
     private readonly IServerApplicationHost _appHost;
+    private readonly IServiceProvider _provider;
     private readonly TimeProvider _timeProvider;
 
     public PlaybackPreparationService(
         IDbContextFactory<JellyfinDbContext> dbProvider,
         IServerApplicationHost appHost,
+        IServiceProvider provider,
         TimeProvider timeProvider)
     {
         _dbProvider = dbProvider;
         _appHost = appHost;
+        _provider = provider;
         _timeProvider = timeProvider;
     }
 
@@ -115,6 +121,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
             });
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            RefreshCachedItem(item.Id);
             return null;
         }
 
@@ -217,6 +224,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
             attempt.CompletedAtUtc = now;
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            RefreshCachedItem(attempt.ItemId);
             throw new PlaybackPreparationException(409, "media-changed", "The media object changed after claim.");
         }
 
@@ -259,6 +267,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        RefreshCachedItem(item!.Id);
     }
 
     public async Task<bool> VerifyPlaybackReadinessAsync(BaseItem item, CancellationToken cancellationToken)
@@ -299,6 +308,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
                 .SetProperty(value => value.PlaybackReadyObjectIdentity, (string?)null)
                 .SetProperty(value => value.PlaybackReadyAlgorithmVersion, (string?)null), cancellationToken)
             .ConfigureAwait(false);
+        RefreshCachedItem(item.Id);
         return false;
     }
 
@@ -313,6 +323,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
 
         await using var db = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var items = await db.BaseItems.Where(value => itemIds.Contains(value.Id)).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var invalidated = new List<Guid>();
         foreach (var item in items)
         {
             if (item.PlaybackReadiness != PlaybackReadiness.Ready
@@ -329,10 +340,15 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
                 item.PlaybackReadiness = PlaybackReadiness.Pending;
                 item.PlaybackReadyObjectIdentity = null;
                 item.PlaybackReadyAlgorithmVersion = null;
+                invalidated.Add(item.Id);
             }
         }
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var invalidatedId in invalidated)
+        {
+            RefreshCachedItem(invalidatedId);
+        }
     }
 
     public async Task<System.Collections.Generic.IReadOnlyCollection<Guid>> FindChangedReadinessAsync(
@@ -376,6 +392,26 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
 
     private static string HashNonce(string nonce)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(nonce))).ToLowerInvariant();
+
+    /// <summary>
+    /// Re-registers a freshly materialized item after a committed readiness change. The
+    /// library manager caches item instances, and the playback gate plus the visible-item
+    /// paths resolve that cached instance; without this refresh a committed transition
+    /// (Pending to Ready, Ready to Pending, or Failed) stays invisible to the warm server
+    /// until a restart, leaving a listed item playback-refused or a demoted item admitted.
+    /// The library manager is resolved lazily because it already consumes this service,
+    /// so a constructor dependency would be a validated circular dependency.
+    /// </summary>
+    /// <param name="itemId">The item whose persisted readiness changed.</param>
+    private void RefreshCachedItem(Guid itemId)
+    {
+        var libraryManager = _provider.GetRequiredService<ILibraryManager>();
+        var fresh = libraryManager.RetrieveItem(itemId);
+        if (fresh is not null)
+        {
+            libraryManager.RegisterItem(fresh);
+        }
+    }
 
     public async Task RenewAsync(Guid requestId, PlaybackPreparationRequest request, CancellationToken cancellationToken)
     {
@@ -425,6 +461,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
                 attempt.CompletedAtUtc = now;
                 await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                RefreshCachedItem(attempt.ItemId);
                 throw new PlaybackPreparationException(409, "media-unavailable", "The current media object cannot be identified.");
             }
 

@@ -9,6 +9,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.PlaybackPreparation;
+using Microsoft.Extensions.Configuration;
 
 namespace Emby.Server.Implementations.Permalinks;
 
@@ -17,6 +18,15 @@ namespace Emby.Server.Implementations.Permalinks;
 /// </summary>
 internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutationAdapter
 {
+    /// <summary>
+    /// Diagnostics fault at the exact crash window between a promotion's binding publication
+    /// and the caller's mutation: the binding move is durable but neither the mutation nor any
+    /// settle has run. Same shape as the aggregate adapter's FaultAfterMutationKey; namespaced
+    /// under Permalinks:Diagnostics:, defaults to false, and is not a production setting.
+    /// </summary>
+    internal const string FaultAfterPromotionBindingPublishKey =
+        "Permalinks:Diagnostics:FaultAfterPromotionBindingPublish";
+
     private static readonly AsyncLocal<AmbientToken?> _ambient = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _itemLocks = new();
     private readonly IPermalinkMutationCoordinator _coordinator;
@@ -26,6 +36,7 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
     private readonly PermalinkEvidence _evidence;
     private readonly IPlaybackPreparationService _playbackPreparationService;
     private readonly IPermalinkAtomicFileSystem _atomicFileSystem;
+    private readonly IConfiguration _configuration;
 
     public PermalinkIdentityMutationAdapter(
         IPermalinkMutationCoordinator coordinator,
@@ -34,7 +45,8 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         ILibraryManager libraryManager,
         PermalinkEvidence evidence,
         IPlaybackPreparationService playbackPreparationService,
-        IPermalinkAtomicFileSystem atomicFileSystem)
+        IPermalinkAtomicFileSystem atomicFileSystem,
+        IConfiguration configuration)
     {
         _coordinator = coordinator;
         _bindings = bindings;
@@ -43,6 +55,7 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         _evidence = evidence;
         _playbackPreparationService = playbackPreparationService;
         _atomicFileSystem = atomicFileSystem;
+        _configuration = configuration;
     }
 
     /// <inheritdoc />
@@ -169,6 +182,19 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
                 effectiveKind,
                 promotedItem,
                 cancellationToken).ConfigureAwait(false);
+            if (effectiveKind == "promotion"
+                && _configuration.GetValue(FaultAfterPromotionBindingPublishKey, false))
+            {
+                // Deliberately outside InvokeMutationAsync's cleanup scope: the pending
+                // operations and the moved binding survive this fault exactly as they
+                // survive a process death in the same window.
+                throw new PermalinkException(
+                    PermalinkErrorKind.Unavailable,
+                    "promotion-fault-injected",
+                    $"Promotion faulted after its bindings were published, injected by "
+                    + $"{FaultAfterPromotionBindingPublishKey}.");
+            }
+
             await InvokeMutationAsync(
                 preparedItems,
                 effectiveKind,

@@ -1,0 +1,25 @@
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-10-08. -->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Generic, versioned, provider-neutral external-login seam shared by the
+       SlopTank server and standalone authentication plugins. This assembly
+       deliberately references no server project: it must stay consumable by
+       plugin builds that compile against the published server API surface.
+       The persisted/wire contracts here are additive-only from version 1. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <VersionPrefix>1.0.0</VersionPrefix>
+    <RootNamespace>SlopTank.ExternalAuth</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsPackable>false</IsPackable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+</Project>

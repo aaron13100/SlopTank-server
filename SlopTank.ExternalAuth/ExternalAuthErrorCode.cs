@@ -61,4 +61,14 @@ public enum ExternalAuthErrorCode
     /// re-resolution (revoked, replaced, disabled, mismatched, or of external
     /// origin).</summary>
     LinkSessionNoLongerValid = 51,
+
+    /// <summary>The validated identity conflicts with a durable link
+    /// already settled (the identity is linked to another local user, or
+    /// the user already has a different active link).</summary>
+    LinkConflict = 52,
+
+    /// <summary>The durable link authority refused the settlement (state
+    /// root unavailable, descriptor policy, corruption, or a failed atomic
+    /// publication); the link is NOT confirmed.</summary>
+    LinkPersistenceFailed = 53,
 }

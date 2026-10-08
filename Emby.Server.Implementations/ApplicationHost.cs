@@ -632,6 +632,11 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IHostedService, PermalinkOperationReconciler>();
             serviceCollection.AddSingleton<IHostedService, PermalinkAnchorIntentRecovery>();
             serviceCollection.AddSingleton<IHostedService, PermalinkOperationArchiver>();
+            // Root identities are initialized before the publication lifecycle starts so
+            // the first published usable snapshot already contains every configured
+            // root's identity row (a registration advances content_epoch, which forces
+            // the publication pass that follows).
+            serviceCollection.AddSingleton<IHostedService, PermalinkRootIdentityStartupService>();
             serviceCollection.AddSingleton<IHostedService, PermalinkAuthoritySnapshotPublicationService>();
             serviceCollection.AddSingleton<PermalinkPendingIdentityMutation>();
             serviceCollection.AddSingleton<PermalinkMutationBundleFactory>();

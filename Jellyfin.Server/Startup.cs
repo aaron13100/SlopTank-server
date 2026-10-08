@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-08-03, 2026-09-06, 2026-09-07, 2026-09-08, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-08-03, 2026-09-06, 2026-09-07, 2026-09-08, 2026-09-09, 2026-10-08.
 using System;
 using System.Globalization;
 using System.IO;
@@ -190,6 +190,14 @@ namespace Jellyfin.Server
                 mainApp.UseMiddleware<ResponseTimeMiddleware>();
 
                 mainApp.UseWebSockets();
+
+                // External-cookie session transport: after UseWebSockets
+                // (upgrade features available) and BEFORE authentication
+                // and handlers, so a cookie-authenticated request flows
+                // through the real authorization path with its
+                // server-side retained token, and every explicitly
+                // supplied credential keeps exact ordinary precedence.
+                mainApp.UseMiddleware<SlopTank.ExternalAuth.ExternalAuthCookieTransportMiddleware>();
 
                 mainApp.UseResponseCompression();
 

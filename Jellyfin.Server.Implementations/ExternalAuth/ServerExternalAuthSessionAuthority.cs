@@ -39,7 +39,7 @@ namespace Jellyfin.Server.Implementations.ExternalAuth;
 /// </summary>
 public sealed class ServerExternalAuthSessionAuthority : IExternalAuthSessionAuthority
 {
-    private readonly IServerConfigurationManager _configurationManager;
+    private readonly ServerExternalAuthCredentialReader _credentialReader;
     private readonly IDeviceManager _deviceManager;
     private readonly IUserManager _userManager;
     private readonly IDbContextFactory<JellyfinDbContext> _dbProvider;
@@ -61,7 +61,7 @@ public sealed class ServerExternalAuthSessionAuthority : IExternalAuthSessionAut
         IDbContextFactory<JellyfinDbContext> dbProvider,
         ILogger<ServerExternalAuthSessionAuthority> logger)
     {
-        _configurationManager = configurationManager;
+        _credentialReader = new ServerExternalAuthCredentialReader(configurationManager);
         _deviceManager = deviceManager;
         _userManager = userManager;
         _dbProvider = dbProvider;
@@ -147,7 +147,7 @@ public sealed class ServerExternalAuthSessionAuthority : IExternalAuthSessionAut
             return ExternalAuthSessionRevalidation.Revoked;
         }
 
-        if (device.UserId != reference.UserId
+        if (!device.UserId.Equals(reference.UserId)
             || !string.Equals(device.DeviceId, reference.DeviceId, StringComparison.Ordinal))
         {
             // The token no longer resolves to the exact user and device the
@@ -182,114 +182,12 @@ public sealed class ServerExternalAuthSessionAuthority : IExternalAuthSessionAut
     /// <returns>The presented credentials, highest precedence first.</returns>
     private List<PresentedCredential> EnumeratePresentedCredentials(HttpRequest request)
     {
-        var legacy = _configurationManager.Configuration.EnableLegacyAuthorization;
-        var presented = new List<PresentedCredential>();
-
-        var authorizationHeader = request.Headers.Authorization.ToString();
-        if (!string.IsNullOrEmpty(authorizationHeader))
-        {
-            var fields = ParseAuthorizationHeader(authorizationHeader, legacy);
-            if (fields is null)
-            {
-                presented.Add(new PresentedCredential(ExternalAuthTransport.AuthorizationHeader, null, Malformed: true));
-            }
-            else if (fields.TryGetValue("Token", out var token) && !string.IsNullOrEmpty(token))
-            {
-                presented.Add(new PresentedCredential(ExternalAuthTransport.AuthorizationHeader, token, Malformed: false));
-            }
-            else
-            {
-                // A MediaBrowser header without a Token parameter carries
-                // client identity only; the authorization context treats it
-                // as no credential, and so does capture.
-                presented.Add(new PresentedCredential(ExternalAuthTransport.AuthorizationHeader, null, Malformed: false));
-            }
-        }
-
-        if (legacy)
-        {
-            var legacyHeader = request.Headers["X-Emby-Authorization"].ToString();
-            if (!string.IsNullOrEmpty(legacyHeader))
-            {
-                var fields = ParseAuthorizationHeader(legacyHeader, legacy);
-                if (fields is null || !fields.TryGetValue("Token", out var token) || string.IsNullOrEmpty(token))
-                {
-                    presented.Add(new PresentedCredential(ExternalAuthTransport.LegacyHeader, null, Malformed: fields is null));
-                }
-                else
-                {
-                    presented.Add(new PresentedCredential(ExternalAuthTransport.LegacyHeader, token, Malformed: false));
-                }
-            }
-
-            AddPlainTokenHeader(presented, request, "X-Emby-Token", ExternalAuthTransport.LegacyHeader);
-            AddPlainTokenHeader(presented, request, "X-MediaBrowser-Token", ExternalAuthTransport.LegacyHeader);
-        }
-
-        AddApiKeyQuery(presented, request, "ApiKey");
-        if (legacy)
-        {
-            AddApiKeyQuery(presented, request, "api_key");
-        }
-
-        // Entries that presented no credential value at all are not
-        // credentials; drop them.
-        return presented
-            .Where(static c => c.Malformed || c.Token is not null || c.Transport == ExternalAuthTransport.ApiKeyQuery)
+        // The shared auth-transport reader is the single enumeration both
+        // capture and the cookie transport consume; no parser drift.
+        return _credentialReader
+            .Enumerate(request)
+            .Select(static c => new PresentedCredential(c.Transport, c.Token, c.Malformed))
             .ToList();
-    }
-
-    private static void AddPlainTokenHeader(
-        List<PresentedCredential> presented,
-        HttpRequest request,
-        string headerName,
-        ExternalAuthTransport transport)
-    {
-        var value = request.Headers[headerName].ToString();
-        if (!string.IsNullOrEmpty(value))
-        {
-            presented.Add(new PresentedCredential(transport, value, Malformed: false));
-        }
-    }
-
-    private static void AddApiKeyQuery(
-        List<PresentedCredential> presented,
-        HttpRequest request,
-        string name)
-    {
-        if (request.Query.TryGetValue(name, out var value) && !string.IsNullOrEmpty(value))
-        {
-            // Recorded with its (opaque) value so a mixed API key and user
-            // token can never be mistaken for a single credential; the value
-            // itself is never logged.
-            presented.Add(new PresentedCredential(ExternalAuthTransport.ApiKeyQuery, value.ToString(), Malformed: false));
-        }
-    }
-
-    /// <summary>
-    /// Parses a MediaBrowser/Emby authorization header with the real
-    /// <see cref="AuthorizationContext"/> parser and scheme rules.
-    /// </summary>
-    /// <param name="headerValue">The raw header value.</param>
-    /// <param name="legacy">Whether the legacy Emby scheme is enabled.</param>
-    /// <returns>The parsed fields, or null when the scheme is not valid.</returns>
-    private static Dictionary<string, string>? ParseAuthorizationHeader(string headerValue, bool legacy)
-    {
-        var firstSpace = headerValue.IndexOf(' ', StringComparison.Ordinal);
-        if (firstSpace == -1)
-        {
-            return null;
-        }
-
-        var name = headerValue.AsSpan(0, firstSpace);
-        var validName = name.Equals("MediaBrowser", StringComparison.OrdinalIgnoreCase)
-            || (legacy && name.Equals("Emby", StringComparison.OrdinalIgnoreCase));
-        if (!validName)
-        {
-            return null;
-        }
-
-        return AuthorizationContext.GetParts(headerValue.AsSpan(firstSpace + 1));
     }
 
     /// <summary>

@@ -5,6 +5,7 @@ using System.Reflection;
 using Emby.Server.Implementations;
 using Emby.Server.Implementations.Session;
 using Jellyfin.Api.WebSocketListeners;
+using Jellyfin.Data;
 using Jellyfin.Database.Implementations;
 using Jellyfin.Drawing;
 using Jellyfin.Drawing.Skia;
@@ -103,8 +104,31 @@ namespace Jellyfin.Server
             // services, plus the server-backed session authority over the real
             // authorization path. Registered before plugin registrators run so
             // a plugin's fail-closed fallback authority can never replace it.
+            // The mint store with the host liveness probe: a handle whose
+            // underlying server session is gone (logout, user disable,
+            // token replacement) resolves as dead, closing both new
+            // requests and tracked open channels. Registered before the
+            // core TryAdd so exactly one store exists.
+            serviceCollection.AddSingleton(sp => new SlopTank.ExternalAuth.ExternalAuthSessionMintStore(
+                sp.GetRequiredService<SlopTank.ExternalAuth.ExternalAuthSessionMintOptions>())
+            {
+                SessionLivenessProbe = session =>
+                {
+                    var devices = sp.GetRequiredService<IDeviceManager>();
+                    var users = sp.GetRequiredService<IUserManager>();
+                    if (devices.GetDevices(new Jellyfin.Data.Queries.DeviceQuery { AccessToken = session.AccessToken }).Items.Count == 0)
+                    {
+                        return false;
+                    }
+
+                    var user = users.GetUserById(session.UserId);
+                    return user is not null && !user.HasPermission(Jellyfin.Database.Implementations.Enums.PermissionKind.IsDisabled);
+                },
+            });
             SlopTank.ExternalAuth.ServiceCollectionExtensions.AddSlopTankExternalAuth(serviceCollection);
             serviceCollection.AddSingleton<IExternalAuthSessionAuthority, ServerExternalAuthSessionAuthority>();
+            serviceCollection.AddSingleton<SlopTank.ExternalAuth.IExternalAuthCredentialReader, ServerExternalAuthCredentialReader>();
+            serviceCollection.AddSingleton<SlopTank.ExternalAuth.IExternalAuthSessionMinter, ExternalAuthSessionMinter>();
 
             serviceCollection.AddScoped<IAuthenticationManager, AuthenticationManager>();
 

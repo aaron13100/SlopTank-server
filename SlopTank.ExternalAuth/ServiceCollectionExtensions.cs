@@ -44,6 +44,8 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton(endpointOptions);
         services.TryAddSingleton<IExternalLoginProviderRegistry, ExternalLoginProviderRegistry>();
         services.TryAddSingleton<ExternalAuthTransportPolicy>();
+        services.TryAddSingleton(new ExternalAuthSessionMintOptions());
+        services.TryAddSingleton<ExternalAuthSessionMintStore>();
         services.TryAddSingleton<IExternalAuthFlowService>(sp => new ExternalAuthFlowService(
             sp.GetRequiredService<ExternalAuthTransportPolicy>(),
             sp.GetRequiredService<ExternalAuthFlowOptions>()));

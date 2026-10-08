@@ -144,7 +144,8 @@ public sealed class ExternalAuthController : ControllerBase
             registration.Descriptor.Id,
             registration.Descriptor.Epoch,
             mode,
-            sessionReference);
+            sessionReference,
+            client);
         if (!begin.IsStarted)
         {
             return ErrorRedirect(begin.RefusalCode);

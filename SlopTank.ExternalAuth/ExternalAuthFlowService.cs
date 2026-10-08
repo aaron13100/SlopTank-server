@@ -55,6 +55,11 @@ public sealed record ExternalAuthFlowRecord
     /// flows; null for login flows.</summary>
     public ExternalAuthSessionReference? SessionReference { get; init; }
 
+    /// <summary>Gets the client identity the begin request supplied, so a
+    /// completed login flow can mint its session under the client fields
+    /// the browser actually presented. Carries no credential.</summary>
+    public ExternalLoginClient? Client { get; init; }
+
     /// <summary>Gets the creation time.</summary>
     public required DateTimeOffset CreatedAt { get; init; }
 
@@ -175,13 +180,16 @@ public interface IExternalAuthFlowService
     /// <param name="mode">The flow mode.</param>
     /// <param name="sessionReference">The captured originating session for
     /// link flows; must be null for login flows.</param>
+    /// <param name="client">The client identity the begin request
+    /// supplied; recorded on the flow for the completing callback.</param>
     /// <returns>The started flow or a typed refusal.</returns>
     ExternalAuthBeginOutcome BeginFlow(
         HttpContext httpContext,
         string providerId,
         long providerEpoch,
         ExternalLoginFlowMode mode,
-        ExternalAuthSessionReference? sessionReference);
+        ExternalAuthSessionReference? sessionReference,
+        ExternalLoginClient? client = null);
 
     /// <summary>
     /// Consumes a flow at callback time: looks up the pending record,
@@ -252,7 +260,8 @@ public sealed class ExternalAuthFlowService : IExternalAuthFlowService
         string providerId,
         long providerEpoch,
         ExternalLoginFlowMode mode,
-        ExternalAuthSessionReference? sessionReference)
+        ExternalAuthSessionReference? sessionReference,
+        ExternalLoginClient? client = null)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
         if (string.IsNullOrWhiteSpace(providerId))
@@ -302,6 +311,7 @@ public sealed class ExternalAuthFlowService : IExternalAuthFlowService
                 ProviderEpoch = providerEpoch,
                 Mode = mode,
                 SessionReference = sessionReference,
+                Client = client,
                 CreatedAt = now,
                 ExpiresAt = now + Options.FlowTimeToLive,
             };

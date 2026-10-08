@@ -1,9 +1,11 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-01, 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-01, 2026-10-07, 2026-10-08.
 using System;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Permalinks;
@@ -15,6 +17,9 @@ namespace Emby.Server.Implementations.Permalinks;
 /// <summary>Publishes immutable, manifest-bound public authority snapshots.</summary>
 internal sealed class PermalinkAuthoritySnapshotPublisher : IPermalinkAuthorityGenerationOracle, IDisposable
 {
+    private static readonly Regex GenerationNameRegex =
+        new("g-(?<generation>[1-9][0-9]*)-(?<nonce>[0-9a-f]{32})", RegexOptions.Compiled);
+
     private readonly PermalinkAuthorityStore _authority;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _publicationLock = new(1, 1);
@@ -60,6 +65,80 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IPermalinkAuthorityG
             reader.GetInt64(2),
             reader.GetInt64(3),
             PermalinkAuthoritySchema.SupportedProtocolEpoch);
+    }
+
+    /// <summary>
+    /// Gets a value indicating whether <c>CURRENT</c> already publishes the live authority:
+    /// same authority id, schema epoch, content epoch and journal counter. Any missing,
+    /// malformed or foreign pointer reads as stale so the lifecycle republishes rather than
+    /// trusting an unverified file. This is a bounded freshness probe, never a validation of
+    /// the published bytes; readers keep their own fail-closed validation.
+    /// </summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>Whether the published pointer matches the live authority counters.</returns>
+    internal async Task<bool> IsCurrentFreshAsync(CancellationToken cancellationToken)
+    {
+        string pointer;
+        try
+        {
+            pointer = await File.ReadAllTextAsync(
+                Path.Combine(_snapshotRoot, "CURRENT"), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+
+        if (!pointer.EndsWith('\n') || pointer.Count(character => character == '\n') != 1)
+        {
+            return false;
+        }
+
+        var name = pointer[..^1];
+        if (!GenerationNameRegex.IsMatch(name))
+        {
+            return false;
+        }
+
+        var directory = Path.Combine(_snapshotRoot, name);
+        var manifestPath = Path.Combine(directory, "manifest.json");
+        if (!Directory.Exists(directory)
+            || !File.Exists(manifestPath)
+            || !File.Exists(Path.Combine(directory, "authority.db")))
+        {
+            return false;
+        }
+
+        PermalinkAuthorityGeneration manifest;
+        try
+        {
+            manifest = JsonSerializer.Deserialize<PermalinkAuthorityGeneration>(
+                await File.ReadAllTextAsync(manifestPath, cancellationToken).ConfigureAwait(false))
+                ?? throw new JsonException();
+        }
+        catch (Exception exception) when (exception is JsonException or IOException)
+        {
+            return false;
+        }
+
+        await _authority.EnsureAvailableAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT content_epoch, journal_counter FROM AuthorityCounters WHERE singleton = 1";
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        var authorityId = await ReadAuthorityIdAsync(_authority.AuthorityRoot, cancellationToken)
+            .ConfigureAwait(false);
+        return manifest.Generation == long.Parse(
+                GenerationNameRegex.Match(name).Groups["generation"].Value, CultureInfo.InvariantCulture)
+            && manifest.AuthorityId == authorityId
+            && manifest.SchemaEpoch == PermalinkAuthoritySchema.SupportedProtocolEpoch
+            && manifest.ContentEpoch == reader.GetInt64(0)
+            && manifest.JournalCounter == reader.GetInt64(1);
     }
 
     /// <summary>Publishes one database/manifest pair and atomically advances CURRENT.</summary>
@@ -139,8 +218,12 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IPermalinkAuthorityG
         {
             throw;
         }
-        catch (Exception exception) when (exception is IOException or SqliteException)
+        catch (Exception exception)
+            when (exception is IOException or UnauthorizedAccessException or SqliteException)
         {
+            // UnauthorizedAccessException is how POSIX EISDIR ("path is a directory")
+            // surfaces from File.WriteAllTextAsync, so it belongs to the same typed
+            // publication-failure boundary as ordinary IO errors.
             throw new PermalinkException(
                 PermalinkErrorKind.Unavailable,
                 "authority-snapshot-unavailable",
@@ -233,11 +316,8 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IPermalinkAuthorityG
         SqliteConnection connection,
         CancellationToken cancellationToken)
     {
-        var authorityDocument = JsonDocument.Parse(await File.ReadAllBytesAsync(
-            Path.Combine(_authority.AuthorityRoot, "authority.json"), cancellationToken)
-            .ConfigureAwait(false));
-        var authorityId = authorityDocument.RootElement.GetProperty("authority_id").GetString()
-            ?? throw new InvalidDataException("authority.json lacks authority_id");
+        var authorityId = await ReadAuthorityIdAsync(_authority.AuthorityRoot, cancellationToken)
+            .ConfigureAwait(false);
         var created = _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture);
         await using var counters = connection.CreateCommand();
         counters.CommandText = "SELECT content_epoch, journal_counter FROM AuthorityCounters WHERE singleton = 1";
@@ -274,5 +354,20 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IPermalinkAuthorityG
             created,
             0,
             string.Empty);
+    }
+
+    /// <summary>Reads the authority identity the snapshot must be bound to.</summary>
+    /// <param name="authorityRoot">The authority root directory.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The authority id from authority.json.</returns>
+    private static async Task<string> ReadAuthorityIdAsync(
+        string authorityRoot,
+        CancellationToken cancellationToken)
+    {
+        using var document = JsonDocument.Parse(await File.ReadAllBytesAsync(
+            Path.Combine(authorityRoot, "authority.json"), cancellationToken)
+            .ConfigureAwait(false));
+        return document.RootElement.GetProperty("authority_id").GetString()
+            ?? throw new InvalidDataException("authority.json lacks authority_id");
     }
 }

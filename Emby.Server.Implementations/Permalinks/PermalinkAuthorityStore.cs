@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-09-03, 2026-09-09, 2026-09-10, 2026-09-19, 2026-10-01, 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-09-03, 2026-09-09, 2026-09-10, 2026-09-19, 2026-10-01, 2026-10-07, 2026-10-08.
 using System;
 using System.Globalization;
 using System.IO;
@@ -80,6 +80,14 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         : this(new ConfigurationPermalinkAuthorityRootProvider(configuration), fileSystem, timeProvider)
     {
     }
+
+    /// <summary>
+    /// Raised whenever one authorized write scope completes. The authority counters may
+    /// have advanced (also when the owning transaction later rolls back), which is the
+    /// production signal the snapshot publication lifecycle refreshes on. Raised
+    /// synchronously on the releasing thread: handlers must never block.
+    /// </summary>
+    internal event Action? AuthorizedWriteCompleted;
 
     /// <summary>
     /// Gets the configured authority root, resolved through the provider seam
@@ -612,6 +620,11 @@ internal sealed class PermalinkAuthorityStore : IDisposable
                 cleanup.CommandText = "DELETE FROM AuthorityWriteAuthorizations WHERE nonce = $nonce";
                 cleanup.Parameters.AddWithValue("$nonce", scope.Nonce);
                 _ = cleanup.ExecuteNonQuery();
+                // The capability MAC is gone, so the authorized write is over whether or
+                // not its transaction commits: the counters may have advanced, which is
+                // exactly the condition the publication lifecycle refreshes on. Handlers
+                // must not block (they can run inside the writer's transaction scope).
+                AuthorizedWriteCompleted?.Invoke();
             });
             return scope;
         }

@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-08.
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -12,6 +13,7 @@ using Jellyfin.Server.Implementations.Activity;
 using Jellyfin.Server.Implementations.Devices;
 using Jellyfin.Server.Implementations.Events;
 using Jellyfin.Server.Implementations.Extensions;
+using Jellyfin.Server.Implementations.ExternalAuth;
 using Jellyfin.Server.Implementations.Security;
 using Jellyfin.Server.Implementations.Trickplay;
 using Jellyfin.Server.Implementations.Users;
@@ -31,6 +33,7 @@ using MediaBrowser.Providers.Lyric;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using SlopTank.ExternalAuth;
 
 namespace Jellyfin.Server
 {
@@ -96,6 +99,13 @@ namespace Jellyfin.Server
 
             serviceCollection.AddSingleton<IAuthorizationContext, AuthorizationContext>();
 
+            // SlopTank external-login seam: the generic provider-neutral core
+            // services, plus the server-backed session authority over the real
+            // authorization path. Registered before plugin registrators run so
+            // a plugin's fail-closed fallback authority can never replace it.
+            SlopTank.ExternalAuth.ServiceCollectionExtensions.AddSlopTankExternalAuth(serviceCollection);
+            serviceCollection.AddSingleton<IExternalAuthSessionAuthority, ServerExternalAuthSessionAuthority>();
+
             serviceCollection.AddScoped<IAuthenticationManager, AuthenticationManager>();
 
             foreach (var type in GetExportTypes<ILyricProvider>())
@@ -121,7 +131,7 @@ namespace Jellyfin.Server
             yield return typeof(JellyfinDbContext).Assembly;
 
             // Jellyfin.Server.Implementations
-            yield return typeof(ServiceCollectionExtensions).Assembly;
+            yield return typeof(Jellyfin.Server.Implementations.Extensions.ServiceCollectionExtensions).Assembly;
 
             // Jellyfin.LiveTv
             yield return typeof(LiveTvManager).Assembly;

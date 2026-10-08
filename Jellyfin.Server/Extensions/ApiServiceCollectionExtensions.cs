@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-08, 2026-09-09, 2026-10-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-08, 2026-09-09, 2026-10-04, 2026-10-08.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -166,6 +166,12 @@ namespace Jellyfin.Server.Extensions
             {
                 mvcBuilder.AddApplicationPart(pluginAssembly);
             }
+
+            // SlopTank: the external-login seam controller surface. Added
+            // explicitly like the StartupController part above so the seam's
+            // provider-neutral endpoints exist whenever the seam services are
+            // registered, independent of any plugin.
+            mvcBuilder.AddApplicationPart(typeof(SlopTank.ExternalAuth.ExternalAuthController).Assembly);
 
             return mvcBuilder.AddControllersAsServices();
         }

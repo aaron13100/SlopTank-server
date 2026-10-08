@@ -213,12 +213,20 @@ public sealed class ExternalLoginProviderRegistry : IExternalLoginProviderRegist
                 return ExternalLoginRegisterResult.StaleEpoch(current.Descriptor.Epoch);
             }
 
-            if (current is not null
-                && descriptor.Epoch == current.Descriptor.Epoch
-                && descriptor == current.Descriptor
-                && ReferenceEquals(provider, current.Provider))
+            if (current is not null && descriptor.Epoch == current.Descriptor.Epoch)
             {
-                return ExternalLoginRegisterResult.Registered(current.Descriptor.Epoch);
+                // An epoch identifies exactly one configuration generation:
+                // a same-epoch registration is only ever the byte-identical
+                // idempotent re-registration. A DIFFERENT descriptor under
+                // the same epoch is refused, because pending flows bound to
+                // that epoch must never complete against a configuration
+                // they were not started under.
+                if (descriptor == current.Descriptor && ReferenceEquals(provider, current.Provider))
+                {
+                    return ExternalLoginRegisterResult.Registered(current.Descriptor.Epoch);
+                }
+
+                return ExternalLoginRegisterResult.StaleEpoch(current.Descriptor.Epoch);
             }
 
             _live[descriptor.Id] = new ExternalLoginProviderRegistration(descriptor, provider);

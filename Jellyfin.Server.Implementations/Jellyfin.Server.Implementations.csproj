@@ -1,3 +1,4 @@
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-10-08. -->
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
@@ -36,6 +37,7 @@
     <ProjectReference Include="..\MediaBrowser.Model\MediaBrowser.Model.csproj" />
     <ProjectReference Include="..\src\Jellyfin.Database\Jellyfin.Database.Implementations\Jellyfin.Database.Implementations.csproj" />
     <ProjectReference Include="..\src\Jellyfin.Database\Jellyfin.Database.Providers.Sqlite\Jellyfin.Database.Providers.Sqlite.csproj" />
+    <ProjectReference Include="..\SlopTank.ExternalAuth\SlopTank.ExternalAuth.csproj" />
   </ItemGroup>
 
 </Project>

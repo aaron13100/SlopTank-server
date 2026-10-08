@@ -1,6 +1,7 @@
 // SlopTank modification notice: added or changed by SlopTank on 2026-10-08.
 
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 
 namespace SlopTank.ExternalAuth;
 
@@ -18,22 +19,26 @@ public sealed class ExternalAuthController : ControllerBase
     private readonly IExternalAuthFlowService _flows;
     private readonly IExternalAuthSessionAuthority _sessionAuthority;
     private readonly ExternalAuthEndpointsOptions _options;
+    private readonly ILogger<ExternalAuthController> _logger;
 
     /// <summary>Initializes the controller.</summary>
     /// <param name="registry">The provider registry.</param>
     /// <param name="flows">The per-flow correlation service.</param>
     /// <param name="sessionAuthority">The session capture authority.</param>
     /// <param name="options">Endpoint options.</param>
+    /// <param name="logger">The logger.</param>
     public ExternalAuthController(
         IExternalLoginProviderRegistry registry,
         IExternalAuthFlowService flows,
         IExternalAuthSessionAuthority sessionAuthority,
-        ExternalAuthEndpointsOptions options)
+        ExternalAuthEndpointsOptions options,
+        ILogger<ExternalAuthController> logger)
     {
         _registry = registry;
         _flows = flows;
         _sessionAuthority = sessionAuthority;
         _options = options;
+        _logger = logger;
     }
 
     /// <summary>
@@ -162,9 +167,16 @@ public sealed class ExternalAuthController : ControllerBase
             return StatusCode(499);
         }
 #pragma warning disable CA1031 // a misbehaving provider must not crash the auth surface
-        catch (Exception)
+        catch (Exception ex)
 #pragma warning restore CA1031
         {
+            // The sanitized redirect must not leak provider internals, but
+            // the failure itself has to reach the log or a broken provider
+            // becomes undiagnosable in production.
+            _logger.LogError(
+                ex,
+                "External-login provider {ProviderId} threw while creating a challenge",
+                registration.Descriptor.Id);
             return ErrorRedirect(ExternalAuthErrorCode.ChallengeFailed);
         }
 

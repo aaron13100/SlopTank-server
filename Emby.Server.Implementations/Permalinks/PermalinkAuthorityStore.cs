@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-09-03, 2026-09-09, 2026-09-10, 2026-09-19, 2026-10-01, 2026-10-07, 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-09-03, 2026-09-09, 2026-09-10, 2026-09-19, 2026-10-01, 2026-10-07, 2026-10-08, 2026-10-10.
 using System;
 using System.Globalization;
 using System.IO;
@@ -501,8 +501,11 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// path, so the pool is emptied before the derived paths re-resolve:
     /// ClearPool closes idle pooled connections and marks in-use ones for
     /// destruction at close, and a failure to close propagates rather than
-    /// being swallowed. Provision state and the liveness stamp are cleared so
-    /// the next operation re-provisions against the new root.
+    /// being swallowed. The provisioning lock makes the reset the last writer
+    /// of provision state: an older in-flight provision cannot restore
+    /// <c>_provisioned</c> after this method clears it for the new root.
+    /// Provision state and the liveness stamp are cleared so the next
+    /// operation re-provisions against the new root.
     /// </summary>
     /// <param name="root">The authority root the provider must already resolve to.</param>
     internal void ResetTo(string root)
@@ -514,16 +517,24 @@ internal sealed class PermalinkAuthorityStore : IDisposable
                 $"Cannot reset the permalink authority to '{root}': the authority root provider currently resolves '{_rootProvider.AuthorityRoot ?? "<none>"}'. Swap the provider value before calling ResetTo.");
         }
 
-        var previousDatabasePath = _lastOpenedDatabasePath;
-        if (previousDatabasePath is not null)
+        _provisionLock.Wait();
+        try
         {
-            SqliteConnection.ClearPool(new SqliteConnection($"Data Source={previousDatabasePath};Pooling=True"));
-        }
+            var previousDatabasePath = _lastOpenedDatabasePath;
+            if (previousDatabasePath is not null)
+            {
+                SqliteConnection.ClearPool(new SqliteConnection($"Data Source={previousDatabasePath};Pooling=True"));
+            }
 
-        _lastOpenedDatabasePath = null;
-        _provisioned = false;
-        _lastValidatedTicks = 0;
-        _ = Interlocked.Increment(ref _authorityScopeGeneration);
+            _lastOpenedDatabasePath = null;
+            _provisioned = false;
+            _lastValidatedTicks = 0;
+            _ = Interlocked.Increment(ref _authorityScopeGeneration);
+        }
+        finally
+        {
+            _provisionLock.Release();
+        }
     }
 
     /// <summary>Opens an initialized authority connection with typed availability failures.</summary>

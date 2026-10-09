@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09, 2026-10-03, 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09, 2026-10-03, 2026-10-08, 2026-10-09.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -62,6 +62,7 @@ internal sealed class PermalinkPathMutation
     {
         var bundle = RequireBundle(operation);
         ValidateDestinations(bundle);
+        var destinationParent = ResolveDestinationParent(operation, item, bundle);
         await using (var leases = await AcquireAsync(bundle, cancellationToken).ConfigureAwait(false))
         {
             await VerifyOldAsync(operation, item, cancellationToken).ConfigureAwait(false);
@@ -96,7 +97,7 @@ internal sealed class PermalinkPathMutation
             }
         }
 
-        return await CompleteAsync(operation, item, bundle, cancellationToken)
+        return await CompleteAsync(operation, item, bundle, destinationParent, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -111,6 +112,7 @@ internal sealed class PermalinkPathMutation
         CancellationToken cancellationToken)
     {
         var bundle = RequireBundle(operation);
+        var destinationParent = ResolveDestinationParent(operation, item, bundle);
         var allSources = bundle.Parts.All(part =>
             File.Exists(part.SourcePath) || Directory.Exists(part.SourcePath));
         var allDestinations = bundle.Parts.All(part =>
@@ -130,7 +132,7 @@ internal sealed class PermalinkPathMutation
             {
                 await RequireClaimsAsync(bundle, operation.OperationId, cancellationToken)
                     .ConfigureAwait(false);
-                return await CompleteAsync(operation, item, bundle, cancellationToken)
+                return await CompleteAsync(operation, item, bundle, destinationParent, cancellationToken)
                     .ConfigureAwait(false);
             }
 
@@ -156,7 +158,7 @@ internal sealed class PermalinkPathMutation
             await _crossRoot.PublishAsync(operation, bundle, leases, cancellationToken).ConfigureAwait(false);
         }
 
-        return await CompleteAsync(operation, item, bundle, cancellationToken)
+        return await CompleteAsync(operation, item, bundle, destinationParent, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -164,14 +166,11 @@ internal sealed class PermalinkPathMutation
         PermalinkOperationDocument operation,
         BaseItem item,
         PermalinkMutationBundle bundle,
+        Folder destinationParent,
         CancellationToken cancellationToken)
     {
-        var main = bundle.Parts.FirstOrDefault(part => part.Role == "main");
-        var itemDestination = main?.DestinationPath ?? operation.DestinationPath;
-        if (itemDestination is null)
-        {
-            throw Conflict("destination-missing", "The prepared path bundle has no item destination.");
-        }
+        var itemDestination = RequireItemDestination(operation, bundle);
+        var sourceParent = item.GetParent() as Folder;
 
         item.Path = itemDestination;
         if (item is Video video)
@@ -183,11 +182,17 @@ internal sealed class PermalinkPathMutation
         }
 
         await ReprobeCurrentGenerationAsync(item, cancellationToken).ConfigureAwait(false);
+        item.SetParent(destinationParent);
         await _libraryManager.UpdateItemAsync(
             item,
-            item.GetParent()!,
+            destinationParent,
             ItemUpdateType.MetadataEdit,
             cancellationToken).ConfigureAwait(false);
+        if (sourceParent is not null && !sourceParent.Id.Equals(destinationParent.Id))
+        {
+            sourceParent.Children = null;
+        }
+
         // The commit repointed the row to a new physical generation: re-register the
         // persisted row so the GetItemById-cached instance (the seam PlaybackInfo and
         // the visible-item paths resolve) serves the same generation it just adopted.
@@ -204,6 +209,54 @@ internal sealed class PermalinkPathMutation
             cancellationToken).ConfigureAwait(false);
         await WriteTerminalPhasesAsync(operation, cancellationToken).ConfigureAwait(false);
         return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
+    }
+
+    /// <summary>
+    /// Resolves the persisted parent that owns the destination slot before any physical
+    /// publication begins. A path move changes both coordinates of a library row: its
+    /// path and its parent. Persisting only the path leaves the row invisible to the
+    /// destination scanner, which then creates a new path-derived identity.
+    /// </summary>
+    private Folder ResolveDestinationParent(
+        PermalinkOperationDocument operation,
+        BaseItem item,
+        PermalinkMutationBundle bundle)
+    {
+        var itemDestination = RequireItemDestination(operation, bundle);
+        var parentPath = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(itemDestination));
+        if (string.IsNullOrWhiteSpace(parentPath))
+        {
+            throw Conflict(
+                "destination-parent-missing",
+                $"Prepared destination '{itemDestination}' has no parent directory.");
+        }
+
+        var currentParent = item.GetParent();
+        if (currentParent is Folder currentFolder
+            && string.Equals(
+                Path.GetFullPath(currentFolder.Path),
+                Path.GetFullPath(parentPath),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return currentFolder;
+        }
+
+        return _libraryManager.FindByPath(parentPath, isFolder: true) as Folder
+            ?? throw Conflict(
+                "destination-parent-unindexed",
+                $"Prepared destination parent '{parentPath}' is not an indexed library folder.");
+    }
+
+    private static string RequireItemDestination(
+        PermalinkOperationDocument operation,
+        PermalinkMutationBundle bundle)
+    {
+        var main = bundle.Parts.FirstOrDefault(part => part.Role == "main");
+        return main?.DestinationPath
+            ?? operation.DestinationPath
+            ?? throw Conflict(
+                "destination-missing",
+                "The prepared path bundle has no item destination.");
     }
 
     /// <summary>

@@ -335,6 +335,15 @@ internal sealed class PermalinkPathMutation
         }
 
         var normalizedParent = NormalizePath(parentPath);
+        if (_libraryManager.FindByPath(normalizedParent, isFolder: true) is Folder exactParent
+            && string.Equals(
+                NormalizePath(exactParent.Path),
+                normalizedParent,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return exactParent;
+        }
+
         var physicalRoot = _libraryManager.GetUserRootFolder().Children
             .OfType<CollectionFolder>()
             .SelectMany(collection => collection.PhysicalFolderIds)

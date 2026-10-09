@@ -71,7 +71,11 @@ internal sealed class PermalinkPathMutation
     {
         var bundle = RequireBundle(operation);
         ValidateDestinations(bundle);
-        var destinationParent = ResolveDestinationParent(operation, item, bundle);
+        var destinationParent = await ResolveDestinationParentAsync(
+            operation,
+            item,
+            bundle,
+            cancellationToken).ConfigureAwait(false);
         await using (var leases = await AcquireAsync(bundle, cancellationToken).ConfigureAwait(false))
         {
             await VerifyOldAsync(operation, item, cancellationToken).ConfigureAwait(false);
@@ -121,7 +125,11 @@ internal sealed class PermalinkPathMutation
         CancellationToken cancellationToken)
     {
         var bundle = RequireBundle(operation);
-        var destinationParent = ResolveDestinationParent(operation, item, bundle);
+        var destinationParent = await ResolveDestinationParentAsync(
+            operation,
+            item,
+            bundle,
+            cancellationToken).ConfigureAwait(false);
         var allSources = bundle.Parts.All(part =>
             File.Exists(part.SourcePath) || Directory.Exists(part.SourcePath));
         var allDestinations = bundle.Parts.All(part =>
@@ -310,10 +318,11 @@ internal sealed class PermalinkPathMutation
     /// path and its parent. Persisting only the path leaves the row invisible to the
     /// destination scanner, which then creates a new path-derived identity.
     /// </summary>
-    private Folder ResolveDestinationParent(
+    private async Task<Folder> ResolveDestinationParentAsync(
         PermalinkOperationDocument operation,
         BaseItem item,
-        PermalinkMutationBundle bundle)
+        PermalinkMutationBundle bundle,
+        CancellationToken cancellationToken)
     {
         var itemDestination = RequireItemDestination(operation, bundle);
         var parentPath = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(itemDestination));
@@ -344,21 +353,76 @@ internal sealed class PermalinkPathMutation
             return exactParent;
         }
 
-        var physicalRoot = _libraryManager.GetUserRootFolder().Children
+        var collections = _libraryManager.GetUserRootFolder().Children
             .OfType<CollectionFolder>()
-            .SelectMany(collection => collection.PhysicalFolderIds)
-            .Distinct()
-            .Select(_libraryManager.GetItemById)
-            .OfType<Folder>()
-            .Where(folder => !string.IsNullOrWhiteSpace(folder.Path)
-                && IsWithinPath(folder.Path, normalizedParent))
-            .OrderByDescending(folder => NormalizePath(folder.Path).Length)
+            .ToArray();
+        var registeredRoots = collections
+            .SelectMany(collection => collection.PhysicalFolderIds
+                .Select(_libraryManager.GetItemById)
+                .OfType<Folder>()
+                .Select(folder => (
+                    Collection: collection,
+                    Path: folder.Path,
+                    Folder: (Folder?)folder)));
+        var configuredRoots = collections
+            .SelectMany(collection => collection.PhysicalLocations
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Select(path => (
+                    Collection: collection,
+                    Path: path,
+                    Folder: (Folder?)null)));
+        var root = registeredRoots
+            .Concat(configuredRoots)
+            .Where(candidate => IsWithinPath(candidate.Path, normalizedParent))
+            .OrderByDescending(candidate => NormalizePath(candidate.Path).Length)
+            .ThenBy(candidate => candidate.Folder is null)
+            .ThenBy(candidate => candidate.Collection.Id)
             .FirstOrDefault();
-        if (physicalRoot is null)
+        if (root.Collection is null)
         {
             throw Conflict(
                 "destination-parent-unindexed",
                 $"Prepared destination parent '{parentPath}' is outside every indexed physical library root.");
+        }
+
+        var physicalRoot = root.Folder
+            ?? _libraryManager.FindByPath(root.Path, isFolder: true) as Folder;
+        if (physicalRoot is null)
+        {
+            if (!Directory.Exists(root.Path))
+            {
+                throw Conflict(
+                    "destination-parent-unindexed",
+                    $"Configured library root '{root.Path}' is unavailable for destination '{parentPath}'.");
+            }
+
+            var rootFolder = _libraryManager.RootFolder;
+            var physicalRootId = _libraryManager.GetNewItemId(root.Path, typeof(Folder));
+            physicalRoot = _libraryManager.GetItemById<Folder>(physicalRootId);
+            if (physicalRoot is null)
+            {
+                physicalRoot = new Folder
+                {
+                    Id = physicalRootId,
+                    Name = Path.GetFileName(Path.TrimEndingDirectorySeparator(root.Path)),
+                    Path = root.Path
+                };
+                physicalRoot.SetParent(rootFolder);
+                _libraryManager.CreateItem(physicalRoot, rootFolder);
+            }
+        }
+
+        if (!root.Collection.PhysicalFolderIds.Contains(physicalRoot.Id))
+        {
+            root.Collection.PhysicalFolderIds = root.Collection.PhysicalFolderIds
+                .Append(physicalRoot.Id)
+                .Distinct()
+                .ToArray();
+            await _libraryManager.UpdateItemAsync(
+                root.Collection,
+                root.Collection.GetParent()!,
+                ItemUpdateType.MetadataEdit,
+                cancellationToken).ConfigureAwait(false);
         }
 
         var normalizedRoot = NormalizePath(physicalRoot.Path);

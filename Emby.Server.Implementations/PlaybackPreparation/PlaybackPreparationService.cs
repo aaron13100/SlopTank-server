@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-08, 2026-10-09.
 // allow-no-test-found: private integration coverage is assigned to sloptank-tests/server/tests.
 #pragma warning disable CS1591
 #pragma warning disable SA1116
@@ -6,6 +6,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -99,27 +100,32 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
         }
 
         var path = _appHost.ExpandVirtualPath(item.Path);
+        if (!IsSupportedWorkerPath(path))
+        {
+            await RecordUnprobeableAsync(
+                db,
+                item,
+                path,
+                PermalinkObjectIdentity.Read(path) ?? "unsupported-media-path",
+                "unsupported_media_path",
+                now,
+                cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            RefreshCachedItem(item.Id);
+            return null;
+        }
+
         var identity = PermalinkObjectIdentity.Read(path);
         if (identity is null)
         {
-            item.PlaybackReadiness = PlaybackReadiness.Failed;
-            item.PlaybackReadyObjectIdentity = null;
-            item.PlaybackReadyAlgorithmVersion = null;
-            db.PlaybackPreparationAttempts.Add(new PlaybackPreparationAttemptEntity
-            {
-                RequestId = Guid.NewGuid(),
-                ItemId = item.Id,
-                NonceHash = HashNonce(Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant()),
-                RequestedObjectIdentity = "identity-unavailable",
-                RequestedPath = path,
-                Phase = PlaybackPreparationAttemptPhase.Failed,
-                CreatedAtUtc = now,
-                LeaseExpiresAtUtc = now,
-                Outcome = PlaybackPreparationContract.UnprobeableOutcome,
-                ReasonCode = "planner_unprobeable",
-                CompletedAtUtc = now
-            });
-            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await RecordUnprobeableAsync(
+                db,
+                item,
+                path,
+                "identity-unavailable",
+                "planner_unprobeable",
+                now,
+                cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             RefreshCachedItem(item.Id);
             return null;
@@ -142,6 +148,53 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return NewRequest(requestId, nonce, item.Id, path, identity);
+    }
+
+    private static bool IsSupportedWorkerPath(string path)
+    {
+        try
+        {
+            var attributes = File.GetAttributes(path);
+            return File.Exists(path)
+                && (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == 0;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static async Task RecordUnprobeableAsync(
+        JellyfinDbContext db,
+        BaseItemEntity item,
+        string path,
+        string requestedIdentity,
+        string reasonCode,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        item.PlaybackReadiness = PlaybackReadiness.Failed;
+        item.PlaybackReadyObjectIdentity = null;
+        item.PlaybackReadyAlgorithmVersion = null;
+        db.PlaybackPreparationAttempts.Add(new PlaybackPreparationAttemptEntity
+        {
+            RequestId = Guid.NewGuid(),
+            ItemId = item.Id,
+            NonceHash = HashNonce(Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant()),
+            RequestedObjectIdentity = requestedIdentity,
+            RequestedPath = path,
+            Phase = PlaybackPreparationAttemptPhase.Failed,
+            CreatedAtUtc = now,
+            LeaseExpiresAtUtc = now,
+            Outcome = PlaybackPreparationContract.UnprobeableOutcome,
+            ReasonCode = reasonCode,
+            CompletedAtUtc = now
+        });
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task SubmitResultAsync(Guid requestId, PlaybackPreparationResult result, CancellationToken cancellationToken)

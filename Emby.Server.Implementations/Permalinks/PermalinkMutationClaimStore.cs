@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-10-07, 2026-10-09.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -202,6 +202,108 @@ internal sealed class PermalinkMutationClaimStore
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Authorizes the exact path successor for every claimed binding.</summary>
+    /// <param name="bundle">The immutable path bundle.</param>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <param name="successors">The canonical successor event for each capsule.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    public async Task FinalizePathAsync(
+        PermalinkMutationBundle bundle,
+        Guid operationId,
+        IReadOnlyDictionary<Guid, PermalinkEventDocument> successors,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection
+            .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var claim in bundle.Claims)
+        {
+            var owner = await ReadOwnerAsync(connection, transaction, claim, cancellationToken)
+                .ConfigureAwait(false);
+            if (!string.Equals(owner, operationId.ToString("D"), StringComparison.Ordinal))
+            {
+                throw Conflict(
+                    "claim-owner-mismatch",
+                    $"Operation '{operationId}' does not own capsule '{claim.CapsuleId}'.");
+            }
+
+            if (!string.Equals(claim.Kind, "path", StringComparison.Ordinal)
+                || !successors.TryGetValue(claim.CapsuleId, out var successor)
+                || !successor.OperationId.Equals(operationId)
+                || !successor.BindingInstanceId.Equals(claim.BindingInstanceId)
+                || !Guid.TryParseExact(claim.Predecessor, "D", out var predecessor)
+                || !successor.PathAssignment.PreviousPathEventId.Equals(predecessor))
+            {
+                throw Conflict(
+                    "prepared-path-successor-mismatch",
+                    $"Operation '{operationId}' has no exact path successor for capsule '{claim.CapsuleId}'.");
+            }
+
+            var bytes = CanonicalJson.Serialize(successor);
+            await InsertPathDecisionAsync(
+                connection,
+                transaction,
+                claim,
+                operationId,
+                successor.PathAssignment.EventId,
+                CanonicalJson.Digest(bytes),
+                successor.CreatedAt,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task InsertPathDecisionAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        PermalinkMutationClaim claim,
+        Guid operationId,
+        Guid eventId,
+        string digest,
+        string createdAt,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT OR IGNORE INTO PathOperationDecisions
+                (operation_id, capsule_id, binding_id, predecessor, decision,
+                 event_id, event_digest, created_at)
+            VALUES
+                ($operation, $capsule, $binding, $predecessor, 'moved',
+                 $event, $digest, $created)
+            """;
+        command.Parameters.AddWithValue("$operation", operationId.ToString("D"));
+        command.Parameters.AddWithValue("$capsule", claim.CapsuleId.ToString("D"));
+        command.Parameters.AddWithValue("$binding", claim.BindingInstanceId.ToString("D"));
+        command.Parameters.AddWithValue("$predecessor", claim.Predecessor);
+        command.Parameters.AddWithValue("$event", eventId.ToString("D"));
+        command.Parameters.AddWithValue("$digest", digest);
+        command.Parameters.AddWithValue("$created", createdAt);
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        command.CommandText = """
+            SELECT decision, event_id, event_digest
+              FROM PathOperationDecisions
+             WHERE operation_id = $operation
+               AND capsule_id = $capsule
+               AND binding_id = $binding
+               AND predecessor = $predecessor
+            """;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            || !string.Equals(reader.GetString(0), "moved", StringComparison.Ordinal)
+            || !string.Equals(reader.GetString(1), eventId.ToString("D"), StringComparison.Ordinal)
+            || !string.Equals(reader.GetString(2), digest, StringComparison.Ordinal))
+        {
+            throw Conflict(
+                "path-operation-decision-mismatch",
+                $"Operation '{operationId}' already has a different path decision.");
+        }
     }
 
     private async Task InsertClaimAsync(

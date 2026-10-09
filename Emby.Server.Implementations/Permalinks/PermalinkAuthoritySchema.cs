@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-04, 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-04, 2026-10-07, 2026-10-09.
 using System;
 using System.Linq;
 using System.Threading;
@@ -595,20 +595,21 @@ internal static class PermalinkAuthoritySchema
         var operationId = candidate.Event.OperationId.ToString("D");
         var capsuleId = candidate.CapsuleId.ToString("D");
         var bindingId = candidate.BindingId.ToString("D");
+        var pathEventId = candidate.Event.PathAssignment.EventId.ToString("D");
         var commands = new[]
         {
-            "INSERT INTO ContentTransitionClaims VALUES ($capsule, 'genesis', $operation, $event, $digest, $created)",
-            "INSERT INTO OperationDecisions VALUES ($operation, $capsule, 'genesis', 'ready', $event, $digest, $created)",
-            "INSERT INTO PathOperationDecisions VALUES ($operation, $capsule, $binding, 'genesis', 'initialized', $event, $digest, $created)"
+            (Sql: "INSERT INTO ContentTransitionClaims VALUES ($capsule, 'genesis', $operation, $event, $digest, $created)", EventId: eventId),
+            (Sql: "INSERT INTO OperationDecisions VALUES ($operation, $capsule, 'genesis', 'ready', $event, $digest, $created)", EventId: eventId),
+            (Sql: "INSERT INTO PathOperationDecisions VALUES ($operation, $capsule, $binding, 'genesis', 'initialized', $event, $digest, $created)", EventId: pathEventId)
         };
-        foreach (var sql in commands)
+        foreach (var commandDefinition in commands)
         {
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
-            command.CommandText = sql;
+            command.CommandText = commandDefinition.Sql;
             command.Parameters.AddWithValue("$capsule", capsuleId);
             command.Parameters.AddWithValue("$operation", operationId);
-            command.Parameters.AddWithValue("$event", eventId);
+            command.Parameters.AddWithValue("$event", commandDefinition.EventId);
             command.Parameters.AddWithValue("$digest", digest);
             command.Parameters.AddWithValue("$created", candidate.CreatedAt);
             command.Parameters.AddWithValue("$binding", bindingId);

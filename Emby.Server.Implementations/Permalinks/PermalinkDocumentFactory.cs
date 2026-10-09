@@ -1,7 +1,8 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-10-03, 2026-10-09.
 using System;
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using MediaBrowser.Controller.Permalinks;
 
 namespace Emby.Server.Implementations.Permalinks;
@@ -129,7 +130,7 @@ internal sealed class PermalinkDocumentFactory
             request.ContentRoot,
             request.Leaves,
             snapshot.ContentHead.BindingInstanceId,
-            snapshot.ContentHead.PathAssignment,
+            snapshot.PathHead.PathAssignment,
             UtcNow());
     }
 
@@ -158,7 +159,7 @@ internal sealed class PermalinkDocumentFactory
             request.ContentRoot,
             request.Leaves,
             snapshot.ContentHead.BindingInstanceId,
-            snapshot.ContentHead.PathAssignment,
+            snapshot.PathHead.PathAssignment,
             UtcNow());
     }
 
@@ -211,7 +212,7 @@ internal sealed class PermalinkDocumentFactory
             request.ContentRoot,
             request.Leaves,
             snapshot.ContentHead.BindingInstanceId,
-            snapshot.ContentHead.PathAssignment,
+            snapshot.PathHead.PathAssignment,
             createdAt);
     }
 
@@ -240,7 +241,7 @@ internal sealed class PermalinkDocumentFactory
             snapshot.ContentHead.ContentRoot,
             snapshot.ContentHead.Leaves,
             reservation.BindingId,
-            snapshot.ContentHead.PathAssignment,
+            snapshot.PathHead.PathAssignment,
             UtcNow());
     }
 
@@ -269,8 +270,47 @@ internal sealed class PermalinkDocumentFactory
             snapshot.ContentHead.ContentRoot,
             snapshot.ContentHead.Leaves,
             reservation.BindingId,
-            snapshot.ContentHead.PathAssignment,
+            snapshot.PathHead.PathAssignment,
             UtcNow());
+    }
+
+    /// <summary>Constructs an exact binding-specific path successor.</summary>
+    /// <param name="snapshot">The current folded capsule.</param>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <param name="bindingId">The binding whose path advances.</param>
+    /// <param name="path">The adopted destination path.</param>
+    /// <param name="rootPath">The destination content root.</param>
+    /// <param name="createdAt">The operation's frozen creation time.</param>
+    /// <returns>The deterministic path successor.</returns>
+    public PermalinkEventDocument CreatePathSuccessor(
+        PermalinkCapsuleSnapshot snapshot,
+        Guid operationId,
+        Guid bindingId,
+        string path,
+        string rootPath,
+        string createdAt)
+    {
+        var predecessor = snapshot.PathHead.PathAssignment.EventId;
+        var eventId = DeterministicGuid(
+            $"path\0{snapshot.Header.CapsuleId:D}\0{bindingId:D}\0{predecessor:D}\0{operationId:D}\0{path}\0{rootPath}");
+        var parents = snapshot.ContentHead.EventId.Equals(snapshot.PathHead.EventId)
+            ? new[] { snapshot.ContentHead.EventId }
+            : new[] { snapshot.ContentHead.EventId, snapshot.PathHead.EventId };
+        return new PermalinkEventDocument(
+            eventId,
+            operationId,
+            parents,
+            "path_assignment",
+            [],
+            null,
+            snapshot.ContentHead.PreviousAssignmentEventId,
+            snapshot.ContentHead.AcceptedProviderClaim,
+            snapshot.ContentHead.ActiveExternalAliases,
+            snapshot.ContentHead.ContentRoot,
+            snapshot.ContentHead.Leaves,
+            bindingId,
+            new PermalinkPathAssignment(eventId, predecessor, path, rootPath),
+            createdAt);
     }
 
     private string UtcNow()
@@ -283,6 +323,12 @@ internal sealed class PermalinkDocumentFactory
         Span<byte> bytes = stackalloc byte[16];
         RandomNumberGenerator.Fill(bytes);
         return new Guid(bytes);
+    }
+
+    private static Guid DeterministicGuid(string value)
+    {
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(value));
+        return new Guid(digest.AsSpan(0, 16));
     }
 
     private static PermalinkProviderClaim ToProviderClaim(string alias)

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-03, 2026-09-07, 2026-09-09, 2026-09-30, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-03, 2026-09-07, 2026-09-09, 2026-09-30, 2026-10-03, 2026-10-09.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -91,7 +91,7 @@ internal sealed class PermalinkMutationBundleFactory
             var claimKind = candidate.Id.Equals(item.Id) ? "content" : "aggregate";
             if (pathMutation)
             {
-                predecessor = snapshot.ContentHead.PathAssignment.EventId.ToString("D");
+                predecessor = snapshot.PathHead.PathAssignment.EventId.ToString("D");
                 claimKind = "path";
             }
 

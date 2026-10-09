@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-30, 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-30, 2026-10-07, 2026-10-09.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -172,6 +172,25 @@ internal sealed class PermalinkCapsuleStore
             cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Appends one exact authority-authorized path successor.</summary>
+    /// <param name="capsulePath">The durable capsule path.</param>
+    /// <param name="successor">The path successor event.</param>
+    /// <param name="eventJson">The frozen canonical event bytes.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    public async Task AppendPathAsync(
+        string capsulePath,
+        PermalinkEventDocument successor,
+        ReadOnlyMemory<byte> eventJson,
+        CancellationToken cancellationToken)
+    {
+        var eventPath = Path.Combine(
+            capsulePath,
+            "events",
+            successor.EventId.ToString("D") + ".json");
+        await PublishOrVerifyAsync(eventPath, eventJson, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Requires an already-published event to equal the frozen canonical bytes.</summary>
     /// <param name="capsulePath">The durable capsule path.</param>
     /// <param name="successor">The frozen successor document.</param>
@@ -298,9 +317,50 @@ internal sealed class PermalinkCapsuleStore
                 $"Capsule '{capsulePath}' folds to {heads.Length} content heads.");
         }
 
+        var pathGroups = events.Values
+            .GroupBy(value => value.PathAssignment.EventId)
+            .ToArray();
+        foreach (var group in pathGroups)
+        {
+            if (group.Select(value => value.PathAssignment).Distinct().Count() != 1
+                || group.Select(value => value.BindingInstanceId).Distinct().Count() != 1)
+            {
+                throw Conflict(
+                    "path-event-conflict",
+                    $"Capsule '{capsulePath}' has divergent bytes for path event '{group.Key}'.");
+            }
+
+            var predecessor = group.First().PathAssignment.PreviousPathEventId;
+            if (predecessor.HasValue && pathGroups.All(candidate => !candidate.Key.Equals(predecessor.Value)))
+            {
+                throw Conflict(
+                    "path-event-parent-missing",
+                    $"Capsule '{capsulePath}' path event '{group.Key}' has missing predecessor '{predecessor}'.");
+            }
+        }
+
+        var pathHeads = pathGroups
+            .Where(candidate => !pathGroups.Any(other =>
+                other.First().PathAssignment.PreviousPathEventId.Equals(candidate.Key)))
+            .ToArray();
+        if (pathHeads.Length != 1)
+        {
+            throw Conflict(
+                "path-head-conflict",
+                $"Capsule '{capsulePath}' folds to {pathHeads.Length} path heads.");
+        }
+
+        var contentHead = heads[0];
+        var pathHead = pathHeads[0].FirstOrDefault(value => value.EventId.Equals(contentHead.EventId))
+            ?? pathHeads[0]
+                .OrderBy(value => value.CreatedAt, StringComparer.Ordinal)
+                .ThenBy(value => value.EventId)
+                .Last();
+
         return new PermalinkCapsuleSnapshot(
             header,
-            heads[0],
+            contentHead,
+            pathHead,
             events.Values.OrderBy(value => value.CreatedAt, StringComparer.Ordinal).ToArray());
     }
 

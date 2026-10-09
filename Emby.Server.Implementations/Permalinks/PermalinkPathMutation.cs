@@ -21,6 +21,9 @@ internal sealed class PermalinkPathMutation
     private readonly PermalinkOperationJournal _journal;
     private readonly PermalinkBindingIndex _bindings;
     private readonly PermalinkMutationClaimStore _claims;
+    private readonly PermalinkAuthorityStore _authority;
+    private readonly PermalinkCapsuleStore _capsules;
+    private readonly PermalinkDocumentFactory _documents;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly PermalinkCrossRootMutation _crossRoot;
     private readonly PermalinkPathLeaseFactory _leases;
@@ -32,6 +35,9 @@ internal sealed class PermalinkPathMutation
         PermalinkOperationJournal journal,
         PermalinkBindingIndex bindings,
         PermalinkMutationClaimStore claims,
+        PermalinkAuthorityStore authority,
+        PermalinkCapsuleStore capsules,
+        PermalinkDocumentFactory documents,
         IPermalinkAtomicFileSystem fileSystem,
         PermalinkCrossRootMutation crossRoot,
         PermalinkPathLeaseFactory leases,
@@ -42,6 +48,9 @@ internal sealed class PermalinkPathMutation
         _journal = journal;
         _bindings = bindings;
         _claims = claims;
+        _authority = authority;
+        _capsules = capsules;
+        _documents = documents;
         _fileSystem = fileSystem;
         _crossRoot = crossRoot;
         _leases = leases;
@@ -200,15 +209,99 @@ internal sealed class PermalinkPathMutation
 
         var anchor = _fileSystem.ReadAnchorToken(item.Path)
             ?? throw Conflict("anchor-missing", "Moved item lost its stable anchor.");
+        await PublishPathSuccessorsAsync(
+            operation,
+            bundle,
+            itemDestination,
+            cancellationToken).ConfigureAwait(false);
         await _bindings.UpdateCurrentPathAsync(anchor, item.Path, cancellationToken)
             .ConfigureAwait(false);
-        await _claims.FinalizeAsync(
-            bundle,
-            operation.OperationId,
-            "moved",
-            cancellationToken).ConfigureAwait(false);
         await WriteTerminalPhasesAsync(operation, cancellationToken).ConfigureAwait(false);
         return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
+    }
+
+    private async Task PublishPathSuccessorsAsync(
+        PermalinkOperationDocument operation,
+        PermalinkMutationBundle bundle,
+        string destinationPath,
+        CancellationToken cancellationToken)
+    {
+        var prepared = new Dictionary<Guid, (string CapsulePath, PermalinkEventDocument Event, ReadOnlyMemory<byte> Bytes)>();
+        foreach (var claim in bundle.Claims)
+        {
+            var reservation = await _authority.FindByCapsuleAsync(claim.CapsuleId, cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw Conflict("capsule-missing", $"Protected capsule '{claim.CapsuleId}' is unknown.");
+            // Directory capsules travel inside the tree bundle. Once publication has
+            // completed, the authority still names the source-era location, so derive
+            // the adopted capsule from the now-present destination tree. File capsules
+            // remain rooted in the authority store and therefore keep their reservation
+            // path even when the media file crosses roots.
+            var capsulePath = Directory.Exists(destinationPath)
+                ? _capsules.GetCapsulePath(
+                    bundle.DestinationRootPath ?? reservation.RootPath,
+                    destinationPath,
+                    reservation.ItemKind,
+                    reservation.CapsuleId)
+                : reservation.CapsulePath;
+            var snapshot = await _capsules.ReadValidatedAsync(
+                capsulePath,
+                reservation.CapsuleId,
+                reservation.ItemKind,
+                cancellationToken).ConfigureAwait(false);
+            if (!Guid.TryParseExact(claim.Predecessor, "D", out var predecessor))
+            {
+                throw Conflict(
+                    "path-predecessor-invalid",
+                    $"Prepared path predecessor '{claim.Predecessor}' is not an event id.");
+            }
+
+            PermalinkEventDocument successor;
+            if (snapshot.PathHead.PathAssignment.EventId.Equals(predecessor))
+            {
+                successor = _documents.CreatePathSuccessor(
+                    snapshot,
+                    operation.OperationId,
+                    claim.BindingInstanceId,
+                    destinationPath,
+                    bundle.DestinationRootPath ?? reservation.RootPath,
+                    operation.CreatedAt);
+            }
+            else if (snapshot.PathHead.OperationId.Equals(operation.OperationId)
+                     && snapshot.PathHead.BindingInstanceId.Equals(claim.BindingInstanceId)
+                     && snapshot.PathHead.PathAssignment.PreviousPathEventId.Equals(predecessor)
+                     && string.Equals(
+                         NormalizePath(snapshot.PathHead.PathAssignment.Path),
+                         NormalizePath(destinationPath),
+                         StringComparison.OrdinalIgnoreCase))
+            {
+                successor = snapshot.PathHead;
+            }
+            else
+            {
+                throw Conflict(
+                    "path-successor-head-mismatch",
+                    $"Prepared predecessor for capsule '{claim.CapsuleId}' is no longer current.");
+            }
+
+            prepared.Add(
+                claim.CapsuleId,
+                (capsulePath, successor, CanonicalJson.Serialize(successor)));
+        }
+
+        await _claims.FinalizePathAsync(
+            bundle,
+            operation.OperationId,
+            prepared.ToDictionary(entry => entry.Key, entry => entry.Value.Event),
+            cancellationToken).ConfigureAwait(false);
+        foreach (var successor in prepared.OrderBy(entry => entry.Key).Select(entry => entry.Value))
+        {
+            await _capsules.AppendPathAsync(
+                successor.CapsulePath,
+                successor.Event,
+                successor.Bytes,
+                cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -241,11 +334,59 @@ internal sealed class PermalinkPathMutation
             return currentFolder;
         }
 
-        return _libraryManager.FindByPath(parentPath, isFolder: true) as Folder
-            ?? throw Conflict(
+        var normalizedParent = NormalizePath(parentPath);
+        var physicalRoot = _libraryManager.GetUserRootFolder().Children
+            .OfType<CollectionFolder>()
+            .SelectMany(collection => collection.PhysicalFolderIds)
+            .Distinct()
+            .Select(_libraryManager.GetItemById)
+            .OfType<Folder>()
+            .Where(folder => !string.IsNullOrWhiteSpace(folder.Path)
+                && IsWithinPath(folder.Path, normalizedParent))
+            .OrderByDescending(folder => NormalizePath(folder.Path).Length)
+            .FirstOrDefault();
+        if (physicalRoot is null)
+        {
+            throw Conflict(
                 "destination-parent-unindexed",
-                $"Prepared destination parent '{parentPath}' is not an indexed library folder.");
+                $"Prepared destination parent '{parentPath}' is outside every indexed physical library root.");
+        }
+
+        var normalizedRoot = NormalizePath(physicalRoot.Path);
+        for (var candidatePath = normalizedParent;
+             IsWithinPath(normalizedRoot, candidatePath);
+             candidatePath = Path.GetDirectoryName(candidatePath) ?? string.Empty)
+        {
+            if (string.Equals(candidatePath, normalizedRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                return physicalRoot;
+            }
+
+            if (_libraryManager.FindByPath(candidatePath, isFolder: true) is Folder indexed
+                && string.Equals(
+                    NormalizePath(indexed.Path),
+                    candidatePath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return indexed;
+            }
+        }
+
+        throw Conflict(
+            "destination-parent-unindexed",
+            $"Prepared destination parent '{parentPath}' has no indexed library ancestor.");
     }
+
+    private static bool IsWithinPath(string rootPath, string candidatePath)
+    {
+        var root = NormalizePath(rootPath);
+        var candidate = NormalizePath(candidatePath);
+        return string.Equals(root, candidate, StringComparison.OrdinalIgnoreCase)
+            || candidate.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizePath(string path)
+        => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
 
     private static string RequireItemDestination(
         PermalinkOperationDocument operation,

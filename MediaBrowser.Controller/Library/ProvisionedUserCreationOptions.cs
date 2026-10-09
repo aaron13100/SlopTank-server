@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 
@@ -41,7 +42,13 @@ namespace MediaBrowser.Controller.Library;
 public sealed record ProvisionedUserCreationOptions(
     string? AuthenticationProviderId,
     string? PasswordResetProviderId,
-    string Password,
+    [property: JsonIgnore] string Password,
     IReadOnlyDictionary<PermissionKind, bool>? Permissions,
     IReadOnlyList<Guid>? EnabledFolders,
-    Guid? UserId = null);
+    Guid? UserId = null)
+{
+    /// <summary>Returns useful type and routing context without rendering
+    /// the plaintext password seal in logs or exception interpolation.</summary>
+    public override string ToString() =>
+        $"{nameof(ProvisionedUserCreationOptions)} {{ AuthenticationProviderId = {AuthenticationProviderId}, PasswordResetProviderId = {PasswordResetProviderId}, Password = [REDACTED], UserId = {UserId} }}";
+}

@@ -1,6 +1,7 @@
 // SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09.
 
 using System.Security.Cryptography;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http;
 
 namespace SlopTank.ExternalAuth;
@@ -34,6 +35,27 @@ public sealed record ExternalAuthSessionMintOptions
     public TimeSpan RevalidationInterval { get; init; } = TimeSpan.FromSeconds(30);
 }
 
+/// <summary>Typed invalid options at the external-session security boundary.</summary>
+public enum ExternalAuthMintOptionsErrorCode
+{
+    /// <summary>The open-channel sweep interval is outside the enforced range.</summary>
+    RevalidationIntervalOutOfRange = 1,
+}
+
+/// <summary>A typed refusal of unsafe external-session options.</summary>
+public sealed class ExternalAuthMintOptionsException : ArgumentOutOfRangeException
+{
+    /// <summary>Initializes the typed interval refusal.</summary>
+    public ExternalAuthMintOptionsException()
+        : base(nameof(ExternalAuthSessionMintOptions.RevalidationInterval),
+            "Open-channel revalidation interval must be between 10 milliseconds and 5 minutes")
+    {
+    }
+
+    /// <summary>Gets the machine-readable refusal code.</summary>
+    public ExternalAuthMintOptionsErrorCode Code => ExternalAuthMintOptionsErrorCode.RevalidationIntervalOutOfRange;
+}
+
 /// <summary>
 /// One minted external session: the cookie carries only the opaque
 /// <paramref name="Handle"/>; the access token stays server-side in this
@@ -52,15 +74,20 @@ public sealed record ExternalAuthSessionMintOptions
 /// <param name="CreatedAt">Mint time.</param>
 /// <param name="ExpiresAt">Handle expiry.</param>
 public sealed record ExternalAuthMintedSession(
-    string Handle,
-    string AccessToken,
+    [property: JsonIgnore] string Handle,
+    [property: JsonIgnore] string AccessToken,
     Guid UserId,
     string DeviceId,
     string AppName,
     string ProviderId,
     long ProviderEpoch,
     DateTimeOffset CreatedAt,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt)
+{
+    /// <summary>Renders session context without a cookie handle or access token.</summary>
+    public override string ToString() =>
+        $"{nameof(ExternalAuthMintedSession)} {{ UserId = {UserId}, ProviderId = {ProviderId}, ProviderEpoch = {ProviderEpoch}, Handle = [REDACTED], AccessToken = [REDACTED] }}";
+}
 
 /// <summary>Typed outcome of minting an external session.</summary>
 public enum ExternalAuthMintStatus
@@ -166,6 +193,12 @@ public sealed class ExternalAuthSessionMintStore
     public ExternalAuthSessionMintStore(ExternalAuthSessionMintOptions? options = null, TimeProvider? clock = null)
     {
         _options = options ?? new ExternalAuthSessionMintOptions();
+        if (_options.RevalidationInterval < TimeSpan.FromMilliseconds(10)
+            || _options.RevalidationInterval > TimeSpan.FromMinutes(5))
+        {
+            throw new ExternalAuthMintOptionsException();
+        }
+
         _clock = clock ?? TimeProvider.System;
     }
 

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09.
 
 namespace SlopTank.ExternalAuth;
 
@@ -39,9 +39,14 @@ public sealed record ExternalLoginClient(
 public sealed record ExternalLoginContext(
     string FlowReference,
     ExternalLoginFlowMode Mode,
-    string CorrelationSecret,
+    [property: System.Text.Json.Serialization.JsonIgnore] string CorrelationSecret,
     ExternalLoginClient? Client,
-    string? ReturnUrl);
+    string? ReturnUrl)
+{
+    /// <summary>Renders flow context without its browser-binding secret.</summary>
+    public override string ToString() =>
+        $"{nameof(ExternalLoginContext)} {{ FlowReference = [REDACTED], Mode = {Mode}, CorrelationSecret = [REDACTED] }}";
+}
 
 /// <summary>
 /// Typed challenge outcome: a redirect challenge on success, or a typed

@@ -2,6 +2,7 @@
 
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using System.Runtime.ExceptionServices;
 
 namespace SlopTank.ExternalAuth;
 
@@ -123,15 +124,30 @@ public sealed class ExternalAuthCookieTransportMiddleware : IDisposable
     /// </summary>
     public void RevalidateOnce()
     {
+        ExceptionDispatchInfo? firstProbeFailure = null;
         foreach (var handle in _openChannels.Keys)
         {
-            if (_mintStore.Resolve(handle) is null)
+            try
+            {
+                if (_mintStore.Resolve(handle) is null)
+                {
+                    AbortChannelsOf(handle);
+                }
+            }
+#pragma warning disable CA1031 // each failing host probe closes its channel; the original exception is rethrown after the sweep
+            catch (Exception ex)
+#pragma warning restore CA1031
             {
                 AbortChannelsOf(handle);
+                firstProbeFailure ??= ExceptionDispatchInfo.Capture(ex);
             }
         }
 
+        // One host probe may throw. Independent expired handles still have
+        // to be removed, and the original exception/stack is retained for
+        // the timer's diagnostic log after every channel has been checked.
         _mintStore.SweepExpired();
+        firstProbeFailure?.Throw();
     }
 
     private void AbortChannelsOf(ExternalAuthMintedSession session) => AbortChannelsOf(session.Handle);

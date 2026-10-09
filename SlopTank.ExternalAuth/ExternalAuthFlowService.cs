@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09.
 
 using Microsoft.AspNetCore.Http;
 
@@ -89,6 +89,7 @@ public sealed record ExternalAuthBeginOutcome
     /// the provider exactly once at begin so it can bind its own pending
     /// record by hash. The seam persists only the hash; this value is never
     /// logged or stored by the seam after construction.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
     public string? CorrelationSecret { get; }
 
     /// <summary>Gets the typed refusal code;
@@ -101,6 +102,10 @@ public sealed record ExternalAuthBeginOutcome
 
     /// <summary>Gets a value indicating whether the flow started.</summary>
     public bool IsStarted => Flow is not null;
+
+    /// <summary>Renders only the outcome, never the correlation secret.</summary>
+    public override string ToString() =>
+        $"{nameof(ExternalAuthBeginOutcome)} {{ IsStarted = {IsStarted}, RefusalCode = {RefusalCode}, CorrelationSecret = [REDACTED] }}";
 
     /// <summary>Builds a started outcome.</summary>
     /// <param name="flow">The pending flow record.</param>

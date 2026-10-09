@@ -1,7 +1,9 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-09.
 #pragma warning disable CS1591
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Events;
 using Jellyfin.Database.Implementations.Entities;
@@ -88,6 +90,26 @@ namespace MediaBrowser.Controller.Library
         /// <exception cref="ArgumentNullException"><paramref name="name"/> is <c>null</c> or empty.</exception>
         /// <exception cref="ArgumentException"><paramref name="name"/> already exists.</exception>
         Task<User> CreateUserAsync(string name);
+
+        /// <summary>
+        /// Creates a user whose provider routing, sealed password and
+        /// initial policy fields are persisted in the SAME transaction as
+        /// the user row, before the row is visible and before the
+        /// <c>UserCreated</c> event fires: a crash at the creation boundary
+        /// leaves either no user or a complete, sealed one, so an
+        /// empty-password login can never succeed in the crash window.
+        /// </summary>
+        /// <param name="name">The name of the new user.</param>
+        /// <param name="options">The provider-neutral creation
+        /// options.</param>
+        /// <param name="cancellationToken">Cancels the persistence operation.</param>
+        /// <returns>The created, sealed user.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="name"/> is <c>null</c> or empty.</exception>
+        /// <exception cref="ArgumentException"><paramref name="name"/> already exists, or the options are invalid.</exception>
+        Task<User> CreateUserAsync(
+            string name,
+            ProvisionedUserCreationOptions options,
+            CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Deletes the specified user.

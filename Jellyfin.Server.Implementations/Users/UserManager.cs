@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-09.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -52,6 +53,7 @@ namespace Jellyfin.Server.Implementations.Users
         private readonly IServerConfigurationManager _serverConfigurationManager;
 
         private readonly LockHelper _userLock = new();
+        private readonly AsyncKeyedLocker<Guid> _creationLock = new();
 
         /// <summary>
         /// Initializes a new instance of the <see cref="UserManager"/> class.
@@ -295,30 +297,125 @@ namespace Jellyfin.Server.Implementations.Users
         {
             ThrowIfInvalidUsername(name);
 
+            // Both creation APIs derive InternalId from the same current
+            // maximum, so they must share one allocation lock.
             User newUser;
-            var dbContext = await _dbProvider.CreateDbContextAsync().ConfigureAwait(false);
-            await using (dbContext.ConfigureAwait(false))
+            using (await _creationLock.LockAsync(Guid.Empty, true).ConfigureAwait(false))
             {
-#pragma warning disable CA1862 // Use the 'StringComparison' method overloads to perform case-insensitive string comparisons
-                if (await dbContext.Users
-                        .AnyAsync(u => u.NormalizedUsername == name.ToUpperInvariant())
-                        .ConfigureAwait(false))
+                var dbContext = await _dbProvider.CreateDbContextAsync().ConfigureAwait(false);
+                await using (dbContext.ConfigureAwait(false))
                 {
-                    throw new ArgumentException(string.Format(
-                        CultureInfo.InvariantCulture,
-                        "A user with the name '{0}' already exists.",
-                        name));
-                }
+#pragma warning disable CA1862 // Use the 'StringComparison' method overloads to perform case-insensitive string comparisons
+                    if (await dbContext.Users
+                            .AnyAsync(u => u.NormalizedUsername == name.ToUpperInvariant())
+                            .ConfigureAwait(false))
+                    {
+                        throw new ArgumentException(string.Format(
+                            CultureInfo.InvariantCulture,
+                            "A user with the name '{0}' already exists.",
+                            name));
+                    }
 #pragma warning restore CA1862 // Use the 'StringComparison' method overloads to perform case-insensitive string comparisons
 
-                newUser = await CreateUserInternalAsync(name, dbContext).ConfigureAwait(false);
+                    newUser = await CreateUserInternalAsync(name, dbContext).ConfigureAwait(false);
 
-                dbContext.Users.Add(newUser);
-                await dbContext.SaveChangesAsync().ConfigureAwait(false);
+                    dbContext.Users.Add(newUser);
+                    await dbContext.SaveChangesAsync().ConfigureAwait(false);
+                }
+
             }
 
             await _eventManager.PublishAsync(new UserCreatedEventArgs(newUser)).ConfigureAwait(false);
+            return newUser;
+        }
 
+        /// <inheritdoc/>
+        public async Task<User> CreateUserAsync(
+            string name,
+            ProvisionedUserCreationOptions options,
+            CancellationToken cancellationToken = default)
+        {
+            ThrowIfInvalidUsername(name);
+            ArgumentNullException.ThrowIfNull(options);
+            ArgumentException.ThrowIfNullOrWhiteSpace(options.Password);
+            if (options.UserId == Guid.Empty)
+            {
+                throw new ArgumentException("A requested user id cannot be empty.", nameof(options));
+            }
+
+            // Every provisioned creation allocates InternalId from the same
+            // current maximum. Serializing only by requested user id lets
+            // distinct external identities race and choose the same value.
+            User newUser;
+            using (await _creationLock.LockAsync(Guid.Empty, true).ConfigureAwait(false))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var dbContext = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+                await using (dbContext.ConfigureAwait(false))
+                {
+#pragma warning disable CA1862 // Use the 'StringComparison' method overloads to perform case-insensitive string comparisons
+                    if (await dbContext.Users
+                            .AnyAsync(
+                                u => u.NormalizedUsername == name.ToUpperInvariant()
+                                    || (options.UserId.HasValue && u.Id == options.UserId.Value),
+                                cancellationToken)
+                            .ConfigureAwait(false))
+                    {
+                        throw new ArgumentException(string.Format(
+                            CultureInfo.InvariantCulture,
+                            "A user with the name '{0}' or requested id already exists.",
+                            name));
+                    }
+#pragma warning restore CA1862
+
+                    newUser = await CreateUserInternalAsync(name, dbContext).ConfigureAwait(false);
+                    if (options.UserId is { } requestedId)
+                    {
+                        newUser.Id = requestedId;
+                    }
+
+                // Provider routing, password seal and the caller's initial
+                // policy fields all land on the entity BEFORE the single
+                // SaveChanges below: the insert transaction persists the
+                // complete sealed user, so no reader and no UserCreated
+                // observer can ever see an accessible passwordless row.
+                    if (!string.IsNullOrEmpty(options.AuthenticationProviderId))
+                    {
+                        newUser.AuthenticationProviderId = options.AuthenticationProviderId;
+                    }
+
+                    if (!string.IsNullOrEmpty(options.PasswordResetProviderId))
+                    {
+                        newUser.PasswordResetProviderId = options.PasswordResetProviderId;
+                    }
+
+                // The seal goes through the canonical default-provider
+                // hashing path (the one ChangePassword itself uses), applied
+                // to the in-memory entity inside this same transaction. The
+                // password is required non-empty above: an empty seal is
+                // exactly the passwordless default this overload removes.
+                    await _defaultAuthenticationProvider.ChangePassword(newUser, options.Password).ConfigureAwait(false);
+
+                    if (options.Permissions is not null)
+                    {
+                        foreach (var (kind, value) in options.Permissions)
+                        {
+                            newUser.SetPermission(kind, value);
+                        }
+                    }
+
+                    if (options.EnabledFolders is not null)
+                    {
+                        newUser.SetPreference(PreferenceKind.EnabledFolders, options.EnabledFolders.ToArray());
+                    }
+
+                    dbContext.Users.Add(newUser);
+                    await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+            }
+
+            await _eventManager.PublishAsync(new UserCreatedEventArgs(newUser)).ConfigureAwait(false);
             return newUser;
         }
 
@@ -694,6 +791,9 @@ namespace Jellyfin.Server.Implementations.Users
         public async Task InitializeAsync()
         {
             // TODO: Refactor the startup wizard so that it doesn't require a user to already exist.
+            // Startup's default-admin allocation shares the same Users table
+            // InternalId sequence as both request-time creation paths.
+            using var creationLock = await _creationLock.LockAsync(Guid.Empty, true).ConfigureAwait(false);
             var dbContext = await _dbProvider.CreateDbContextAsync().ConfigureAwait(false);
             await using (dbContext.ConfigureAwait(false))
             {
@@ -1043,6 +1143,7 @@ namespace Jellyfin.Server.Implementations.Users
             if (disposing)
             {
                 _userLock.Dispose();
+                _creationLock.Dispose();
             }
         }
 

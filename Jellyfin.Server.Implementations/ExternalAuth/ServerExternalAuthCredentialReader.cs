@@ -1,8 +1,7 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09.
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using Jellyfin.Server.Implementations.Security;
 using MediaBrowser.Controller.Configuration;
 using Microsoft.AspNetCore.Http;
@@ -41,7 +40,7 @@ public sealed class ServerExternalAuthCredentialReader : IExternalAuthCredential
         var presented = new List<PresentedExternalCredential>();
 
         var authorizationHeader = request.Headers.Authorization.ToString();
-        if (!string.IsNullOrEmpty(authorizationHeader))
+        if (request.Headers.ContainsKey("Authorization"))
         {
             var fields = ParseAuthorizationHeader(authorizationHeader, legacy);
             if (fields is null)
@@ -54,17 +53,18 @@ public sealed class ServerExternalAuthCredentialReader : IExternalAuthCredential
             }
             else
             {
-                // A MediaBrowser header without a Token parameter carries
-                // client identity only; the authorization context treats it
-                // as no credential, and so does this reader.
-                presented.Add(new PresentedExternalCredential(ExternalAuthTransport.AuthorizationHeader, null, Malformed: false));
+                // The header was explicitly supplied but did not carry a
+                // token. It remains presented and malformed for precedence:
+                // an ambient browser cookie must never replace any explicit
+                // Authorization value, including ordinary client metadata.
+                presented.Add(new PresentedExternalCredential(ExternalAuthTransport.AuthorizationHeader, null, Malformed: true));
             }
         }
 
         if (legacy)
         {
             var legacyHeader = request.Headers["X-Emby-Authorization"].ToString();
-            if (!string.IsNullOrEmpty(legacyHeader))
+            if (request.Headers.ContainsKey("X-Emby-Authorization"))
             {
                 var fields = ParseAuthorizationHeader(legacyHeader, legacy);
                 if (fields is null || !fields.TryGetValue("Token", out var token) || string.IsNullOrEmpty(token))
@@ -87,13 +87,7 @@ public sealed class ServerExternalAuthCredentialReader : IExternalAuthCredential
             AddApiKeyQuery(presented, request, "api_key");
         }
 
-        // Entries that presented no credential value at all are not
-        // credentials; drop them (the cookie transport must not treat a
-        // bare client-identity Authorization header as an explicit
-        // credential, exactly as the authorization context does not).
-        return presented
-            .Where(static c => c.Malformed || c.Token is not null || c.Transport == ExternalAuthTransport.ApiKeyQuery)
-            .ToList();
+        return presented;
     }
 
     private static void AddPlainTokenHeader(
@@ -102,10 +96,10 @@ public sealed class ServerExternalAuthCredentialReader : IExternalAuthCredential
         string headerName,
         ExternalAuthTransport transport)
     {
-        var value = request.Headers[headerName].ToString();
-        if (!string.IsNullOrEmpty(value))
+        if (request.Headers.TryGetValue(headerName, out var values))
         {
-            presented.Add(new PresentedExternalCredential(transport, value, Malformed: false));
+            var value = values.ToString();
+            presented.Add(new PresentedExternalCredential(transport, string.IsNullOrEmpty(value) ? null : value, Malformed: string.IsNullOrEmpty(value)));
         }
     }
 
@@ -114,9 +108,13 @@ public sealed class ServerExternalAuthCredentialReader : IExternalAuthCredential
         HttpRequest request,
         string name)
     {
-        if (request.Query.TryGetValue(name, out var value) && !string.IsNullOrEmpty(value))
+        if (request.Query.TryGetValue(name, out var value))
         {
-            presented.Add(new PresentedExternalCredential(ExternalAuthTransport.ApiKeyQuery, value.ToString(), Malformed: false));
+            var token = value.ToString();
+            presented.Add(new PresentedExternalCredential(
+                ExternalAuthTransport.ApiKeyQuery,
+                string.IsNullOrEmpty(token) ? null : token,
+                Malformed: string.IsNullOrEmpty(token)));
         }
     }
 

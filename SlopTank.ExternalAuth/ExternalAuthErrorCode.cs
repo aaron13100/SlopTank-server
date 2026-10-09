@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09.
 
 namespace SlopTank.ExternalAuth;
 
@@ -71,4 +71,13 @@ public enum ExternalAuthErrorCode
     /// root unavailable, descriptor policy, corruption, or a failed atomic
     /// publication); the link is NOT confirmed.</summary>
     LinkPersistenceFailed = 53,
+
+    /// <summary>The provider's account-safety policy excludes the resolved
+    /// local user from external linking and session minting (for example a
+    /// designated emergency local administrator).</summary>
+    AccountExcluded = 54,
+
+    /// <summary>The provider completed authentication but no healthy local
+    /// account and session could be resolved or minted for the browser.</summary>
+    SessionUnavailable = 60,
 }

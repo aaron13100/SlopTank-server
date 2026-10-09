@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-09.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -520,13 +520,18 @@ public class UserController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status200OK)]
     public async Task<ActionResult<UserDto>> CreateUserByName([FromBody, Required] CreateUserByName request)
     {
-        var newUser = await _userManager.CreateUserAsync(request.Name).ConfigureAwait(false);
-
-        // no need to authenticate password for new user
-        if (request.Password is not null)
-        {
-            await _userManager.ChangePassword(newUser.Id, request.Password).ConfigureAwait(false);
-        }
+        // A supplied password is sealed inside the creation transaction
+        // (provider routing, hash and row in one SaveChanges): the historical
+        // create-then-ChangePassword sequence left a real crash window in
+        // which the persisted row was passwordless and the default provider
+        // accepts an empty password against an empty stored hash.
+        var newUser = string.IsNullOrEmpty(request.Password)
+            ? await _userManager.CreateUserAsync(request.Name).ConfigureAwait(false)
+            : await _userManager.CreateUserAsync(
+                request.Name,
+                new ProvisionedUserCreationOptions(null, null, request.Password, null, null),
+                HttpContext.RequestAborted)
+                .ConfigureAwait(false);
 
         var result = _userManager.GetUserDto(newUser, HttpContext.GetNormalizedRemoteIP().ToString());
 

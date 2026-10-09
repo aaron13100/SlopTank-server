@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09.
 
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -88,19 +88,16 @@ public sealed class ExternalAuthCookieTransportMiddleware : IDisposable
         _mintStore.SessionRevoked += AbortChannelsOf;
         // ...and every tracked channel is periodically re-resolved, so
         // expiry, logout and user disable (the host liveness probe) close
-        // it too even without a revocation event.
+        // it too even without a revocation event. The same pass sweeps the
+        // store's expired handles, so dead entries can never accumulate
+        // between explicit revocations: with the sweep, the live-handle caps
+        // are a true memory bound rather than a TTL-only promise.
         _channelRevalidation = new Timer(
             _ =>
             {
                 try
                 {
-                    foreach (var handle in _openChannels.Keys)
-                    {
-                        if (_mintStore.Resolve(handle) is null)
-                        {
-                            AbortChannelsOf(handle);
-                        }
-                    }
+                    RevalidateOnce();
                 }
 #pragma warning disable CA1031 // a background sweep must never take the timer down; the failure is logged and retried on the next tick
                 catch (Exception ex)
@@ -113,8 +110,28 @@ public sealed class ExternalAuthCookieTransportMiddleware : IDisposable
                 }
             },
             null,
-            TimeSpan.FromSeconds(30),
-            TimeSpan.FromSeconds(30));
+            _mintStore.Options.RevalidationInterval,
+            _mintStore.Options.RevalidationInterval);
+    }
+
+    /// <summary>
+    /// One revalidation pass: resolves every tracked open channel's handle
+    /// (aborting the channels of dead ones) and sweeps the mint store's
+    /// expired handles. This is exactly the periodic timer's pass, exposed
+    /// so callers (and controls) can drive the identical behavior
+    /// deterministically.
+    /// </summary>
+    public void RevalidateOnce()
+    {
+        foreach (var handle in _openChannels.Keys)
+        {
+            if (_mintStore.Resolve(handle) is null)
+            {
+                AbortChannelsOf(handle);
+            }
+        }
+
+        _mintStore.SweepExpired();
     }
 
     private void AbortChannelsOf(ExternalAuthMintedSession session) => AbortChannelsOf(session.Handle);

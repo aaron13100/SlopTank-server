@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09.
 
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.Http;
@@ -24,6 +24,14 @@ public sealed record ExternalAuthSessionMintOptions
     /// <summary>The session cookie name carrying only the opaque
     /// handle.</summary>
     public string SessionCookieName { get; init; } = "sloptank-extauth-session";
+
+    /// <summary>Interval of the open-channel revalidation pass: every
+    /// tracked channel's handle is re-resolved (aborting dead ones) and the
+    /// store's expired handles are swept, so expiry, logout and user
+    /// disable close open channels and dead entries can never accumulate.
+    /// Tests tighten it to drive the real timer; production keeps the
+    /// default.</summary>
+    public TimeSpan RevalidationInterval { get; init; } = TimeSpan.FromSeconds(30);
 }
 
 /// <summary>

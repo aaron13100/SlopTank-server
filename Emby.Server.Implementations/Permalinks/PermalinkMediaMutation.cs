@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-07, 2026-09-09, 2026-10-01, 2026-10-03, 2026-10-07, 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-07, 2026-09-09, 2026-10-01, 2026-10-03, 2026-10-07, 2026-10-08, 2026-10-09.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -580,7 +580,11 @@ internal sealed class PermalinkMediaMutation
 
     internal static void ValidateReadyFormat(PermalinkOperationPhase ready)
     {
-        if (ready.Version >= 3 && ready.PreparedSuccessors is null)
+        // Version 3 introduced frozen successor decisions and therefore requires them. Unknown
+        // future versions remain readable by the older single-claim path: the durable phase
+        // contract explicitly permits later writers to add optional members and raise the
+        // version without making an older reader infer version-3 semantics from the number alone.
+        if (ready.Version == 3 && ready.PreparedSuccessors is null)
         {
             throw Conflict(
                 "prepared-successors-missing",

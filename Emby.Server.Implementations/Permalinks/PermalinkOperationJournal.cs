@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-20, 2026-10-03, 2026-10-07, 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-04, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-20, 2026-10-03, 2026-10-07, 2026-10-08, 2026-10-09.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -630,7 +630,11 @@ internal sealed class PermalinkOperationJournal : IDisposable
             "claimed_pending" => ready && !published,
             "manual_intervention" => prepared,
             "restored" => prepared,
-            "detached" => ready,
+            // The administrator-only close-unrecoverable route proves that neither prepared-old
+            // nor desired bytes survive and may therefore detach an operation that never reached
+            // Ready. Its evidence checks live in PermalinkMediaRecovery; the journal still
+            // requires the durable Prepared predecessor that identifies the operation.
+            "detached" => prepared,
             "assignment_unknown" => published,
             _ => phase.Name.StartsWith("part-", StringComparison.Ordinal) && ready
         };

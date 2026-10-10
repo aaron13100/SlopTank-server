@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-09-03, 2026-09-07, 2026-09-08, 2026-09-09, 2026-09-10, 2026-09-22, 2026-09-27.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-09-03, 2026-09-07, 2026-09-08, 2026-09-09, 2026-09-10, 2026-09-22, 2026-09-27, 2026-10-10.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -118,7 +118,7 @@ internal sealed class PermalinkBindingIndex
             INSERT INTO PermalinkBindingCapsuleOverrides
                 (PermalinkId, ItemId, capsule_id, created_at)
             SELECT $id, $item, $capsule, $created
-             WHERE (SELECT COUNT(*) FROM FirstAliasClaims
+             WHERE (SELECT COUNT(*) FROM ActiveAliasClaims
                      WHERE permalink_id = $id) > 1
             ON CONFLICT(PermalinkId, ItemId) DO UPDATE SET
                 capsule_id = excluded.capsule_id
@@ -183,7 +183,7 @@ internal sealed class PermalinkBindingIndex
 
         command.CommandText = """
             SELECT 1
-              FROM AnchorTokenCapsules
+              FROM ActiveAnchorCapsules
              WHERE anchor_token = $token
              LIMIT 1
             """;
@@ -214,17 +214,10 @@ internal sealed class PermalinkBindingIndex
             .ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT COALESCE(
-                       PermalinkBindingCapsuleOverrides.capsule_id,
-                       FirstAliasClaims.capsule_id)
-              FROM FirstAliasClaims
-              JOIN PermalinkBindings
-                ON PermalinkBindings.PermalinkId = FirstAliasClaims.permalink_id
-              LEFT JOIN PermalinkBindingCapsuleOverrides
-                ON PermalinkBindingCapsuleOverrides.PermalinkId = PermalinkBindings.PermalinkId
-               AND PermalinkBindingCapsuleOverrides.ItemId = PermalinkBindings.ItemId
-             WHERE PermalinkBindings.PermalinkId = $id
-               AND PermalinkBindings.ItemId = $item
+            SELECT capsule_id
+              FROM ActiveBindings
+             WHERE PermalinkId = $id
+               AND ItemId = $item
             """;
         command.Parameters.AddWithValue("$id", permalinkId);
         command.Parameters.AddWithValue("$item", itemId.ToString("D"));
@@ -256,7 +249,7 @@ internal sealed class PermalinkBindingIndex
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT 1
-              FROM PermalinkBindings
+              FROM ActiveBindings
              WHERE ItemId = $item
              LIMIT 1
             """;
@@ -278,7 +271,7 @@ internal sealed class PermalinkBindingIndex
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT 1
-              FROM FirstAliasClaims
+              FROM ActiveAliasClaims
              WHERE permalink_id = $id
              LIMIT 1
             """;
@@ -308,12 +301,10 @@ internal sealed class PermalinkBindingIndex
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT f.capsule_id
-              FROM FirstAliasClaims f
-              JOIN PermalinkBindings b ON b.PermalinkId = f.permalink_id
-              JOIN AnchorTokenCapsules a ON a.capsule_id = f.capsule_id
-             WHERE b.ItemId = $promoted
-               AND a.current_path = $path
+            SELECT capsule_id
+              FROM ActiveBindings
+             WHERE ItemId = $promoted
+               AND current_path = $path
              LIMIT 1
             """;
         command.Parameters.AddWithValue("$promoted", promotedItemId.ToString("D"));
@@ -330,7 +321,7 @@ internal sealed class PermalinkBindingIndex
             INSERT INTO PermalinkBindings
                 (PermalinkId, ItemId, ContentRoot, VerifiedToken, VerifiedAt, CreatedAt)
             SELECT PermalinkId, $promoted, ContentRoot, VerifiedToken, VerifiedAt, CreatedAt
-              FROM PermalinkBindings
+              FROM ActiveBindings
              WHERE ItemId = $old
             ON CONFLICT(PermalinkId, ItemId) DO UPDATE SET
                 ContentRoot = excluded.ContentRoot,
@@ -346,7 +337,7 @@ internal sealed class PermalinkBindingIndex
             INSERT INTO PermalinkBindingCapsuleOverrides
                 (PermalinkId, ItemId, capsule_id, created_at)
             SELECT PermalinkId, $promoted, $capsule, $created
-              FROM PermalinkBindings
+              FROM ActiveBindings
              WHERE ItemId = $old
             ON CONFLICT(PermalinkId, ItemId) DO UPDATE SET
                 capsule_id = excluded.capsule_id
@@ -435,7 +426,7 @@ internal sealed class PermalinkBindingIndex
         for (var index = 0; index < aliases.Length; index++)
         {
             command.Parameters.AddWithValue("$alias", aliases[index]);
-            command.CommandText = "SELECT ItemId FROM PermalinkBindings WHERE PermalinkId = $alias ORDER BY ItemId";
+            command.CommandText = "SELECT ItemId FROM ActiveBindings WHERE PermalinkId = $alias ORDER BY ItemId";
             var itemIds = new List<Guid>();
             await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
             {
@@ -456,7 +447,7 @@ internal sealed class PermalinkBindingIndex
             command.Parameters.RemoveAt("$alias");
         }
 
-        command.CommandText = "SELECT PermalinkId FROM PermalinkBindings WHERE ItemId = $source ORDER BY PermalinkId";
+        command.CommandText = "SELECT PermalinkId FROM ActiveBindings WHERE ItemId = $source ORDER BY PermalinkId";
         var currentSourceAliases = new List<string>();
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -492,14 +483,10 @@ internal sealed class PermalinkBindingIndex
         {
             command.CommandText = """
                 SELECT 1
-                  FROM PermalinkBindings b
-                  JOIN FirstAliasClaims f ON f.permalink_id = b.PermalinkId
-                  LEFT JOIN PermalinkBindingCapsuleOverrides o
-                    ON o.PermalinkId = b.PermalinkId
-                   AND o.ItemId = b.ItemId
-                 WHERE b.ItemId = $target
-                   AND b.ContentRoot = $root
-                   AND COALESCE(o.capsule_id, f.capsule_id) = $capsule
+                  FROM ActiveBindings
+                 WHERE ItemId = $target
+                   AND ContentRoot = $root
+                   AND capsule_id = $capsule
                  LIMIT 1
                 """;
             command.Parameters.AddWithValue("$capsule", targetCapsule.ToString("D"));
@@ -580,32 +567,12 @@ internal sealed class PermalinkBindingIndex
             .ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT b.PermalinkId, b.ItemId, a.capsule_id, b.ContentRoot,
-                   a.anchor_token, a.binding_id, a.current_path,
-                   o.capsule_id IS NOT NULL
-              FROM PermalinkBindings b
-              JOIN FirstAliasClaims f ON f.permalink_id = b.PermalinkId
-              LEFT JOIN PermalinkBindingCapsuleOverrides o
-                ON o.PermalinkId = b.PermalinkId
-               AND o.ItemId = b.ItemId
-              JOIN AnchorTokenCapsules a
-                ON a.capsule_id = COALESCE(o.capsule_id, f.capsule_id)
-             -- FirstAliasClaims is append-only and holds one row per capsule that has ever
-             -- claimed this alias, so the join above fans out once per historical claim. When
-             -- an override has already decided which capsule wins, those extra rows carry
-             -- nothing but the fan-out, so collapse them to a single arbitrary claim; the
-             -- capsule actually resolved still comes from the override through COALESCE.
-             -- Collapsing by comparing the override to each claim instead only works when the
-             -- winning capsule had itself claimed this alias. That holds after a re-encode and
-             -- does not hold after an alternate-version promotion, where the surviving item's
-             -- capsule claimed its own alias and never this one, so every row was filtered out
-             -- and the promoted alias resolved to nothing.
-             WHERE b.PermalinkId = $id
-               AND (o.capsule_id IS NULL
-                    OR f.capsule_id = (SELECT MIN(f2.capsule_id)
-                                         FROM FirstAliasClaims f2
-                                        WHERE f2.permalink_id = b.PermalinkId))
-             ORDER BY b.ItemId
+            SELECT PermalinkId, ItemId, capsule_id, ContentRoot,
+                   anchor_token, binding_id, current_path,
+                   is_capsule_override
+              FROM ActiveBindings
+             WHERE PermalinkId = $id
+             ORDER BY ItemId
             """;
         command.Parameters.AddWithValue("$id", permalinkId);
         var result = new List<PermalinkResolutionBinding>();
@@ -649,18 +616,12 @@ internal sealed class PermalinkBindingIndex
             .ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT b.PermalinkId, b.ItemId, a.capsule_id, b.ContentRoot,
-                   a.anchor_token, a.binding_id, a.current_path,
-                   o.capsule_id IS NOT NULL
-              FROM PermalinkBindings b
-              JOIN FirstAliasClaims f ON f.permalink_id = b.PermalinkId
-              LEFT JOIN PermalinkBindingCapsuleOverrides o
-                ON o.PermalinkId = b.PermalinkId
-               AND o.ItemId = b.ItemId
-              JOIN AnchorTokenCapsules a
-                ON a.capsule_id = COALESCE(o.capsule_id, f.capsule_id)
-             WHERE b.ItemId = $item
-             ORDER BY b.PermalinkId
+            SELECT PermalinkId, ItemId, capsule_id, ContentRoot,
+                   anchor_token, binding_id, current_path,
+                   is_capsule_override
+              FROM ActiveBindings
+             WHERE ItemId = $item
+             ORDER BY PermalinkId
             """;
         command.Parameters.AddWithValue("$item", itemId.ToString("D"));
         var result = new List<PermalinkResolutionBinding>();

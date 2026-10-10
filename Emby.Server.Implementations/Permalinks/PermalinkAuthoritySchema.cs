@@ -288,6 +288,155 @@ internal static class PermalinkAuthoritySchema
                 header_json TEXT NOT NULL, event_json TEXT NOT NULL,
                 anchor_json TEXT NOT NULL, issued_id TEXT NULL,
                 issuance_nonce TEXT NULL, created_at TEXT NOT NULL);
+            -- Append-only capsule generations are separate from the initial anchor election:
+            -- same-anchor supersession must retain both the detached predecessor and its P5
+            -- successor even though AnchorTokenCapsules can map the stable token only once.
+            CREATE TABLE IF NOT EXISTS PermalinkCapsuleHistory (
+                capsule_id TEXT NOT NULL, anchor_token TEXT NOT NULL,
+                binding_id TEXT NOT NULL, root_path TEXT NOT NULL,
+                capsule_path TEXT NOT NULL, item_kind TEXT NOT NULL,
+                content_root TEXT NOT NULL, current_path TEXT NOT NULL,
+                header_json TEXT NOT NULL, event_json TEXT NOT NULL,
+                anchor_json TEXT NOT NULL, issued_id TEXT NULL,
+                issuance_nonce TEXT NULL, created_at TEXT NOT NULL,
+                PRIMARY KEY(anchor_token, capsule_id));
+            -- Fail closed if an earlier partial migration recorded different immutable bytes for
+            -- the same anchor/capsule generation. The deliberately invalid row is selected only
+            -- on a mismatch, so clean and empty histories remain a no-op.
+            INSERT INTO PermalinkCapsuleHistory
+                (capsule_id, anchor_token, binding_id, root_path, capsule_path,
+                 item_kind, content_root, current_path, header_json, event_json,
+                 anchor_json, issued_id, issuance_nonce, created_at)
+            SELECT NULL, source.anchor_token, source.binding_id, source.root_path,
+                   source.capsule_path, source.item_kind, source.content_root,
+                   source.current_path, source.header_json, source.event_json,
+                   source.anchor_json, source.issued_id, source.issuance_nonce,
+                   source.created_at
+              FROM AnchorTokenCapsules source
+              JOIN PermalinkCapsuleHistory recorded
+                ON recorded.anchor_token = source.anchor_token
+               AND recorded.capsule_id = source.capsule_id
+             WHERE recorded.binding_id IS NOT source.binding_id
+                OR recorded.root_path IS NOT source.root_path
+                OR recorded.capsule_path IS NOT source.capsule_path
+                OR recorded.item_kind IS NOT source.item_kind
+                OR recorded.content_root IS NOT source.content_root
+                OR recorded.header_json IS NOT source.header_json
+                OR recorded.event_json IS NOT source.event_json
+                OR recorded.anchor_json IS NOT source.anchor_json
+                OR recorded.issued_id IS NOT source.issued_id
+                OR recorded.issuance_nonce IS NOT source.issuance_nonce
+                OR recorded.created_at IS NOT source.created_at
+             LIMIT 1;
+            INSERT OR IGNORE INTO PermalinkCapsuleHistory
+                (capsule_id, anchor_token, binding_id, root_path, capsule_path,
+                 item_kind, content_root, current_path, header_json, event_json,
+                 anchor_json, issued_id, issuance_nonce, created_at)
+            SELECT capsule_id, anchor_token, binding_id, root_path, capsule_path,
+                   item_kind, content_root, current_path, header_json, event_json,
+                   anchor_json, issued_id, issuance_nonce, created_at
+              FROM AnchorTokenCapsules;
+            CREATE TRIGGER IF NOT EXISTS reject_conflicting_anchor_token_capsule_history
+            BEFORE INSERT ON AnchorTokenCapsules
+            WHEN EXISTS (
+                SELECT 1 FROM PermalinkCapsuleHistory recorded
+                 WHERE recorded.anchor_token = NEW.anchor_token
+                   AND recorded.capsule_id = NEW.capsule_id
+                   AND (recorded.binding_id IS NOT NEW.binding_id
+                     OR recorded.root_path IS NOT NEW.root_path
+                     OR recorded.capsule_path IS NOT NEW.capsule_path
+                     OR recorded.item_kind IS NOT NEW.item_kind
+                     OR recorded.content_root IS NOT NEW.content_root
+                     OR recorded.header_json IS NOT NEW.header_json
+                     OR recorded.event_json IS NOT NEW.event_json
+                     OR recorded.anchor_json IS NOT NEW.anchor_json
+                     OR recorded.issued_id IS NOT NEW.issued_id
+                     OR recorded.issuance_nonce IS NOT NEW.issuance_nonce
+                     OR recorded.created_at IS NOT NEW.created_at))
+            BEGIN
+                SELECT RAISE(ABORT, 'permalink-capsule-history-mismatch');
+            END;
+            CREATE TRIGGER IF NOT EXISTS record_anchor_token_capsule_history
+            AFTER INSERT ON AnchorTokenCapsules BEGIN
+                INSERT OR IGNORE INTO PermalinkCapsuleHistory
+                    (capsule_id, anchor_token, binding_id, root_path, capsule_path,
+                     item_kind, content_root, current_path, header_json, event_json,
+                     anchor_json, issued_id, issuance_nonce, created_at)
+                VALUES
+                    (NEW.capsule_id, NEW.anchor_token, NEW.binding_id, NEW.root_path,
+                     NEW.capsule_path, NEW.item_kind, NEW.content_root, NEW.current_path,
+                     NEW.header_json, NEW.event_json, NEW.anchor_json, NEW.issued_id,
+                     NEW.issuance_nonce, NEW.created_at);
+            END;
+            -- Genesis history is derived in the AnchorTokenCapsules trigger and therefore uses
+            -- that outer write's capability. P5 may insert successor history directly only with
+            -- its own exact composite-key capability.
+            CREATE TRIGGER IF NOT EXISTS protect_permalink_capsule_history_insert
+            BEFORE INSERT ON PermalinkCapsuleHistory
+            WHEN (SELECT enforcement_enabled FROM AuthorityWriteProtection WHERE singleton = 1) = 1
+             AND NOT EXISTS (
+                    SELECT 1 FROM AnchorTokenCapsules source
+                     WHERE source.anchor_token = NEW.anchor_token
+                       AND source.capsule_id = NEW.capsule_id
+                       AND source.binding_id IS NEW.binding_id
+                       AND source.root_path IS NEW.root_path
+                       AND source.capsule_path IS NEW.capsule_path
+                       AND source.item_kind IS NEW.item_kind
+                       AND source.content_root IS NEW.content_root
+                       AND source.current_path IS NEW.current_path
+                       AND source.header_json IS NEW.header_json
+                       AND source.event_json IS NEW.event_json
+                       AND source.anchor_json IS NEW.anchor_json
+                       AND source.issued_id IS NEW.issued_id
+                       AND source.issuance_nonce IS NEW.issuance_nonce
+                       AND source.created_at IS NEW.created_at)
+            BEGIN
+                SELECT CASE WHEN authority_capability(
+                    'PermalinkCapsuleHistory', 'INSERT',
+                    NEW.anchor_token || char(0) || NEW.capsule_id,
+                    COALESCE((SELECT mac FROM AuthorityWriteAuthorizations
+                        WHERE table_name = 'PermalinkCapsuleHistory' AND verb = 'INSERT'
+                          AND primary_key = NEW.anchor_token || char(0) || NEW.capsule_id), '')) != 1
+                    THEN RAISE(ABORT, 'permalink-protected-write') END;
+            END;
+            -- P4 lineage state is append-only. Ordinary Ensure never writes either table;
+            -- P5 successor mint and detached recovery will supply their narrowly authorized rows.
+            CREATE TABLE IF NOT EXISTS AnchorTokenSuccessors (
+                anchor_token TEXT NOT NULL,
+                previous_capsule_id TEXT NOT NULL,
+                next_capsule_id TEXT NOT NULL,
+                reason TEXT NOT NULL CHECK(reason IN ('detached', 'reclassified')),
+                operation_id TEXT NOT NULL UNIQUE,
+                event_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(anchor_token, previous_capsule_id),
+                UNIQUE(previous_capsule_id),
+                UNIQUE(next_capsule_id),
+                CHECK(previous_capsule_id <> next_capsule_id));
+            CREATE TRIGGER IF NOT EXISTS reject_anchor_token_successor_cycle
+            BEFORE INSERT ON AnchorTokenSuccessors BEGIN
+                SELECT CASE WHEN EXISTS (
+                    WITH RECURSIVE descendants(capsule_id) AS (
+                        SELECT NEW.next_capsule_id
+                        UNION
+                        SELECT successor.next_capsule_id
+                          FROM AnchorTokenSuccessors successor
+                          JOIN descendants
+                            ON successor.previous_capsule_id = descendants.capsule_id
+                         WHERE successor.anchor_token = NEW.anchor_token)
+                    SELECT 1 FROM descendants WHERE capsule_id = NEW.previous_capsule_id)
+                    THEN RAISE(ABORT, 'permalink-anchor-successor-cycle') END;
+            END;
+            CREATE TABLE IF NOT EXISTS RecoveryAuthorizations (
+                operation_id TEXT PRIMARY KEY,
+                detached_capsule_id TEXT NOT NULL,
+                recovery_anchor_token TEXT NOT NULL,
+                predecessor_content_event_id TEXT NOT NULL,
+                prepared_old_digest TEXT NOT NULL,
+                recovery_event_id TEXT NOT NULL UNIQUE,
+                event_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(detached_capsule_id));
             CREATE TABLE IF NOT EXISTS PermalinkIssuances (
                 PermalinkId TEXT PRIMARY KEY, IssuanceNonce TEXT NOT NULL,
                 CreatedAt TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -378,6 +527,118 @@ internal static class PermalinkAuthoritySchema
             -- fails outright on this host.
             CREATE INDEX IF NOT EXISTS IX_FirstAliasClaims_PermalinkId
                 ON FirstAliasClaims(permalink_id);
+            CREATE VIEW IF NOT EXISTS HistoricalCapsules AS
+            SELECT capsule.*,
+                   EXISTS (
+                       SELECT 1 FROM OperationDecisions d
+                        WHERE d.capsule_id = capsule.capsule_id
+                          AND d.decision IN ('detached', 'reclassified')) AS is_detached
+              FROM PermalinkCapsuleHistory capsule;
+            CREATE VIEW IF NOT EXISTS ActiveAnchorCapsules AS
+            WITH RECURSIVE lineage(anchor_token, capsule_id) AS (
+                SELECT capsule.anchor_token, capsule.capsule_id
+                  FROM AnchorTokenCapsules capsule
+                 WHERE NOT EXISTS (
+                           SELECT 1 FROM AnchorTokenSuccessors predecessor
+                            WHERE predecessor.anchor_token = capsule.anchor_token
+                              AND predecessor.next_capsule_id = capsule.capsule_id)
+                UNION ALL
+                SELECT lineage.anchor_token, successors.next_capsule_id
+                  FROM lineage
+                  JOIN AnchorTokenSuccessors successors
+                    ON successors.anchor_token = lineage.anchor_token
+                   AND successors.previous_capsule_id = lineage.capsule_id
+            )
+            SELECT lineage.anchor_token,
+                   capsule.capsule_id, capsule.binding_id, capsule.root_path,
+                   capsule.capsule_path, capsule.item_kind, capsule.content_root,
+                   CASE WHEN lineage.capsule_id = active_anchor.capsule_id
+                        THEN active_anchor.current_path
+                        ELSE capsule.current_path
+                    END AS current_path,
+                   capsule.header_json, capsule.event_json,
+                   capsule.anchor_json, capsule.issued_id, capsule.issuance_nonce,
+                   capsule.created_at
+              FROM lineage
+              JOIN AnchorTokenCapsules active_anchor
+                ON active_anchor.anchor_token = lineage.anchor_token
+              JOIN PermalinkCapsuleHistory capsule
+                ON capsule.anchor_token = lineage.anchor_token
+               AND capsule.capsule_id = lineage.capsule_id
+             WHERE NOT EXISTS (
+                       SELECT 1 FROM AnchorTokenSuccessors successor
+                        WHERE successor.anchor_token = lineage.anchor_token
+                          AND successor.previous_capsule_id = lineage.capsule_id)
+               AND NOT EXISTS (
+                       SELECT 1 FROM OperationDecisions detached
+                        WHERE detached.capsule_id = lineage.capsule_id
+                          AND detached.decision IN ('detached', 'reclassified'))
+            UNION ALL
+            SELECT recovery.recovery_anchor_token,
+                   capsule.capsule_id, capsule.binding_id, capsule.root_path,
+                   capsule.capsule_path, capsule.item_kind, capsule.content_root,
+                   elected.current_path, capsule.header_json, capsule.event_json,
+                   capsule.anchor_json, capsule.issued_id, capsule.issuance_nonce,
+                   capsule.created_at
+              FROM RecoveryAuthorizations recovery
+              JOIN AnchorTokenCapsules elected
+                ON elected.anchor_token = recovery.recovery_anchor_token
+               AND elected.capsule_id = recovery.detached_capsule_id
+              JOIN PermalinkCapsuleHistory capsule
+                ON capsule.anchor_token = elected.anchor_token
+               AND capsule.capsule_id = elected.capsule_id
+             WHERE EXISTS (
+                       SELECT 1 FROM OperationDecisions detached
+                        WHERE detached.capsule_id = recovery.detached_capsule_id
+                          AND detached.decision IN ('detached', 'reclassified'))
+               AND EXISTS (
+                       SELECT 1 FROM AnchorTokenCapsules original
+                        WHERE original.capsule_id = recovery.detached_capsule_id
+                          AND original.anchor_token <> recovery.recovery_anchor_token);
+            CREATE VIEW IF NOT EXISTS ActiveAliasClaims AS
+            SELECT claim.*
+              FROM FirstAliasClaims claim
+             WHERE NOT EXISTS (
+                       SELECT 1 FROM OperationDecisions decision
+                        WHERE decision.capsule_id = claim.capsule_id
+                          AND decision.decision IN ('detached', 'reclassified'));
+            CREATE VIEW IF NOT EXISTS ActiveBindings AS
+            SELECT binding.PermalinkId, binding.ItemId, binding.ContentRoot,
+                   binding.VerifiedToken, binding.VerifiedAt, binding.CreatedAt,
+                   anchor.capsule_id, anchor.anchor_token, anchor.binding_id,
+                   anchor.current_path, selector.capsule_id IS NOT NULL AS is_capsule_override
+              FROM PermalinkBindings binding
+              JOIN ActiveAliasClaims claim ON claim.permalink_id = binding.PermalinkId
+              LEFT JOIN PermalinkBindingCapsuleOverrides selector
+                ON selector.PermalinkId = binding.PermalinkId
+               AND selector.ItemId = binding.ItemId
+              JOIN ActiveAnchorCapsules anchor
+                ON anchor.capsule_id = COALESCE(selector.capsule_id, claim.capsule_id)
+             WHERE selector.capsule_id IS NULL
+                OR claim.capsule_id = (
+                    SELECT MIN(candidate.capsule_id)
+                      FROM ActiveAliasClaims candidate
+                     WHERE candidate.permalink_id = binding.PermalinkId)
+            UNION ALL
+            SELECT binding.PermalinkId, binding.ItemId, binding.ContentRoot,
+                   binding.VerifiedToken, binding.VerifiedAt, binding.CreatedAt,
+                   anchor.capsule_id, anchor.anchor_token, anchor.binding_id,
+                   anchor.current_path, selector.capsule_id IS NOT NULL AS is_capsule_override
+              FROM PermalinkBindings binding
+              JOIN FirstAliasClaims claim ON claim.permalink_id = binding.PermalinkId
+              JOIN RecoveryAuthorizations recovery
+                ON recovery.detached_capsule_id = claim.capsule_id
+              LEFT JOIN PermalinkBindingCapsuleOverrides selector
+                ON selector.PermalinkId = binding.PermalinkId
+               AND selector.ItemId = binding.ItemId
+              JOIN ActiveAnchorCapsules anchor
+                ON anchor.capsule_id = COALESCE(selector.capsule_id, claim.capsule_id)
+               AND anchor.anchor_token = recovery.recovery_anchor_token
+             WHERE COALESCE(selector.capsule_id, claim.capsule_id) = claim.capsule_id
+               AND EXISTS (
+                   SELECT 1 FROM OperationDecisions decision
+                    WHERE decision.capsule_id = claim.capsule_id
+                      AND decision.decision = 'detached');
             CREATE TRIGGER IF NOT EXISTS protect_permalink_issuances_update
             BEFORE UPDATE ON PermalinkIssuances BEGIN
                 SELECT CASE WHEN (SELECT enforcement_enabled FROM AuthorityWriteProtection WHERE singleton = 1) = 1
@@ -468,6 +729,9 @@ internal static class PermalinkAuthoritySchema
             "SnapshotMetadata",
             "PermalinkIssuances",
             "FirstAliasClaims",
+            "PermalinkCapsuleHistory",
+            "AnchorTokenSuccessors",
+            "RecoveryAuthorizations",
             "ContentTransitionClaims",
             "OperationDecisions",
             "PathOperationDecisions",
@@ -501,6 +765,8 @@ internal static class PermalinkAuthoritySchema
             ("AuthorityProtocolState", "CAST(NEW.singleton AS TEXT)"),
             ("SnapshotMetadata", "CAST(NEW.generation AS TEXT)"),
             ("AnchorTokenCapsules", "NEW.anchor_token"),
+            ("AnchorTokenSuccessors", "NEW.anchor_token || char(0) || NEW.previous_capsule_id"),
+            ("RecoveryAuthorizations", "NEW.operation_id"),
             ("PermalinkIssuances", "NEW.PermalinkId"),
             ("FirstAliasClaims", "NEW.capsule_id"),
             ("PermalinkBindingCapsuleOverrides", "NEW.PermalinkId || char(0) || NEW.ItemId"),

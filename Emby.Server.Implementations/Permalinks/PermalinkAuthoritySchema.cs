@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-04, 2026-10-07, 2026-10-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-04, 2026-10-07, 2026-10-09, 2026-10-10.
 using System;
 using System.Linq;
 using System.Threading;
@@ -194,6 +194,29 @@ internal static class PermalinkAuthoritySchema
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
+            -- P9 elevated confirmation authority. The plaintext server challenge is returned
+            -- once and never stored; only its canonical SHA-256 digest crosses this boundary.
+            CREATE TABLE IF NOT EXISTS PermalinkConfirmationChallenges (
+                challenge_id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL UNIQUE,
+                challenge_digest TEXT NOT NULL
+                    CHECK(length(challenge_digest) = 64 AND challenge_digest NOT GLOB '*[^0-9a-f]*'),
+                target_digest TEXT NOT NULL
+                    CHECK(length(target_digest) = 64 AND target_digest NOT GLOB '*[^0-9a-f]*'),
+                inventory_generation TEXT NOT NULL
+                    CHECK(length(inventory_generation) = 64 AND inventory_generation NOT GLOB '*[^0-9a-f]*'),
+                requested_action TEXT NOT NULL CHECK(requested_action IN (
+                    'orphan-closure', 'exact-restoration', 'restore-with-rewrite',
+                    'successor-mint', 'detached-capsule-recovery', 'scratch-adoption')),
+                expires_at TEXT NOT NULL,
+                consumed_at TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+                kind TEXT NOT NULL DEFAULT 'confirmation' CHECK(kind = 'confirmation'),
+                deleted_at TEXT NULL,
+                CHECK(expires_at > created_at),
+                CHECK(consumed_at IS NULL OR consumed_at >= created_at));
             -- A retirement copy is a two-root operation. Its registry row owns the content fact,
             -- its writer-admission row reserves the source content key, and this companion binds
             -- the exact absent evidence destination and its parent without overloading either
@@ -496,6 +519,7 @@ internal static class PermalinkAuthoritySchema
             ("PermalinkRegistryPopulationCheckpoints", "NEW.population_id || char(0) || NEW.source_kind || char(0) || NEW.source_key"),
             ("PermalinkAbsenceWatermarks", "NEW.watermark_id"),
             ("PermalinkWriterAdmissions", "NEW.admission_id"),
+            ("PermalinkConfirmationChallenges", "NEW.challenge_id"),
             ("PermalinkRetirementIntents", "NEW.operation_id"),
             ("PathReservations", "NEW.reservation_id"),
             ("PendingSupersessionSlots", "NEW.slot_id")
@@ -545,7 +569,9 @@ internal static class PermalinkAuthoritySchema
             // The retirement companion and admission are binding/lease details inserted in the
             // same transaction as their registry row. The registry write is the one content fact
             // and advances content_epoch exactly once.
-            var contentIncrement = table is "PermalinkWriterAdmissions" or "PermalinkRetirementIntents"
+            var contentIncrement = table is "PermalinkWriterAdmissions"
+                or "PermalinkRetirementIntents"
+                or "PermalinkConfirmationChallenges"
                 ? "content_epoch"
                 : "content_epoch + 1";
             foreach (var verb in new[] { "INSERT", "UPDATE", "DELETE" })

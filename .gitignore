@@ -1,4 +1,4 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-07-22, 2026-09-09.
+# SlopTank modification notice: added or changed by SlopTank on 2026-07-22, 2026-09-09, 2026-10-10.
 .directory
 
 #################
@@ -293,6 +293,7 @@ dotnet/
 /private-tests/
 /sloptank-tests/
 /hidden-tests/
+/tests-private-*/
 /private/
 # PB-002 Private-marked test files
 *.private.test.*

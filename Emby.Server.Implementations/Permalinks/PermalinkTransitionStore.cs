@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-10, 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-10, 2026-10-03, 2026-10-10.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -166,7 +166,7 @@ internal sealed class PermalinkTransitionStore
         select.Transaction = transaction;
         select.CommandText = """
             SELECT permalink_id, issuance_nonce, alias_event_id, event_json, created_at
-              FROM FirstAliasClaims
+              FROM ActiveAliasClaims
              WHERE capsule_id = $capsule
             """;
         select.Parameters.AddWithValue("$capsule", capsuleId.ToString("D"));
@@ -220,7 +220,7 @@ internal sealed class PermalinkTransitionStore
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT permalink_id
-              FROM FirstAliasClaims
+              FROM ActiveAliasClaims
              WHERE capsule_id = $capsule AND permalink_id IS NOT NULL
              ORDER BY created_at, permalink_id
             """;

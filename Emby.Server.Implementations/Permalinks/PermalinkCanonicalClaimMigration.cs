@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-14.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-14, 2026-10-10.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -523,7 +523,7 @@ internal static class PermalinkCanonicalClaimMigration
         var paths = new List<string>();
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT DISTINCT capsule_path FROM AnchorTokenCapsules WHERE capsule_id = $capsule
+            SELECT DISTINCT capsule_path FROM HistoricalCapsules WHERE capsule_id = $capsule
             """;
         command.Parameters.AddWithValue("$capsule", capsuleId.ToString("D"));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken)

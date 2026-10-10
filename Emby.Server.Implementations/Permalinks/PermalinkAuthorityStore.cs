@@ -161,7 +161,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
             SELECT anchor_token, capsule_id, binding_id, root_path, capsule_path,
                    item_kind, content_root, current_path, header_json, event_json,
                    anchor_json, issued_id, issuance_nonce, created_at
-              FROM AnchorTokenCapsules
+              FROM ActiveAnchorCapsules
              WHERE anchor_token = $anchor_token
             """;
         command.Parameters.AddWithValue("$anchor_token", anchorToken);
@@ -188,7 +188,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
             SELECT anchor_token, capsule_id, binding_id, root_path, capsule_path,
                    item_kind, content_root, current_path, header_json, event_json,
                    anchor_json, issued_id, issuance_nonce, created_at
-              FROM AnchorTokenCapsules
+              FROM ActiveAnchorCapsules
              WHERE capsule_id = $capsule_id
             """;
         command.Parameters.AddWithValue("$capsule_id", capsuleId.ToString("D"));
@@ -215,7 +215,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
             SELECT anchor_token, capsule_id, binding_id, root_path, capsule_path,
                    item_kind, content_root, current_path, header_json, event_json,
                    anchor_json, issued_id, issuance_nonce, created_at
-              FROM AnchorTokenCapsules
+              FROM ActiveAnchorCapsules
              WHERE current_path = $path
             """;
         command.Parameters.AddWithValue("$path", path);
@@ -289,13 +289,29 @@ internal sealed class PermalinkAuthorityStore : IDisposable
             SELECT anchor_token, capsule_id, binding_id, root_path, capsule_path,
                    item_kind, content_root, current_path, header_json, event_json,
                    anchor_json, issued_id, issuance_nonce, created_at
-              FROM AnchorTokenCapsules
+              FROM ActiveAnchorCapsules
              WHERE anchor_token = $anchor_token
             """;
         select.Parameters.AddWithValue("$anchor_token", candidate.AnchorToken);
         await using var reader = await select.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
+            await reader.DisposeAsync().ConfigureAwait(false);
+            select.CommandText = """
+                SELECT 1
+                  FROM HistoricalCapsules
+                 WHERE anchor_token = $anchor_token
+                   AND is_detached = 1
+                 LIMIT 1
+                """;
+            if (await select.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null)
+            {
+                throw new PermalinkException(
+                    PermalinkErrorKind.Conflict,
+                    "anchor-retired",
+                    $"Anchor '{candidate.AnchorToken}' has a terminal retired election.");
+            }
+
             throw new PermalinkException(
                 PermalinkErrorKind.Unavailable,
                 "anchor-election-missing",

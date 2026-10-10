@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-07, 2026-10-10.
 using System;
 using System.Data;
 using Microsoft.Data.Sqlite;
@@ -20,5 +20,17 @@ internal static class PermalinkSqliteTransactions
     {
         ArgumentNullException.ThrowIfNull(connection);
         return connection.BeginTransaction(IsolationLevel.Serializable, deferred: true);
+    }
+
+    /// <summary>
+    /// Begins an immediate serializable transaction. Acquiring the SQLite writer reservation
+    /// before reading makes a read-then-update consume decision atomic across connections.
+    /// </summary>
+    /// <param name="connection">The open SQLite connection.</param>
+    /// <returns>The immediate serializable transaction.</returns>
+    public static SqliteTransaction BeginImmediateSerializable(SqliteConnection connection)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        return connection.BeginTransaction(IsolationLevel.Serializable, deferred: false);
     }
 }

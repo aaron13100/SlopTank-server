@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-12.
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -101,6 +101,7 @@ public class ImageController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult> PostUserImage(
         [FromQuery] Guid? userId)
     {
@@ -127,19 +128,23 @@ public class ImageController : BaseJellyfinApiController
             // Handle image/png; charset=utf-8
             var mimeType = Request.ContentType?.Split(';').FirstOrDefault();
             var userDataPath = Path.Combine(_serverConfigurationManager.ApplicationPaths.UserConfigurationDirectoryPath, user.Username);
-            if (user.ProfileImage is not null)
+            var coordinator = new UserImageUploadCoordinator(_userManager, _providerManager, _fileSystem, _logger);
+            var outcome = await coordinator.UploadAsync(
+                requestUserId,
+                userDataPath,
+                extension,
+                mimeType,
+                stream,
+                freshUser => RequestHelpers.AssertCanUpdateUser(HttpContext.User, freshUser, true)).ConfigureAwait(false);
+
+            return outcome switch
             {
-                await _userManager.ClearProfileImageAsync(user).ConfigureAwait(false);
-            }
-
-            user.ProfileImage = new Database.Implementations.Entities.ImageInfo(Path.Combine(userDataPath, "profile" + extension));
-
-            await _providerManager
-                .SaveImage(stream, mimeType, user.ProfileImage.Path)
-                .ConfigureAwait(false);
-            await _userManager.UpdateUserAsync(user).ConfigureAwait(false);
-
-            return NoContent();
+                UserImageUploadOutcome.Published => NoContent(),
+                UserImageUploadOutcome.UserNotFound => NotFound(),
+                UserImageUploadOutcome.Forbidden => StatusCode(StatusCodes.Status403Forbidden, "User is not allowed to update the image."),
+                UserImageUploadOutcome.Contended => Conflict(),
+                _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, "Unknown profile image upload outcome.")
+            };
         }
     }
 

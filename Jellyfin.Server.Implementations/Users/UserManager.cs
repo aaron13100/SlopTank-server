@@ -1,7 +1,9 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-12.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -51,7 +53,9 @@ namespace Jellyfin.Server.Implementations.Users
         private readonly DefaultPasswordResetProvider _defaultPasswordResetProvider;
         private readonly IServerConfigurationManager _serverConfigurationManager;
 
-        private readonly LockHelper _userLock = new();
+        private readonly LockHelper _userLock;
+        private readonly SemaphoreSlim _authenticationDiscoveryMutex = new(1, 1);
+        private static readonly AsyncLocal<bool> _insideAuthenticationProviderCallback = new();
 
         /// <summary>
         /// Initializes a new instance of the <see cref="UserManager"/> class.
@@ -75,6 +79,31 @@ namespace Jellyfin.Server.Implementations.Users
             IServerConfigurationManager serverConfigurationManager,
             IEnumerable<IPasswordResetProvider> passwordResetProviders,
             IEnumerable<IAuthenticationProvider> authenticationProviders)
+            : this(
+                dbProvider,
+                eventManager,
+                networkManager,
+                appHost,
+                imageProcessor,
+                logger,
+                serverConfigurationManager,
+                passwordResetProviders,
+                authenticationProviders,
+                null)
+        {
+        }
+
+        internal UserManager(
+            IDbContextFactory<JellyfinDbContext> dbProvider,
+            IEventManager eventManager,
+            INetworkManager networkManager,
+            IApplicationHost appHost,
+            IImageProcessor imageProcessor,
+            ILogger<UserManager> logger,
+            IServerConfigurationManager serverConfigurationManager,
+            IEnumerable<IPasswordResetProvider> passwordResetProviders,
+            IEnumerable<IAuthenticationProvider> authenticationProviders,
+            IUserLockWaitObserver? userLockWaitObserver)
         {
             _dbProvider = dbProvider;
             _eventManager = eventManager;
@@ -86,6 +115,8 @@ namespace Jellyfin.Server.Implementations.Users
 
             _passwordResetProviders = passwordResetProviders.ToList();
             _authenticationProviders = authenticationProviders.ToList();
+
+            _userLock = new LockHelper(userLockWaitObserver);
 
             _invalidAuthProvider = _authenticationProviders.OfType<InvalidAuthProvider>().First();
             _defaultAuthenticationProvider = _authenticationProviders.OfType<DefaultAuthenticationProvider>().First();
@@ -224,7 +255,26 @@ namespace Jellyfin.Server.Implementations.Users
                         .ConfigureAwait(false)
                         ?? throw new ResourceNotFoundException(nameof(user.Id));
 
+                    if (user.RowVersion != dbUser.RowVersion)
+                    {
+                        throw new DbUpdateConcurrencyException(
+                            $"The user '{user.Id}' changed from row version {user.RowVersion} to {dbUser.RowVersion} before the update.");
+                    }
+
+                    if (!string.Equals(user.Password, dbUser.Password, StringComparison.Ordinal))
+                    {
+                        throw new CredentialMutationException(
+                            $"The user '{user.Id}' password can only be changed through ChangePassword.");
+                    }
+
+                    string? persistedPassword = dbUser.Password;
+                    uint persistedRowVersion = dbUser.RowVersion;
+
                     dbContext.Entry(dbUser).CurrentValues.SetValues(user);
+                    dbContext.Entry(dbUser).CurrentValues[nameof(User.Password)] = persistedPassword;
+                    dbContext.Entry(dbUser).CurrentValues[nameof(User.RowVersion)] = persistedRowVersion;
+                    dbContext.Entry(dbUser).Property(value => value.Password).IsModified = false;
+                    dbContext.Entry(dbUser).Property(value => value.RowVersion).IsModified = true;
                     dbUser.Permissions.Clear();
                     foreach (var permission in user.Permissions)
                     {
@@ -494,166 +544,24 @@ namespace Jellyfin.Server.Implementations.Users
             string remoteEndPoint,
             bool isUserSession)
         {
+            if (_insideAuthenticationProviderCallback.Value)
+            {
+                throw new AuthenticationException("Authentication cannot be invoked recursively by an authentication provider.");
+            }
+
             if (string.IsNullOrWhiteSpace(username))
             {
                 _logger.LogInformation("Authentication request without username has been denied (IP: {IP}).", remoteEndPoint);
                 throw new ArgumentNullException(nameof(username));
             }
 
-            bool success;
-            var user = GetUserByName(username);
-            using (await _userLock.LockAsync(user?.Id ?? Guid.Empty).ConfigureAwait(false))
+            var initialUser = GetUserByName(username);
+            if (initialUser is not null)
             {
-                using var dbContext = _dbProvider.CreateDbContext();
-
-                // Reload the user now that we hold the lock so the RowVersion is current.
-                // GetUserByName uses AsNoTracking and the snapshot may be stale if another
-                // write (e.g. a concurrent login) incremented RowVersion after our initial load.
-                if (user is not null)
-                {
-                    user = await UserQuery(dbContext).FirstOrDefaultAsync(e => e.Id == user.Id).ConfigureAwait(false) ?? user;
-                }
-
-                var authResult = await AuthenticateLocalUser(username, password, user)
-                    .ConfigureAwait(false);
-                var authenticationProvider = authResult.AuthenticationProvider;
-                success = authResult.Success;
-
-                if (success && user is not null)
-                {
-                    // refresh the user if the auth provider might have updated it in the auth method.
-                    // this is a hack, this needs removal once the LDAP plugin uses the correct interface to get the user we hand in here and update that one instead.
-                    user = await UserQuery(dbContext).FirstOrDefaultAsync(e => e.Id == user.Id).ConfigureAwait(false);
-                }
-
-                if (user is null)
-                {
-                    string updatedUsername = authResult.Username;
-
-                    if (success
-                        && authenticationProvider is not null
-                        && authenticationProvider is not DefaultAuthenticationProvider)
-                    {
-                        // Trust the username returned by the authentication provider
-                        username = updatedUsername;
-
-                        // Search the database for the user again
-                        // the authentication provider might have created it
-#pragma warning disable CA1862 // Use the 'StringComparison' method overloads to perform case-insensitive string comparisons
-                        user = await UserQuery(dbContext)
-                            .FirstOrDefaultAsync(e => e.NormalizedUsername == username.ToUpperInvariant()).ConfigureAwait(false);
-
-                        if (authenticationProvider is IHasNewUserPolicy hasNewUserPolicy && user is not null)
-                        {
-                            await UpdatePolicyAsync(user.Id, hasNewUserPolicy.GetNewUserPolicy()).ConfigureAwait(false);
-                            user = await UserQuery(dbContext)
-                                .FirstOrDefaultAsync(e => e.NormalizedUsername == username.ToUpperInvariant()).ConfigureAwait(false);
-#pragma warning restore CA1862 // Use the 'StringComparison' method overloads to perform case-insensitive string comparisons
-                        }
-                    }
-                }
-
-                if (success && user is not null && authenticationProvider is not null)
-                {
-                    var providerId = authenticationProvider.GetType().FullName;
-
-                    if (providerId is not null && !string.Equals(providerId, user.AuthenticationProviderId, StringComparison.OrdinalIgnoreCase))
-                    {
-                        await dbContext.Users
-                            .Where(e => e.Id == user.Id)
-                            .ExecuteUpdateAsync(e => e.SetProperty(f => f.AuthenticationProviderId, providerId))
-                            .ConfigureAwait(false);
-                    }
-                }
-
-                if (user is null)
-                {
-                    _logger.LogInformation(
-                        "Authentication request for {UserName} has been denied (IP: {IP}).",
-                        username,
-                        remoteEndPoint);
-                    throw new AuthenticationException("Invalid username or password entered.");
-                }
-
-                if (user.HasPermission(PermissionKind.IsDisabled))
-                {
-                    _logger.LogInformation(
-                        "Authentication request for {UserName} has been denied because this account is currently disabled (IP: {IP}).",
-                        username,
-                        remoteEndPoint);
-                    throw new SecurityException(
-                        $"The {user.Username} account is currently disabled. Please consult with your administrator.");
-                }
-
-                if (!user.HasPermission(PermissionKind.EnableRemoteAccess) &&
-                    !_networkManager.IsInLocalNetwork(remoteEndPoint))
-                {
-                    _logger.LogInformation(
-                        "Authentication request for {UserName} forbidden: remote access disabled and user not in local network (IP: {IP}).",
-                        username,
-                        remoteEndPoint);
-                    throw new SecurityException("Forbidden.");
-                }
-
-                if (!user.IsParentalScheduleAllowed())
-                {
-                    _logger.LogInformation(
-                        "Authentication request for {UserName} is not allowed at this time due parental restrictions (IP: {IP}).",
-                        username,
-                        remoteEndPoint);
-                    throw new SecurityException("User is not allowed access at this time.");
-                }
-
-                // Update LastActivityDate and LastLoginDate, then save
-                if (success)
-                {
-                    if (isUserSession)
-                    {
-                        var date = DateTime.UtcNow;
-                        await dbContext.Users
-                            .Where(e => e.Id == user.Id)
-                            .ExecuteUpdateAsync(e => e
-                                .SetProperty(f => f.LastActivityDate, date)
-                                .SetProperty(f => f.LastLoginDate, date))
-                            .ConfigureAwait(false);
-                    }
-
-                    await dbContext.Users
-                        .Where(e => e.Id == user.Id)
-                        .ExecuteUpdateAsync(e => e.SetProperty(f => f.InvalidLoginAttemptCount, 0))
-                        .ConfigureAwait(false);
-                    _logger.LogInformation("Authentication request for {UserName} has succeeded.", user.Username);
-                }
-                else
-                {
-                    user.InvalidLoginAttemptCount++;
-                    int? maxInvalidLogins = user.LoginAttemptsBeforeLockout;
-                    if (maxInvalidLogins.HasValue && user.InvalidLoginAttemptCount >= maxInvalidLogins)
-                    {
-                        user.SetPermission(PermissionKind.IsDisabled, true);
-                        dbContext.Update(user);
-                        await dbContext.SaveChangesAsync()
-                            .ConfigureAwait(false);
-                        await _eventManager.PublishAsync(new UserLockedOutEventArgs(user)).ConfigureAwait(false);
-                        _logger.LogWarning(
-                            "Disabling user {Username} due to {Attempts} unsuccessful login attempts.",
-                            user.Username,
-                            user.InvalidLoginAttemptCount);
-                    }
-
-                    await dbContext.Users
-                        .Where(e => e.Id == user.Id)
-                        .ExecuteUpdateAsync(e => e.SetProperty(f => f.InvalidLoginAttemptCount, f => f.InvalidLoginAttemptCount + 1))
-                        .ConfigureAwait(false);
-
-                    _logger.LogInformation(
-                        "Authentication request for {UserName} has been denied (IP: {IP}).",
-                        user.Username,
-                        remoteEndPoint);
-                }
+                return await AuthenticateKnownUserAsync(initialUser.Id, username, password, remoteEndPoint, isUserSession).ConfigureAwait(false);
             }
 
-            return success ? user : null;
+            return await AuthenticateDiscoveredUserAsync(username, password, remoteEndPoint, isUserSession).ConfigureAwait(false);
         }
 
         /// <inheritdoc/>
@@ -666,9 +574,22 @@ namespace Jellyfin.Server.Implementations.Users
                 .StartForgotPasswordProcess(user, enteredUsername, isInNetwork)
                 .ConfigureAwait(false);
 
-            if (user is not null && isInNetwork)
+            bool isBuiltInPasswordResetProvider = ReferenceEquals(passwordResetProvider, _defaultPasswordResetProvider)
+                && passwordResetProvider.GetType() == typeof(DefaultPasswordResetProvider);
+            if (user is not null && isInNetwork && !isBuiltInPasswordResetProvider)
             {
-                await UpdateUserAsync(user).ConfigureAwait(false);
+                try
+                {
+                    await UpdateUserAsync(user).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is DbUpdateConcurrencyException || ex is CredentialMutationException)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Password reset provider {Provider} completed, but its secondary user update was refused for user {UserId}.",
+                        passwordResetProvider.GetType().FullName,
+                        user.Id);
+                }
             }
 
             return result;
@@ -966,32 +887,6 @@ namespace Jellyfin.Server.Implementations.Users
             return providers;
         }
 
-        private async Task<(IAuthenticationProvider? AuthenticationProvider, string Username, bool Success)> AuthenticateLocalUser(
-                string username,
-                string password,
-                User? user)
-        {
-            bool success = false;
-            IAuthenticationProvider? authenticationProvider = null;
-
-            foreach (var provider in GetAuthenticationProviders(user))
-            {
-                var providerAuthResult =
-                    await AuthenticateWithProvider(provider, username, password, user).ConfigureAwait(false);
-                var updatedUsername = providerAuthResult.Username;
-                success = providerAuthResult.Success;
-
-                if (success)
-                {
-                    authenticationProvider = provider;
-                    username = updatedUsername;
-                    break;
-                }
-            }
-
-            return (authenticationProvider, username, success);
-        }
-
         private async Task<(string Username, bool Success)> AuthenticateWithProvider(
             IAuthenticationProvider provider,
             string username,
@@ -1000,9 +895,13 @@ namespace Jellyfin.Server.Implementations.Users
         {
             try
             {
-                var authenticationResult = provider is IRequiresResolvedUser requiresResolvedUser
-                    ? await requiresResolvedUser.Authenticate(username, password, resolvedUser).ConfigureAwait(false)
-                    : await provider.Authenticate(username, password).ConfigureAwait(false);
+                ProviderAuthenticationResult authenticationResult;
+                using (EnterAuthenticationProviderCallback())
+                {
+                    authenticationResult = provider is IRequiresResolvedUser requiresResolvedUser
+                        ? await requiresResolvedUser.Authenticate(username, password, resolvedUser).ConfigureAwait(false)
+                        : await provider.Authenticate(username, password).ConfigureAwait(false);
+                }
 
                 if (authenticationResult.Username != username)
                 {
@@ -1023,8 +922,32 @@ namespace Jellyfin.Server.Implementations.Users
         private async Task UpdateUserInternalAsync(JellyfinDbContext dbContext, User user)
         {
             dbContext.Users.Attach(user);
-            dbContext.Entry(user).State = EntityState.Modified;
+            var userEntry = dbContext.Entry(user);
+            userEntry.State = EntityState.Modified;
+            userEntry.Property(value => value.Password).IsModified = false;
             await dbContext.SaveChangesAsync().ConfigureAwait(false);
+        }
+
+        private static async Task<User> PersistPasswordHashUpgradeAsync(
+            JellyfinDbContext dbContext,
+            PasswordHashUpgrade upgrade)
+        {
+            int updatedRows = await dbContext.Users
+                .Where(user => user.Id.Equals(upgrade.UserId) && user.Password == upgrade.ExpectedPassword)
+                .ExecuteUpdateAsync(properties => properties
+                    .SetProperty(user => user.Password, upgrade.ReplacementPassword)
+                    .SetProperty(user => user.RowVersion, user => user.RowVersion + 1))
+                .ConfigureAwait(false);
+
+            if (updatedRows != 1)
+            {
+                throw new AuthenticationException("The account credentials changed during authentication.");
+            }
+
+            return await UserQuery(dbContext)
+                .FirstOrDefaultAsync(user => user.Id.Equals(upgrade.UserId))
+                .ConfigureAwait(false)
+                ?? throw new AuthenticationException("The account no longer exists.");
         }
 
         /// <inheritdoc/>
@@ -1043,39 +966,214 @@ namespace Jellyfin.Server.Implementations.Users
             if (disposing)
             {
                 _userLock.Dispose();
+                _authenticationDiscoveryMutex.Dispose();
             }
         }
 
         internal sealed class LockHelper : IDisposable
         {
             private readonly AsyncKeyedLocker<Guid> _userLock = new();
+            private readonly AsyncLocal<LockOwnershipFrame?> _ownership = new();
+            private readonly IUserLockWaitObserver? _waitObserver;
+            private readonly Func<Guid, ValueTask<IDisposable>> _acquireLock;
 
             private bool _disposed;
 
+            public LockHelper()
+                : this(null)
+            {
+            }
+
+            internal LockHelper(IUserLockWaitObserver? waitObserver)
+                : this(waitObserver, null)
+            {
+            }
+
+            internal LockHelper(
+                IUserLockWaitObserver? waitObserver,
+                Func<Guid, ValueTask<IDisposable>>? acquireLock)
+            {
+                _waitObserver = waitObserver;
+                _acquireLock = acquireLock ?? (key => _userLock.LockAsync(key, true));
+            }
+
+            private enum LockOwnershipState
+            {
+                Waiting,
+                Held,
+                Released
+            }
+
+            // Kept for source compatibility with the existing internal test surface. Lock
+            // ownership decisions use the keyed frame below, never this counter.
             public static AsyncLocal<int> IsNestedLock { get; set; } = new();
 
             public bool ShouldLock()
             {
-                return IsNestedLock.Value == 0;
+                return GetCurrentFrame() is null;
             }
 
             public ValueTask<IDisposable> LockAsync(Guid key)
             {
                 ThrowIfDisposed();
-                var isNested = LockHelper.IsNestedLock.Value != 0;
-                LockHelper.IsNestedLock.Value = LockHelper.IsNestedLock.Value + 1;
-                if (isNested)
+                if (key.Equals(Guid.Empty))
                 {
-                    return new ValueTask<IDisposable>(new LockHandle { Parent = null });
+                    throw new ArgumentException("A user lock requires a resolved user ID.", nameof(key));
                 }
 
-                return AcquireLockAsync(key);
+                LockOwnershipFrame? previousFrame = GetCurrentFrame();
+                if (previousFrame is not null)
+                {
+                    if (previousFrame.State == LockOwnershipState.Waiting)
+                    {
+                        throw new UserLockOrderException("A user lock cannot be nested while this async flow is waiting for a key.");
+                    }
+
+                    if (!previousFrame.Key.Equals(key))
+                    {
+                        throw new UserLockOrderException("A different user lock cannot be nested inside the current user lock.");
+                    }
+
+                    return ReenterHeldKey(previousFrame);
+                }
+
+                object topToken = new();
+                var frame = new LockOwnershipFrame(key, previousFrame, LockOwnershipState.Waiting, 1, null, topToken);
+                _ownership.Value = frame;
+
+                ValueTask<IDisposable> acquisition;
+                try
+                {
+                    acquisition = _acquireLock(key);
+                }
+                catch
+                {
+                    RestoreFrame(frame, previousFrame);
+                    throw;
+                }
+
+                if (acquisition.IsCompleted)
+                {
+                    try
+                    {
+                        IDisposable releaser = acquisition.GetAwaiter().GetResult();
+                        frame.Releaser = releaser;
+                        frame.State = LockOwnershipState.Held;
+                        return new ValueTask<IDisposable>(new LockHandle(this, frame, topToken, null));
+                    }
+                    catch
+                    {
+                        RestoreFrame(frame, previousFrame);
+                        throw;
+                    }
+                }
+
+                Task<IDisposable> acquisitionTask = acquisition.AsTask();
+                if (_waitObserver is not null)
+                {
+                    try
+                    {
+                        _waitObserver.OnWaitingForKey(key);
+                    }
+                    catch
+                    {
+                        RestoreFrame(frame, previousFrame);
+                        _ = ReleaseAfterObserverFailureAsync(acquisitionTask);
+                        throw;
+                    }
+                }
+
+                return new ValueTask<IDisposable>(CompleteAcquisitionAsync(acquisitionTask, frame, topToken));
             }
 
-            private async ValueTask<IDisposable> AcquireLockAsync(Guid key)
+            private ValueTask<IDisposable> ReenterHeldKey(LockOwnershipFrame frame)
             {
-                var lockHandle = await _userLock.LockAsync(key, true).ConfigureAwait(false);
-                return new LockHandle { Parent = lockHandle };
+                object? previousTop = frame.TopToken;
+                object topToken = new();
+                frame.Depth++;
+                frame.TopToken = topToken;
+                return new ValueTask<IDisposable>(new LockHandle(this, frame, topToken, previousTop));
+            }
+
+            private async Task<IDisposable> CompleteAcquisitionAsync(
+                Task<IDisposable> acquisitionTask,
+                LockOwnershipFrame frame,
+                object topToken)
+            {
+                try
+                {
+                    IDisposable releaser = await acquisitionTask.ConfigureAwait(false);
+                    frame.Releaser = releaser;
+                    frame.State = LockOwnershipState.Held;
+                    return new LockHandle(this, frame, topToken, null);
+                }
+                catch
+                {
+                    RestoreFrame(frame, frame.Parent);
+                    throw;
+                }
+            }
+
+            private static async Task ReleaseAfterObserverFailureAsync(Task<IDisposable> acquisitionTask)
+            {
+                try
+                {
+                    IDisposable releaser = await acquisitionTask.ConfigureAwait(false);
+                    releaser.Dispose();
+                }
+                catch (Exception acquisitionFailure)
+                {
+                    // The observer failure is the caller-visible failure. This cleanup task
+                    // observes acquisition errors so they cannot become unobserved exceptions.
+                    Trace.TraceError("The user-lock acquisition failed after its wait observer threw: {0}", acquisitionFailure);
+                }
+            }
+
+            private LockOwnershipFrame? GetCurrentFrame()
+            {
+                LockOwnershipFrame? current = _ownership.Value;
+                while (current is not null && current.State == LockOwnershipState.Released)
+                {
+                    current = current.Parent;
+                }
+
+                if (!ReferenceEquals(current, _ownership.Value))
+                {
+                    _ownership.Value = current;
+                }
+
+                return current;
+            }
+
+            private void RestoreFrame(LockOwnershipFrame frame, LockOwnershipFrame? previousFrame)
+            {
+                frame.State = LockOwnershipState.Released;
+                if (ReferenceEquals(_ownership.Value, frame))
+                {
+                    _ownership.Value = previousFrame;
+                }
+            }
+
+            private void DisposeHandle(LockOwnershipFrame frame, object topToken, object? previousTop)
+            {
+                if (frame.State != LockOwnershipState.Held
+                    || !ReferenceEquals(_ownership.Value, frame)
+                    || !ReferenceEquals(frame.TopToken, topToken))
+                {
+                    throw new UserLockOrderException("User lock handles must be disposed in key-checked LIFO order.");
+                }
+
+                frame.TopToken = previousTop;
+                frame.Depth--;
+                if (frame.Depth > 0)
+                {
+                    return;
+                }
+
+                frame.State = LockOwnershipState.Released;
+                _ownership.Value = frame.Parent;
+                frame.Releaser?.Dispose();
+                frame.Releaser = null;
             }
 
             public void Dispose()
@@ -1094,20 +1192,95 @@ namespace Jellyfin.Server.Implementations.Users
                 ObjectDisposedException.ThrowIf(_disposed, this);
             }
 
+            private sealed class LockOwnershipFrame
+            {
+                public LockOwnershipFrame(
+                    Guid key,
+                    LockOwnershipFrame? parent,
+                    LockOwnershipState state,
+                    int depth,
+                    IDisposable? releaser,
+                    object topToken)
+                {
+                    Key = key;
+                    Parent = parent;
+                    State = state;
+                    Depth = depth;
+                    Releaser = releaser;
+                    TopToken = topToken;
+                }
+
+                public Guid Key { get; }
+
+                public LockOwnershipFrame? Parent { get; }
+
+                public LockOwnershipState State { get; set; }
+
+                public int Depth { get; set; }
+
+                public IDisposable? Releaser { get; set; }
+
+                public object? TopToken { get; set; }
+            }
+
             private sealed class LockHandle : IDisposable
             {
-                public required IDisposable? Parent { get; init; }
+                private readonly LockHelper _owner;
+                private readonly LockOwnershipFrame _frame;
+                private readonly object _topToken;
+                private readonly object? _previousTop;
+                private int _disposed;
+
+                public LockHandle(LockHelper owner, LockOwnershipFrame frame, object topToken, object? previousTop)
+                {
+                    _owner = owner;
+                    _frame = frame;
+                    _topToken = topToken;
+                    _previousTop = previousTop;
+                }
 
                 public void Dispose()
                 {
-                    Parent?.Dispose();
-                    LockHelper.IsNestedLock.Value = LockHelper.IsNestedLock.Value - 1;
-
-                    if (LockHelper.IsNestedLock.Value < 0)
+                    if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0)
                     {
-                        throw new InvalidOperationException("Mismatched locking detected. Threads internal NestedLock is less then 0 which should not be possible.");
+                        return;
+                    }
+
+                    try
+                    {
+                        _owner.DisposeHandle(_frame, _topToken, _previousTop);
+                    }
+                    catch
+                    {
+                        Volatile.Write(ref _disposed, 0);
+                        throw;
                     }
                 }
+            }
+        }
+
+        internal sealed class UserLockOrderException : InvalidOperationException
+        {
+            public UserLockOrderException(string message)
+                : base(message)
+            {
+            }
+        }
+
+        private sealed class PasswordHashUpgrade
+        {
+            public required Guid UserId { get; init; }
+
+            public required string ExpectedPassword { get; init; }
+
+            public required string ReplacementPassword { get; init; }
+        }
+
+        internal sealed class CredentialMutationException : InvalidOperationException
+        {
+            public CredentialMutationException(string message)
+                : base(message)
+            {
             }
         }
     }

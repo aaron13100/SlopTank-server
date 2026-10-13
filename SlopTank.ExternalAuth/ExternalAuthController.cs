@@ -1,5 +1,6 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-08.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-13.
 
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 
@@ -53,7 +54,12 @@ public sealed class ExternalAuthController : ControllerBase
         var providers = _registry.GetActiveProviders()
             .Select(static r => new ExternalProviderInfo(r.Descriptor.Id, r.Descriptor.DisplayName, r.Descriptor.Order))
             .ToList();
-        return Ok(new ExternalProviderDiscoveryDocument(1, providers));
+        // Discovery is a versioned browser contract. The host's default
+        // formatter emits Pascal-case JSON; use the documented camel-case
+        // names explicitly for this endpoint and all nested provider fields.
+        return new JsonResult(
+            new ExternalProviderDiscoveryDocument(1, providers),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
     }
 
     /// <summary>

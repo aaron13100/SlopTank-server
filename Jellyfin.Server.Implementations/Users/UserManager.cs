@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-09, 2026-10-13.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -337,7 +337,7 @@ namespace Jellyfin.Server.Implementations.Users
         {
             ThrowIfInvalidUsername(name);
             ArgumentNullException.ThrowIfNull(options);
-            ArgumentException.ThrowIfNullOrWhiteSpace(options.Password);
+            ArgumentException.ThrowIfNullOrWhiteSpace(options.GetPasswordForCreation());
             if (options.UserId == Guid.Empty)
             {
                 throw new ArgumentException("A requested user id cannot be empty.", nameof(options));
@@ -394,7 +394,7 @@ namespace Jellyfin.Server.Implementations.Users
                 // to the in-memory entity inside this same transaction. The
                 // password is required non-empty above: an empty seal is
                 // exactly the passwordless default this overload removes.
-                    await _defaultAuthenticationProvider.ChangePassword(newUser, options.Password).ConfigureAwait(false);
+                    await _defaultAuthenticationProvider.ChangePassword(newUser, options.GetPasswordForCreation()).ConfigureAwait(false);
 
                     if (options.Permissions is not null)
                     {
@@ -964,6 +964,50 @@ namespace Jellyfin.Server.Implementations.Users
                     user.SetPreference(PreferenceKind.EnabledFolders, policy.EnabledFolders);
                     user.SetPreference(PreferenceKind.EnableContentDeletionFromFolders, policy.EnableContentDeletionFromFolders);
 
+                    dbContext.Update(user);
+                    await dbContext.SaveChangesAsync().ConfigureAwait(false);
+                }
+            }
+        }
+
+        /// <inheritdoc/>
+        public async Task ApplyTargetedPolicyAsync(Guid userId, TargetedPolicyUpdate update, string expectedAuthenticationProviderId)
+        {
+            ArgumentNullException.ThrowIfNull(update);
+            ArgumentNullException.ThrowIfNull(update.Permissions);
+            ArgumentNullException.ThrowIfNull(update.EnabledFolders);
+            ArgumentException.ThrowIfNullOrWhiteSpace(expectedAuthenticationProviderId);
+            foreach (var kind in update.Permissions.Keys)
+            {
+                if (kind is not (PermissionKind.IsAdministrator
+                    or PermissionKind.EnableAllFolders
+                    or PermissionKind.EnableContentDownloading
+                    or PermissionKind.EnableLiveTvAccess
+                    or PermissionKind.EnableLiveTvManagement))
+                {
+                    throw new ArgumentException("Targeted policy contains an unowned permission", nameof(update));
+                }
+            }
+
+            using (await _userLock.LockAsync(userId).ConfigureAwait(false))
+            {
+                var dbContext = await _dbProvider.CreateDbContextAsync().ConfigureAwait(false);
+                await using (dbContext.ConfigureAwait(false))
+                {
+                    var user = UserQuery(dbContext)
+                        .AsTracking()
+                        .FirstOrDefault(u => u.Id.Equals(userId))
+                        ?? throw new ArgumentException("No user exists with given Id!", nameof(userId));
+                    if (!string.Equals(user.AuthenticationProviderId, expectedAuthenticationProviderId, StringComparison.Ordinal))
+                    {
+                        throw new InvalidOperationException("Authentication provider changed before targeted policy update");
+                    }
+                    foreach (var (kind, value) in update.Permissions)
+                    {
+                        user.SetPermission(kind, value);
+                    }
+
+                    user.SetPreference(PreferenceKind.EnabledFolders, update.EnabledFolders.ToArray());
                     dbContext.Update(user);
                     await dbContext.SaveChangesAsync().ConfigureAwait(false);
                 }

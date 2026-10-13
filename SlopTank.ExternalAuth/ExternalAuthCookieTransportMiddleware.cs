@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09, 2026-10-13.
 
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -127,19 +127,20 @@ public sealed class ExternalAuthCookieTransportMiddleware : IDisposable
         ExceptionDispatchInfo? firstProbeFailure = null;
         foreach (var handle in _openChannels.Keys)
         {
+            bool live;
             try
             {
-                if (_mintStore.Resolve(handle) is null)
-                {
-                    AbortChannelsOf(handle);
-                }
+                live = _mintStore.Resolve(handle) is not null;
             }
-#pragma warning disable CA1031 // each failing host probe closes its channel; the original exception is rethrown after the sweep
-            catch (Exception ex)
-#pragma warning restore CA1031
+            catch (ExternalAuthSessionLivenessProbeException ex)
+            {
+                live = false;
+                firstProbeFailure ??= ExceptionDispatchInfo.Capture(ex);
+            }
+
+            if (!live)
             {
                 AbortChannelsOf(handle);
-                firstProbeFailure ??= ExceptionDispatchInfo.Capture(ex);
             }
         }
 
@@ -156,18 +157,37 @@ public sealed class ExternalAuthCookieTransportMiddleware : IDisposable
     {
         if (_openChannels.TryRemove(handle, out var channels))
         {
+            var failed = new System.Collections.Concurrent.ConcurrentDictionary<HttpContext, byte>();
             foreach (var context in channels.Keys)
             {
                 try
                 {
                     context.Abort();
                 }
-#pragma warning disable CA1031 // a context that already closed must not break aborting its siblings
+                catch (ObjectDisposedException)
+                {
+                    // Its transport has already closed.
+                }
+#pragma warning disable CA1031 // an arbitrary host HttpContext can throw while aborting; retry its channel next sweep and continue aborting siblings
                 catch (Exception ex)
 #pragma warning restore CA1031
                 {
-                    _logger?.LogDebug(ex, "aborting a tracked cookie channel failed (already closed)");
+                    failed.TryAdd(context, 0);
+                    _logger?.LogError(ex, "aborting a tracked cookie channel failed; will retry");
                 }
+            }
+
+            if (!failed.IsEmpty)
+            {
+                _openChannels.AddOrUpdate(handle, failed, (_, current) =>
+                {
+                    foreach (var context in failed.Keys)
+                    {
+                        current.TryAdd(context, 0);
+                    }
+
+                    return current;
+                });
             }
         }
     }

@@ -1,8 +1,7 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-09, 2026-10-13.
 
 using System;
 using System.Collections.Generic;
-using System.Text.Json.Serialization;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 
@@ -20,33 +19,53 @@ namespace MediaBrowser.Controller.Library;
 /// passwordless crash window (provisioning from an external identity, API
 /// creation with a password) must use this overload.
 /// </summary>
-/// <param name="AuthenticationProviderId">The authentication provider the
-/// new user is routed to (the caller's own provider id for externally
-/// provisioned users); when null the server default routing is kept.</param>
-/// <param name="PasswordResetProviderId">The password-reset provider routed
-/// on the new user; when null the server default is used.</param>
-/// <param name="Password">The secret sealed into the user's password hash
-/// inside the creation transaction. Must be non-empty: an empty password is
-/// exactly the passwordless default this options type exists to avoid. The
-/// value is hashed through the default authentication provider's canonical
-/// path and is never stored, logged or returned in clear.</param>
-/// <param name="Permissions">Initial permission values applied on top of
-/// the model's defaults before the transaction; targeted, caller-owned
-/// fields only (the server applies exactly what is passed).</param>
-/// <param name="EnabledFolders">The initial enabled-folders preference;
-/// when null the model default is kept.</param>
-/// <param name="UserId">An optional caller-derived stable user id. This is
-/// intended for provider-neutral idempotent provisioning: the same external
-/// authority identity can recover its own complete crash orphan without
-/// relying on mutable display names.</param>
-public sealed record ProvisionedUserCreationOptions(
-    string? AuthenticationProviderId,
-    string? PasswordResetProviderId,
-    [property: JsonIgnore] string Password,
-    IReadOnlyDictionary<PermissionKind, bool>? Permissions,
-    IReadOnlyList<Guid>? EnabledFolders,
-    Guid? UserId = null)
+public sealed class ProvisionedUserCreationOptions
 {
+    private readonly string _password;
+
+    /// <summary>Initializes secret-safe atomic user creation options.</summary>
+    /// <param name="authenticationProviderId">The new user's auth route.</param>
+    /// <param name="passwordResetProviderId">The password reset route.</param>
+    /// <param name="password">The non-empty plaintext seal, held only in
+    /// memory until the creation path hashes it.</param>
+    /// <param name="permissions">Initial targeted permission values.</param>
+    /// <param name="enabledFolders">Initial enabled folders.</param>
+    /// <param name="userId">Optional stable id for idempotent provisioning.</param>
+    public ProvisionedUserCreationOptions(
+        string? authenticationProviderId,
+        string? passwordResetProviderId,
+        string password,
+        IReadOnlyDictionary<PermissionKind, bool>? permissions,
+        IReadOnlyList<Guid>? enabledFolders,
+        Guid? userId = null)
+    {
+        AuthenticationProviderId = authenticationProviderId;
+        PasswordResetProviderId = passwordResetProviderId;
+        _password = password;
+        Permissions = permissions;
+        EnabledFolders = enabledFolders;
+        UserId = userId;
+    }
+
+    /// <summary>The new user's authentication provider route.</summary>
+    public string? AuthenticationProviderId { get; }
+
+    /// <summary>The new user's password-reset provider route.</summary>
+    public string? PasswordResetProviderId { get; }
+
+    /// <summary>Initial permission values.</summary>
+    public IReadOnlyDictionary<PermissionKind, bool>? Permissions { get; }
+
+    /// <summary>Initial enabled folders.</summary>
+    public IReadOnlyList<Guid>? EnabledFolders { get; }
+
+    /// <summary>Optional stable user identifier.</summary>
+    public Guid? UserId { get; }
+
+    /// <summary>Returns the seal only to the user creation path. No public
+    /// password property exists for reflection-based serializers to expose.</summary>
+    public string GetPasswordForCreation() => _password;
+
     /// <summary>Returns useful type and routing context without rendering
     /// the plaintext password seal in logs or exception interpolation.</summary>
     public override string ToString() =>

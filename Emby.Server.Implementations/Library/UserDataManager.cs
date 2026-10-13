@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-07, 2026-10-13.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -79,8 +79,7 @@ namespace Emby.Server.Implementations.Library
             dbContext.SaveChanges();
             transaction.Commit();
 
-            var userId = user.InternalId;
-            var cacheKey = GetCacheKey(userId, item.Id);
+            var cacheKey = GetCacheKey(user.Id, item.Id);
             _cache.AddOrUpdate(cacheKey, userData);
             item.UserData = dbContext.UserData.Where(e => e.ItemId == item.Id).AsNoTracking().ToArray(); // rehydrate the cached userdata
 
@@ -187,7 +186,7 @@ namespace Emby.Server.Implementations.Library
 
             foreach (var item in items)
             {
-                var cacheKey = GetCacheKey(user.InternalId, item.Id);
+                var cacheKey = GetCacheKey(user.Id, item.Id);
                 if (_cache.TryGet(cacheKey, out var cachedData))
                 {
                     result[item.Id] = cachedData;
@@ -241,7 +240,7 @@ namespace Emby.Server.Implementations.Library
                     }
 
                     result[item.Id] = userData;
-                    var cacheKey = GetCacheKey(user.InternalId, item.Id);
+                    var cacheKey = GetCacheKey(user.Id, item.Id);
                     _cache.AddOrUpdate(cacheKey, userData);
                 }
             }
@@ -347,12 +346,15 @@ namespace Emby.Server.Implementations.Library
         }
 
         /// <summary>
-        /// Gets the internal key.
+        /// Gets the internal cache key. The key carries the immutable user
+        /// Guid (never the recyclable max-plus-one InternalId), so a user
+        /// created after a deletion can never address a previous owner's
+        /// cached user data.
         /// </summary>
         /// <returns>System.String.</returns>
-        private static string GetCacheKey(long internalUserId, Guid itemId)
+        private static string GetCacheKey(Guid userId, Guid itemId)
         {
-            return internalUserId.ToString(CultureInfo.InvariantCulture) + "-" + itemId.ToString("N", CultureInfo.InvariantCulture);
+            return userId.ToString("N", CultureInfo.InvariantCulture) + "-" + itemId.ToString("N", CultureInfo.InvariantCulture);
         }
 
         /// <inheritdoc />
@@ -525,7 +527,7 @@ namespace Emby.Server.Implementations.Library
 
             dbContext.SaveChanges();
 
-            var cacheKey = GetCacheKey(user.InternalId, item.Id);
+            var cacheKey = GetCacheKey(user.Id, item.Id);
             if (_cache.TryGet(cacheKey, out var cached))
             {
                 cached.AudioStreamIndex = null;

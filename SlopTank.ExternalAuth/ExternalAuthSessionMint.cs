@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09, 2026-10-13.
 
 using System.Security.Cryptography;
 using System.Text.Json.Serialization;
@@ -54,6 +54,18 @@ public sealed class ExternalAuthMintOptionsException : ArgumentOutOfRangeExcepti
 
     /// <summary>Gets the machine-readable refusal code.</summary>
     public ExternalAuthMintOptionsErrorCode Code => ExternalAuthMintOptionsErrorCode.RevalidationIntervalOutOfRange;
+}
+
+/// <summary>The host's liveness callback failed. The original exception and
+/// its stack remain available as <see cref="Exception.InnerException"/>.</summary>
+public sealed class ExternalAuthSessionLivenessProbeException : Exception
+{
+    /// <summary>Wraps the original host callback failure without rendering
+    /// its message into a browser-facing error.</summary>
+    public ExternalAuthSessionLivenessProbeException(Exception innerException)
+        : base("Host session liveness probe failed", innerException)
+    {
+    }
 }
 
 /// <summary>
@@ -279,11 +291,30 @@ public sealed class ExternalAuthSessionMintStore
 
         lock (_sync)
         {
-            return _sessions.TryGetValue(handle, out var session)
-                && session.ExpiresAt > _clock.GetUtcNow()
-                && (SessionLivenessProbe is null || SessionLivenessProbe(session))
-                ? session
-                : null;
+            if (!_sessions.TryGetValue(handle, out var session)
+                || session.ExpiresAt <= _clock.GetUtcNow())
+            {
+                return null;
+            }
+
+            if (SessionLivenessProbe is { } probe)
+            {
+                try
+                {
+                    if (!probe(session))
+                    {
+                        return null;
+                    }
+                }
+#pragma warning disable CA1031 // exact boundary of the injected host callback, which may throw any exception; retain the original as InnerException
+                catch (Exception ex)
+#pragma warning restore CA1031
+                {
+                    throw new ExternalAuthSessionLivenessProbeException(ex);
+                }
+            }
+
+            return session;
         }
     }
 
@@ -332,6 +363,47 @@ public sealed class ExternalAuthSessionMintStore
             foreach (var (handle, session) in _sessions)
             {
                 if (session.ProviderId == providerId && session.ExpiresAt > now)
+                {
+                    revoked.Add(session);
+                }
+            }
+
+            foreach (var session in revoked)
+            {
+                _sessions.Remove(session.Handle);
+            }
+        }
+
+        foreach (var session in revoked)
+        {
+            SessionRevoked?.Invoke(session);
+        }
+
+        return revoked.Count;
+    }
+
+    /// <summary>
+    /// Revokes every live session minted for one local account: a role-loss
+    /// or upstream-user-disabled verdict takes effect immediately, without
+    /// waiting for handle expiry. Never touches other accounts' sessions or
+    /// any local-password session.
+    /// </summary>
+    /// <param name="userId">The linked local user.</param>
+    /// <returns>The number of revoked sessions.</returns>
+    public int RevokeByUser(Guid userId)
+    {
+        if (userId == Guid.Empty)
+        {
+            return 0;
+        }
+
+        List<ExternalAuthMintedSession> revoked = [];
+        lock (_sync)
+        {
+            var now = _clock.GetUtcNow();
+            foreach (var (handle, session) in _sessions)
+            {
+                if (session.UserId == userId && session.ExpiresAt > now)
                 {
                     revoked.Add(session);
                 }

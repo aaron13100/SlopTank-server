@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-09, 2026-10-13.
 #pragma warning disable CS1591
 
 using System;
@@ -189,6 +189,15 @@ namespace MediaBrowser.Controller.Library
         /// <param name="policy">The request containing the new user policy.</param>
         /// <returns>A task representing the update.</returns>
         Task UpdatePolicyAsync(Guid userId, UserPolicy policy);
+
+        /// <summary>Applies only the six externally owned policy fields to
+        /// a fresh user row under its lock, preserving every unrelated field.</summary>
+        /// <param name="userId">The provisioned user's id.</param>
+        /// <param name="update">The targeted values.</param>
+        /// <param name="expectedAuthenticationProviderId">The provider route
+        /// that must still own the user inside the update lock.</param>
+        /// <returns>A task representing the durable update.</returns>
+        Task ApplyTargetedPolicyAsync(Guid userId, TargetedPolicyUpdate update, string expectedAuthenticationProviderId);
 
         /// <summary>
         /// Clears the user's profile image.

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-08, 2026-10-09, 2026-10-13.
 
 namespace SlopTank.ExternalAuth;
 
@@ -80,4 +80,7 @@ public enum ExternalAuthErrorCode
     /// <summary>The provider completed authentication but no healthy local
     /// account and session could be resolved or minted for the browser.</summary>
     SessionUnavailable = 60,
+
+    /// <summary>The validated identity has no role permitting access.</summary>
+    RoleDenied = 61,
 }

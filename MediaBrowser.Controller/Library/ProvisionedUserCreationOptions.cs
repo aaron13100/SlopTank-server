@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-09, 2026-10-13.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-09, 2026-10-13, 2026-10-14.
 
 using System;
 using System.Collections.Generic;
@@ -23,7 +23,9 @@ public sealed class ProvisionedUserCreationOptions
 {
     private readonly string _password;
 
-    /// <summary>Initializes secret-safe atomic user creation options.</summary>
+    /// <summary>Initializes a new instance of the <see
+    /// cref="ProvisionedUserCreationOptions"/> class with secret-safe
+    /// atomic user creation options.</summary>
     /// <param name="authenticationProviderId">The new user's auth route.</param>
     /// <param name="passwordResetProviderId">The password reset route.</param>
     /// <param name="password">The non-empty plaintext seal, held only in
@@ -47,27 +49,29 @@ public sealed class ProvisionedUserCreationOptions
         UserId = userId;
     }
 
-    /// <summary>The new user's authentication provider route.</summary>
+    /// <summary>Gets the new user's authentication provider route.</summary>
     public string? AuthenticationProviderId { get; }
 
-    /// <summary>The new user's password-reset provider route.</summary>
+    /// <summary>Gets the new user's password-reset provider route.</summary>
     public string? PasswordResetProviderId { get; }
 
-    /// <summary>Initial permission values.</summary>
+    /// <summary>Gets the initial permission values.</summary>
     public IReadOnlyDictionary<PermissionKind, bool>? Permissions { get; }
 
-    /// <summary>Initial enabled folders.</summary>
+    /// <summary>Gets the initial enabled folders.</summary>
     public IReadOnlyList<Guid>? EnabledFolders { get; }
 
-    /// <summary>Optional stable user identifier.</summary>
+    /// <summary>Gets the optional stable user identifier.</summary>
     public Guid? UserId { get; }
 
     /// <summary>Returns the seal only to the user creation path. No public
     /// password property exists for reflection-based serializers to expose.</summary>
+    /// <returns>The plaintext seal, for the creation path only.</returns>
     public string GetPasswordForCreation() => _password;
 
     /// <summary>Returns useful type and routing context without rendering
     /// the plaintext password seal in logs or exception interpolation.</summary>
+    /// <returns>A redacted diagnostic description of these options.</returns>
     public override string ToString() =>
         $"{nameof(ProvisionedUserCreationOptions)} {{ AuthenticationProviderId = {AuthenticationProviderId}, PasswordResetProviderId = {PasswordResetProviderId}, Password = [REDACTED], UserId = {UserId} }}";
 }

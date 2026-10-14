@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-09, 2026-10-13.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-09, 2026-10-13, 2026-10-14.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -322,7 +322,6 @@ namespace Jellyfin.Server.Implementations.Users
                     dbContext.Users.Add(newUser);
                     await dbContext.SaveChangesAsync().ConfigureAwait(false);
                 }
-
             }
 
             await _eventManager.PublishAsync(new UserCreatedEventArgs(newUser)).ConfigureAwait(false);
@@ -412,7 +411,6 @@ namespace Jellyfin.Server.Implementations.Users
                     dbContext.Users.Add(newUser);
                     await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
                 }
-
             }
 
             await _eventManager.PublishAsync(new UserCreatedEventArgs(newUser)).ConfigureAwait(false);
@@ -1002,6 +1000,7 @@ namespace Jellyfin.Server.Implementations.Users
                     {
                         throw new InvalidOperationException("Authentication provider changed before targeted policy update");
                     }
+
                     foreach (var (kind, value) in update.Permissions)
                     {
                         user.SetPermission(kind, value);

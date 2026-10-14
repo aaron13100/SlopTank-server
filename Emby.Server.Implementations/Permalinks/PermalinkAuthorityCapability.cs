@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-14.
 using System;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
@@ -10,6 +10,7 @@ namespace Emby.Server.Implementations.Permalinks;
 /// <summary>Provides connection-local, MAC-bound authority write capabilities.</summary>
 internal sealed class PermalinkAuthorityCapability
 {
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private readonly byte[] _secret = RandomNumberGenerator.GetBytes(32);
     private readonly ConcurrentDictionary<SqliteConnection, Scope> _scopes = new();
 
@@ -18,28 +19,24 @@ internal sealed class PermalinkAuthorityCapability
     public void Register(SqliteConnection connection)
     {
         connection.CreateFunction("authority_counter_write", () => 1L);
-        connection.CreateFunction<string, string, string, string, long>(
+        connection.CreateFunction<byte[]?, byte[]?, byte[]?, byte[]?, long>(
             "authority_capability",
             (table, verb, primaryKey, presentedMac) =>
             {
-                if (!_scopes.TryGetValue(connection, out var scope)
-                    || !string.Equals(scope.Table, table, StringComparison.Ordinal)
-                    || !string.Equals(scope.Verb, verb, StringComparison.Ordinal)
-                    || !string.Equals(scope.PrimaryKey, primaryKey, StringComparison.Ordinal))
+                if (table is null
+                    || verb is null
+                    || primaryKey is null
+                    || presentedMac is null
+                    || !_scopes.TryGetValue(connection, out var scope)
+                    || !ExactBytesEqual(scope.TableBytes, table)
+                    || !ExactBytesEqual(scope.VerbBytes, verb)
+                    || !ExactBytesEqual(scope.PrimaryKeyBytes, primaryKey)
+                    || !ExactBytesEqual(scope.MacBytes, presentedMac))
                 {
                     return 0;
                 }
 
-                var expected = Mac(
-                    scope.OperationId,
-                    table,
-                    verb,
-                    primaryKey,
-                    scope.Epoch,
-                    scope.Nonce);
-                return CryptographicOperations.FixedTimeEquals(
-                    Encoding.ASCII.GetBytes(expected),
-                    Encoding.ASCII.GetBytes(presentedMac)) ? 1 : 0;
+                return 1;
             });
         connection.StateChange += (sender, args) =>
         {
@@ -66,18 +63,41 @@ internal sealed class PermalinkAuthorityCapability
         string primaryKey,
         long epoch)
     {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(table);
+        ArgumentNullException.ThrowIfNull(verb);
+        ArgumentNullException.ThrowIfNull(primaryKey);
+        var tableBytes = StrictUtf8.GetBytes(table);
+        var verbBytes = StrictUtf8.GetBytes(verb);
+        var primaryKeyBytes = StrictUtf8.GetBytes(primaryKey);
         var nonce = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
-        var scope = new Scope(operationId, table, verb, primaryKey, epoch, nonce);
+        var mac = Mac(operationId, table, verb, primaryKey, epoch, nonce);
+        var scope = new Scope(
+            operationId,
+            table,
+            tableBytes,
+            verb,
+            verbBytes,
+            primaryKey,
+            primaryKeyBytes,
+            Encoding.ASCII.GetBytes(mac),
+            epoch,
+            nonce);
+        var writeScope = new PermalinkAuthorityWriteScope(
+            mac,
+            nonce,
+            () => _scopes.TryRemove(connection, out _));
         if (!_scopes.TryAdd(connection, scope))
         {
             throw new InvalidOperationException("The authority connection already has a write capability.");
         }
 
-        return new PermalinkAuthorityWriteScope(
-            Mac(operationId, table, verb, primaryKey, epoch, nonce),
-            nonce,
-            () => _scopes.TryRemove(connection, out _));
+        return writeScope;
     }
+
+    private static bool ExactBytesEqual(byte[] expected, byte[] actual)
+        => expected.Length == actual.Length
+            && CryptographicOperations.FixedTimeEquals(expected, actual);
 
     private string Mac(
         Guid operationId,
@@ -95,8 +115,12 @@ internal sealed class PermalinkAuthorityCapability
     private sealed record Scope(
         Guid OperationId,
         string Table,
+        byte[] TableBytes,
         string Verb,
+        byte[] VerbBytes,
         string PrimaryKey,
+        byte[] PrimaryKeyBytes,
+        byte[] MacBytes,
         long Epoch,
         string Nonce);
 }

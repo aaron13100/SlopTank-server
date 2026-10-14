@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-10.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-10, 2026-10-14.
 using System;
 using System.Globalization;
 using System.IO;
@@ -29,7 +29,7 @@ internal sealed class PermalinkConfirmationChallengeStore : IPermalinkConfirmati
     private readonly TimeProvider _timeProvider;
     private readonly IPermalinkConfirmationChallengeEntropy _entropy;
 
-    /// <summary>Initializes a production challenge store.</summary>
+    /// <summary>Initializes a new instance of the <see cref="PermalinkConfirmationChallengeStore"/> class.</summary>
     /// <param name="authority">The protected permalink authority.</param>
     /// <param name="timeProvider">The server clock.</param>
     public PermalinkConfirmationChallengeStore(
@@ -39,7 +39,7 @@ internal sealed class PermalinkConfirmationChallengeStore : IPermalinkConfirmati
     {
     }
 
-    /// <summary>Initializes a challenge store with an explicit entropy boundary.</summary>
+    /// <summary>Initializes a new instance of the <see cref="PermalinkConfirmationChallengeStore"/> class with an explicit entropy boundary.</summary>
     /// <param name="authority">The protected permalink authority.</param>
     /// <param name="timeProvider">The server clock.</param>
     /// <param name="entropy">The cryptographic entropy source.</param>
@@ -206,7 +206,7 @@ internal sealed class PermalinkConfirmationChallengeStore : IPermalinkConfirmati
 
     private static void ValidateRequest(PermalinkConfirmationChallengeRequest request)
     {
-        if (request.OperationId == Guid.Empty)
+        if (request.OperationId.Equals(Guid.Empty))
         {
             throw Conflict("confirmation-challenge-operation-invalid", "A durable operation identifier is required.");
         }
@@ -324,8 +324,11 @@ internal sealed class PermalinkConfirmationChallengeStore : IPermalinkConfirmati
         command.Transaction = transaction;
         // The predicate is selected exclusively by the two private callers above.
         command.CommandText = $"""
-            SELECT challenge_id, operation_id, challenge_digest, target_digest,
-                   inventory_generation, requested_action, expires_at, consumed_at
+            SELECT challenge_id, operation_id,
+                   typeof(challenge_digest), CAST(challenge_digest AS BLOB),
+                   typeof(target_digest), CAST(target_digest AS BLOB),
+                   typeof(inventory_generation), CAST(inventory_generation AS BLOB),
+                   requested_action, expires_at, consumed_at
               FROM PermalinkConfirmationChallenges WHERE {predicate}
             """;
         command.Parameters.AddWithValue("$value", value);
@@ -339,15 +342,50 @@ internal sealed class PermalinkConfirmationChallengeStore : IPermalinkConfirmati
         return new ChallengeRow(
             Guid.Parse(reader.GetString(0)),
             operationId,
-            reader.GetString(2),
-            reader.GetString(3),
-            reader.GetString(4),
-            reader.GetString(5),
-            ParseDate(reader.GetString(6), operationId),
-            await reader.IsDBNullAsync(7, cancellationToken).ConfigureAwait(false)
+            ReadCanonicalSha256(reader, 2, 3, "challenge_digest", operationId),
+            ReadCanonicalSha256(reader, 4, 5, "target_digest", operationId),
+            ReadCanonicalSha256(reader, 6, 7, "inventory_generation", operationId),
+            reader.GetString(8),
+            ParseDate(reader.GetString(9), operationId),
+            await reader.IsDBNullAsync(10, cancellationToken).ConfigureAwait(false)
                 ? null
-                : ParseDate(reader.GetString(7), operationId));
+                : ParseDate(reader.GetString(10), operationId));
     }
+
+    private static string ReadCanonicalSha256(
+        SqliteDataReader reader,
+        int typeOrdinal,
+        int bytesOrdinal,
+        string field,
+        Guid operationId)
+    {
+        _ = field;
+        if (!string.Equals(reader.GetString(typeOrdinal), "text", StringComparison.Ordinal)
+            || reader.GetValue(bytesOrdinal) is not byte[] bytes
+            || bytes.Length != 64)
+        {
+            throw InvalidCanonicalDigest(operationId);
+        }
+
+        foreach (var value in bytes)
+        {
+            var isDigit = value >= (byte)'0' && value <= (byte)'9';
+            var isLowercaseHexLetter = value >= (byte)'a' && value <= (byte)'f';
+            if (!isDigit && !isLowercaseHexLetter)
+            {
+                throw InvalidCanonicalDigest(operationId);
+            }
+        }
+
+        return Encoding.ASCII.GetString(bytes);
+    }
+
+    private static PermalinkException InvalidCanonicalDigest(Guid operationId)
+        => new(
+            PermalinkErrorKind.Corrupt,
+            "confirmation-challenge-digest-corrupt",
+            "The durable confirmation challenge contains an invalid canonical digest.",
+            operationId: operationId);
 
     private static async Task<T> GuardStoreAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken)
     {

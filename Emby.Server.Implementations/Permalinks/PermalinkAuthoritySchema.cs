@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-04, 2026-10-07, 2026-10-09, 2026-10-10.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-04, 2026-10-07, 2026-10-09, 2026-10-10, 2026-10-14.
 using System;
 using System.Linq;
 using System.Threading;
@@ -74,9 +74,11 @@ internal static class PermalinkAuthoritySchema
                 protocol_epoch INTEGER NOT NULL CHECK(protocol_epoch >= 0),
                 irreversible_floor INTEGER NOT NULL DEFAULT 0 CHECK(irreversible_floor IN (0, 1)),
                 updated_at TEXT NOT NULL);
-            INSERT OR IGNORE INTO AuthorityProtocolState
+            INSERT INTO AuthorityProtocolState
                 (singleton, protocol_epoch, irreversible_floor, updated_at)
-            VALUES (1, 1, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            SELECT 1, 1, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE NOT EXISTS (
+                SELECT 1 FROM AuthorityProtocolState WHERE singleton = 1);
             CREATE TABLE IF NOT EXISTS SnapshotMetadata (
                 generation INTEGER PRIMARY KEY AUTOINCREMENT,
                 authority_id TEXT NOT NULL,
@@ -430,8 +432,42 @@ internal static class PermalinkAuthoritySchema
             _ = await evidenceIndex.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        await InstallConfirmationChallengeDigestValidationAsync(connection, cancellationToken).ConfigureAwait(false);
         await InstallImmutableEvidenceAsync(connection, cancellationToken).ConfigureAwait(false);
         await InstallWriteProtectionAsync(connection, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task InstallConfirmationChallengeDigestValidationAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        foreach (var verb in new[] { "INSERT", "UPDATE" })
+        {
+            await using var trigger = connection.CreateCommand();
+            trigger.CommandText = $"""
+                CREATE TRIGGER IF NOT EXISTS validate_permalink_confirmation_challenges_digests_{verb.ToLowerInvariant()}
+                BEFORE {verb} ON PermalinkConfirmationChallenges
+                WHEN NEW.challenge_digest IS NULL
+                    OR typeof(NEW.challenge_digest) != 'text'
+                    OR length(CAST(NEW.challenge_digest AS BLOB)) != 64
+                    OR length(NEW.challenge_digest) != 64
+                    OR NEW.challenge_digest GLOB '*[^0-9a-f]*'
+                    OR NEW.target_digest IS NULL
+                    OR typeof(NEW.target_digest) != 'text'
+                    OR length(CAST(NEW.target_digest AS BLOB)) != 64
+                    OR length(NEW.target_digest) != 64
+                    OR NEW.target_digest GLOB '*[^0-9a-f]*'
+                    OR NEW.inventory_generation IS NULL
+                    OR typeof(NEW.inventory_generation) != 'text'
+                    OR length(CAST(NEW.inventory_generation AS BLOB)) != 64
+                    OR length(NEW.inventory_generation) != 64
+                    OR NEW.inventory_generation GLOB '*[^0-9a-f]*'
+                BEGIN
+                    SELECT RAISE(ABORT, 'permalink-confirmation-challenge-digest-invalid');
+                END;
+                """;
+            _ = await trigger.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private static async Task AddColumnIfMissingAsync(

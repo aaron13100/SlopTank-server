@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-06.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-06, 2026-10-16.
 using System;
 using System.Data.Common;
 using System.Linq;
@@ -103,6 +103,21 @@ public class JellyfinDbContext(DbContextOptions<JellyfinDbContext> options, ILog
     /// Gets the <see cref="DbSet{TEntity}"/> containing the per-user watchlist ("My List") entries.
     /// </summary>
     public DbSet<UserWatchlist> UserWatchlists => Set<UserWatchlist>();
+
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the per-user, per-item playback progress revisions.
+    /// </summary>
+    public DbSet<PlaybackProgressRevision> PlaybackProgressRevisions => Set<PlaybackProgressRevision>();
+
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the offline playback progress operation receipts.
+    /// </summary>
+    public DbSet<PlaybackProgressReceipt> PlaybackProgressReceipts => Set<PlaybackProgressReceipt>();
+
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the per-device receipt retention watermarks.
+    /// </summary>
+    public DbSet<PlaybackProgressDeviceWatermark> PlaybackProgressDeviceWatermarks => Set<PlaybackProgressDeviceWatermark>();
 
     /// <summary>
     /// Gets the <see cref="DbSet{TEntity}"/> containing the user data.

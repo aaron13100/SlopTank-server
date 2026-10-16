@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-07, 2026-10-16.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -25,7 +25,7 @@ namespace Emby.Server.Implementations.Library
     /// <summary>
     /// Class UserDataManager.
     /// </summary>
-    public class UserDataManager : IUserDataManager
+    public partial class UserDataManager : IUserDataManager
     {
         private readonly IServerConfigurationManager _config;
         private readonly IDbContextFactory<JellyfinDbContext> _repository;
@@ -62,6 +62,14 @@ namespace Emby.Server.Implementations.Library
             using var dbContext = _repository.CreateDbContext();
             using var transaction = dbContext.Database.BeginTransaction();
 
+            // Read inside the transaction so the playback revision decision sees the committed state.
+            var storedRows = dbContext.UserData
+                .AsNoTracking()
+                .Where(e => e.ItemId == item.Id && e.UserId == user.Id)
+                .ToList();
+            var advanceRevision = AlwaysAdvancesPlaybackRevision(reason)
+                || PlaybackFieldsDiffer(storedRows, keys, userData);
+
             foreach (var key in keys)
             {
                 userData.Key = key;
@@ -77,6 +85,11 @@ namespace Emby.Server.Implementations.Library
             }
 
             dbContext.SaveChanges();
+            if (advanceRevision)
+            {
+                AdvancePlaybackRevision(dbContext, user.Id, item.Id);
+            }
+
             transaction.Commit();
 
             var userId = user.InternalId;
@@ -101,7 +114,8 @@ namespace Emby.Server.Implementations.Library
             ArgumentNullException.ThrowIfNull(item);
             ArgumentNullException.ThrowIfNull(userDataDto);
 
-            var userData = GetUserData(user, item) ?? throw new InvalidOperationException("UserData should not be null.");
+            // Work on a copy: the cached instance must only change after a successful commit.
+            var userData = Copy(GetUserData(user, item) ?? throw new InvalidOperationException("UserData should not be null."));
 
             if (userDataDto.PlaybackPositionTicks.HasValue)
             {

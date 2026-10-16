@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-07.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-07, 2026-10-16.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -119,5 +119,27 @@ namespace MediaBrowser.Controller.Library
         /// <param name="user">The user.</param>
         /// <param name="item">The item.</param>
         void ResetPlaybackStreamSelections(User user, BaseItem item);
+
+        /// <summary>
+        /// Reads an item's playback progress together with its playback revision, consistently
+        /// (both from one transaction). The returned state's ServerId is left empty for the caller.
+        /// </summary>
+        /// <param name="user">The user.</param>
+        /// <param name="item">The item.</param>
+        /// <returns>The playback progress state.</returns>
+        PlaybackProgressStateDto GetPlaybackProgressState(User user, BaseItem item);
+
+        /// <summary>
+        /// Applies an offline playback progress operation if and only if the item's playback revision
+        /// still equals the operation's baseline. The compare, the playback write, the revision
+        /// advance and the operation receipt commit in one database transaction; an identical retry
+        /// returns the recorded outcome without writing again.
+        /// </summary>
+        /// <param name="user">The authenticated user.</param>
+        /// <param name="item">The target item, already checked for existence and access.</param>
+        /// <param name="deviceId">The authenticated device id.</param>
+        /// <param name="operation">The operation.</param>
+        /// <returns>The outcome. The State's ServerId is left empty for the caller.</returns>
+        PlaybackProgressOperationResultDto ApplyPlaybackProgressOperation(User user, BaseItem item, string deviceId, PlaybackProgressOperationDto operation);
     }
 }

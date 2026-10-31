@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31.
 #pragma warning disable CS1591 // Missing XML comment for publicly visible type or member
 #pragma warning disable CA2227 // Collection properties should be read only
 

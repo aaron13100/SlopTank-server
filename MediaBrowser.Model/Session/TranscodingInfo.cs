@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09, 2026-10-14, 2026-10-31.
 #nullable disable
 
 using System.Text.Json.Serialization;

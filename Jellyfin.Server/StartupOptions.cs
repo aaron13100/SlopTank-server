@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-20.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-20, 2026-10-14, 2026-10-31.
 using System.Collections.Generic;
 using CommandLine;
 using Emby.Server.Implementations;

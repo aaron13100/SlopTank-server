@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-12.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-12, 2026-10-14, 2026-10-31.
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -143,7 +143,7 @@ public class ImageController : BaseJellyfinApiController
                 UserImageUploadOutcome.UserNotFound => NotFound(),
                 UserImageUploadOutcome.Forbidden => StatusCode(StatusCodes.Status403Forbidden, "User is not allowed to update the image."),
                 UserImageUploadOutcome.Contended => Conflict(),
-                _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, "Unknown profile image upload outcome.")
+                _ => throw new InvalidOperationException($"Unknown profile image upload outcome: {outcome}.")
             };
         }
     }

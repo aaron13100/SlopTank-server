@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-12.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-12, 2026-10-14, 2026-10-31.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -448,8 +448,8 @@ public partial class UserManager
         }
 
         if (string.Equals(user.AuthenticationProviderId, selectedProviderId, StringComparison.OrdinalIgnoreCase)
-            || (string.Equals(startingProviderId, string.Empty, StringComparison.Ordinal)
-                && string.Equals(user.AuthenticationProviderId, string.Empty, StringComparison.Ordinal)))
+            || (startingProviderId is { Length: 0 }
+                && user.AuthenticationProviderId is { Length: 0 }))
         {
             return;
         }
@@ -461,7 +461,7 @@ public partial class UserManager
     {
         return string.Equals(providerId, selectedProviderId, StringComparison.OrdinalIgnoreCase)
             || string.Equals(providerId, bootstrapProviderId, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(providerId, string.Empty, StringComparison.Ordinal);
+            || providerId is { Length: 0 };
     }
 
     private static string GetRequiredProviderId(IAuthenticationProvider provider)

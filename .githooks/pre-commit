@@ -3,7 +3,8 @@
 set -eu
 
 repository_root=$(git rev-parse --show-toplevel)
-media_root=${SLOPTANK_MEDIA_ROOT:-$(CDPATH= cd -- "$repository_root/.." && pwd -P)}
+common_git_dir=$(git rev-parse --path-format=absolute --git-common-dir)
+media_root=${SLOPTANK_MEDIA_ROOT:-$(CDPATH= cd -- "$common_git_dir/../.." && pwd -P)}
 checker="$media_root/tools/check-gpl-modified-file-notices.py"
 
 if [ ! -f "$checker" ]; then
@@ -12,4 +13,4 @@ if [ ! -f "$checker" ]; then
     exit 1
 fi
 
-exec python3 "$checker" check --repository server --staged
+exec python3 "$checker" check --repository server --staged --repo-path "$repository_root"

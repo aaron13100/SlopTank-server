@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-24.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-24, 2026-10-14, 2026-10-31.
 // This file is new: added to close the pooled-handle collation race that
 // refused the 2026-09-11T11:38Z promotion ("SQLite Error 5: 'unable to
 // delete/modify collation sequence due to active statements'"). Upstream

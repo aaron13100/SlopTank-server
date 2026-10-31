@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-03, 2026-10-14, 2026-10-31.
 using System;
 
 namespace Emby.Server.Implementations.Permalinks;

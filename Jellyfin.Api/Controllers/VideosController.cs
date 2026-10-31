@@ -223,49 +223,49 @@ public class VideosController : BaseJellyfinApiController
 
         try
         {
-        await _identityMutationAdapter.ExecuteAsync(
-            items,
-            new PermalinkIdentityMutationRequest("grouping"),
-            async (_, _) =>
-            {
-                var alternateVersionsOfPrimary = primaryVersion.LinkedAlternateVersions.ToList();
-
-                foreach (var item in items.Where(i => !i.Id.Equals(primaryVersion.Id)))
+            await _identityMutationAdapter.ExecuteAsync(
+                items,
+                new PermalinkIdentityMutationRequest("grouping"),
+                async (_, _) =>
                 {
-                    item.SetPrimaryVersionId(primaryVersion.Id);
-                    await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
-                    await _libraryManager.RerouteLinkedChildReferencesAsync(item.Id, primaryVersion.Id).ConfigureAwait(false);
+                    var alternateVersionsOfPrimary = primaryVersion.LinkedAlternateVersions.ToList();
 
-                    if (!alternateVersionsOfPrimary.Any(i => i.ItemId.HasValue && i.ItemId.Value.Equals(item.Id)))
+                    foreach (var item in items.Where(i => !i.Id.Equals(primaryVersion.Id)))
                     {
-                        alternateVersionsOfPrimary.Add(new LinkedChild
-                        {
-                            ItemId = item.Id,
-                            Type = LinkedChildType.LinkedAlternateVersion
-                        });
-                    }
+                        item.SetPrimaryVersionId(primaryVersion.Id);
+                        await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
+                        await _libraryManager.RerouteLinkedChildReferencesAsync(item.Id, primaryVersion.Id).ConfigureAwait(false);
 
-                    foreach (var linkedItem in item.LinkedAlternateVersions)
-                    {
-                        if (linkedItem.ItemId.HasValue
-                            && !alternateVersionsOfPrimary.Any(i => i.ItemId.HasValue
-                                && i.ItemId.Value.Equals(linkedItem.ItemId.Value)))
+                        if (!alternateVersionsOfPrimary.Any(i => i.ItemId.HasValue && i.ItemId.Value.Equals(item.Id)))
                         {
-                            alternateVersionsOfPrimary.Add(linkedItem);
+                            alternateVersionsOfPrimary.Add(new LinkedChild
+                            {
+                                ItemId = item.Id,
+                                Type = LinkedChildType.LinkedAlternateVersion
+                            });
+                        }
+
+                        foreach (var linkedItem in item.LinkedAlternateVersions)
+                        {
+                            if (linkedItem.ItemId.HasValue
+                                && !alternateVersionsOfPrimary.Any(i => i.ItemId.HasValue
+                                    && i.ItemId.Value.Equals(linkedItem.ItemId.Value)))
+                            {
+                                alternateVersionsOfPrimary.Add(linkedItem);
+                            }
+                        }
+
+                        if (item.LinkedAlternateVersions.Length > 0)
+                        {
+                            item.LinkedAlternateVersions = Array.Empty<LinkedChild>();
+                            await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
                         }
                     }
 
-                    if (item.LinkedAlternateVersions.Length > 0)
-                    {
-                        item.LinkedAlternateVersions = Array.Empty<LinkedChild>();
-                        await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
-                    }
-                }
-
-                primaryVersion.LinkedAlternateVersions = alternateVersionsOfPrimary.ToArray();
-                await primaryVersion.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
-            },
-            CancellationToken.None).ConfigureAwait(false);
+                    primaryVersion.LinkedAlternateVersions = alternateVersionsOfPrimary.ToArray();
+                    await primaryVersion.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
+                },
+                CancellationToken.None).ConfigureAwait(false);
         }
         catch (PermalinkException exception)
         {

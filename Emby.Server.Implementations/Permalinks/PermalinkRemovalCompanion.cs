@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-27.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-27, 2026-10-14, 2026-10-31.
 namespace Emby.Server.Implementations.Permalinks;
 
 /// <summary>One exact stem-sharing companion frozen with a removal.</summary>

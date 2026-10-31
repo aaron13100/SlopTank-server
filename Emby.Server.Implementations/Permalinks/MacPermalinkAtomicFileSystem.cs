@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-09-09, 2026-09-16, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-09-09, 2026-09-16, 2026-10-01, 2026-10-02, 2026-10-14, 2026-10-31.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -24,6 +24,7 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
     private const int FullSync = 51;
     private const int OpenReadOnly = 0;
     private const int RenameExclusive = 0x00000004;
+    private const int XattrNoFollow = 0x0001;
     private const int XattrCreate = 0x0002;
     private readonly MacPermalinkMountPolicy _mountPolicy;
     private readonly string _publicationOwner;
@@ -42,32 +43,32 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
     }
 
     /// <inheritdoc />
-    public Task<string> GetOrCreateAnchorTokenAsync(
-        string path,
-        CancellationToken cancellationToken)
+    public string NewAnchorToken()
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        _mountPolicy.EnsureAdmitted(path);
-        var existing = ReadAnchorToken(path);
-        if (existing is not null)
-        {
-            return Task.FromResult(existing);
-        }
-
         Span<byte> token = stackalloc byte[16];
         RandomNumberGenerator.Fill(token);
-        var bytes = token.ToArray();
-        if (SetXattr(path, AnchorName, bytes, (nuint)bytes.Length, 0, XattrCreate) != 0)
+        return Convert.ToHexStringLower(token);
+    }
+
+    /// <inheritdoc />
+    public bool RemoveAnchorTokenIfEquals(string path, string anchorToken)
+    {
+        _mountPolicy.EnsureAdmitted(path);
+        var existing = ReadAnchorToken(path);
+        if (!string.Equals(existing, anchorToken, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (RemoveXattr(path, AnchorName, XattrNoFollow) != 0)
         {
             var error = Marshal.GetLastPInvokeError();
-            if (error == AlreadyExists)
+            if (error == AttributeMissing)
             {
-                return Task.FromResult(
-                    ReadAnchorToken(path)
-                    ?? throw FileSystemFailure("anchor-race", path, error));
+                return false;
             }
 
-            throw FileSystemFailure("anchor-create", path, error);
+            throw FileSystemFailure("anchor-remove", path, error);
         }
 
         if (Directory.Exists(path))
@@ -80,7 +81,7 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
         }
 
         SyncDirectory(Path.GetDirectoryName(path)!);
-        return Task.FromResult(Convert.ToHexStringLower(bytes));
+        return true;
     }
 
     /// <inheritdoc />
@@ -88,7 +89,7 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
     {
         _mountPolicy.EnsureAdmitted(path);
         var bytes = new byte[16];
-        var length = GetXattr(path, AnchorName, bytes, (nuint)bytes.Length, 0, 0);
+        var length = GetXattr(path, AnchorName, bytes, (nuint)bytes.Length, 0, XattrNoFollow);
         if (length < 0)
         {
             var error = Marshal.GetLastPInvokeError();
@@ -144,7 +145,7 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
         }
 
         if (bytes.Length != 16
-            || SetXattr(path, AnchorName, bytes, (nuint)bytes.Length, 0, XattrCreate) != 0)
+            || SetXattr(path, AnchorName, bytes, (nuint)bytes.Length, 0, XattrCreate | XattrNoFollow) != 0)
         {
             throw FileSystemFailure("anchor-assign", path, Marshal.GetLastPInvokeError());
         }
@@ -490,6 +491,9 @@ public sealed class MacPermalinkAtomicFileSystem : IPermalinkAtomicFileSystem
         nuint size,
         uint position,
         int options);
+
+    [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "removexattr", SetLastError = true)]
+    private static extern int RemoveXattr(string path, string name, int options);
 
     [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "renameatx_np", SetLastError = true)]
     private static extern int RenameAtxNp(

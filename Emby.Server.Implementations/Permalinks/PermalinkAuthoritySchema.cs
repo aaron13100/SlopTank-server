@@ -1,8 +1,9 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-03, 2026-09-05, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-02, 2026-10-14, 2026-10-31.
 using System;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using MediaBrowser.Controller.Permalinks;
 using Microsoft.Data.Sqlite;
 
 namespace Emby.Server.Implementations.Permalinks;
@@ -12,6 +13,50 @@ namespace Emby.Server.Implementations.Permalinks;
 /// </summary>
 internal static class PermalinkAuthoritySchema
 {
+    /// <summary>The newest authority protocol this binary can safely open.</summary>
+    internal const long SupportedProtocolEpoch = 1;
+
+    /// <summary>
+    /// Refuses an authority created by a newer binary before this binary can
+    /// expose HTTP, scans, or scheduled work against state it cannot interpret.
+    /// An authority predating the protocol row is epoch zero and remains
+    /// readable by the compatibility release.
+    /// </summary>
+    /// <param name="connection">The open authority connection.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous validation.</returns>
+    public static async Task ValidateProtocolEpochAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var table = connection.CreateCommand();
+        table.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'AuthorityProtocolState'";
+        if (await table.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null)
+        {
+            return;
+        }
+
+        await using var epoch = connection.CreateCommand();
+        epoch.CommandText = "SELECT protocol_epoch FROM AuthorityProtocolState WHERE singleton = 1";
+        var value = await epoch.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        if (value is null || value is DBNull)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Corrupt,
+                "authority-protocol-missing",
+                "The permalink authority protocol row is missing.");
+        }
+
+        var observed = Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture);
+        if (observed > SupportedProtocolEpoch)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.VersionRefused,
+                "authority-protocol-newer",
+                $"The permalink authority protocol epoch {observed} is newer than supported epoch {SupportedProtocolEpoch}.");
+        }
+    }
+
     /// <summary>
     /// Creates the append-only authority and derived binding tables.
     /// </summary>
@@ -24,6 +69,125 @@ internal static class PermalinkAuthoritySchema
     {
         await using var command = connection.CreateCommand();
         command.CommandText = """
+            CREATE TABLE IF NOT EXISTS AuthorityProtocolState (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                protocol_epoch INTEGER NOT NULL CHECK(protocol_epoch >= 0),
+                irreversible_floor INTEGER NOT NULL DEFAULT 0 CHECK(irreversible_floor IN (0, 1)),
+                updated_at TEXT NOT NULL);
+            INSERT OR IGNORE INTO AuthorityProtocolState
+                (singleton, protocol_epoch, irreversible_floor, updated_at)
+            VALUES (1, 1, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            CREATE TABLE IF NOT EXISTS SnapshotMetadata (
+                generation INTEGER PRIMARY KEY AUTOINCREMENT,
+                authority_id TEXT NOT NULL,
+                schema_epoch INTEGER NOT NULL,
+                content_epoch INTEGER NOT NULL,
+                journal_counter INTEGER NOT NULL,
+                created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS AuthorityWriteProtection (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                enforcement_enabled INTEGER NOT NULL DEFAULT 0
+                    CHECK(enforcement_enabled IN (0, 1)));
+            INSERT OR IGNORE INTO AuthorityWriteProtection VALUES (1, 0);
+            CREATE TRIGGER IF NOT EXISTS protect_authority_write_protection_update
+            BEFORE UPDATE ON AuthorityWriteProtection BEGIN
+                SELECT CASE WHEN authority_counter_write() != 1
+                    THEN RAISE(ABORT, 'permalink-protection-control-write') END;
+            END;
+            CREATE TRIGGER IF NOT EXISTS protect_authority_write_protection_delete
+            BEFORE DELETE ON AuthorityWriteProtection BEGIN
+                SELECT RAISE(ABORT, 'permalink-protection-control-immutable');
+            END;
+            CREATE TABLE IF NOT EXISTS AuthorityCounters (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                authority_sequence INTEGER NOT NULL CHECK(authority_sequence >= 0),
+                content_epoch INTEGER NOT NULL CHECK(content_epoch >= 0),
+                journal_counter INTEGER NOT NULL CHECK(journal_counter >= 0));
+            INSERT OR IGNORE INTO AuthorityCounters VALUES (1, 0, 0, 0);
+            CREATE TRIGGER IF NOT EXISTS protect_authority_counters_update
+            BEFORE UPDATE ON AuthorityCounters BEGIN
+                SELECT CASE WHEN authority_counter_write() != 1
+                    THEN RAISE(ABORT, 'permalink-counter-write') END;
+            END;
+            CREATE TABLE IF NOT EXISTS AuthorityWriteAuthorizations (
+                nonce TEXT PRIMARY KEY, operation_id TEXT NOT NULL,
+                table_name TEXT NOT NULL, verb TEXT NOT NULL,
+                primary_key TEXT NOT NULL, epoch INTEGER NOT NULL,
+                mac TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(table_name, verb, primary_key));
+            CREATE TABLE IF NOT EXISTS PermalinkRootIdentities (
+                root_identity_id TEXT PRIMARY KEY,
+                generation INTEGER NOT NULL CHECK(generation > 0),
+                canonical_root TEXT NOT NULL,
+                attestation TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(canonical_root, generation));
+            CREATE TABLE IF NOT EXISTS PermalinkEvidenceRegistry (
+                registry_id TEXT PRIMARY KEY,
+                evidence_kind TEXT NOT NULL,
+                root_identity_id TEXT NOT NULL,
+                normalized_relative_path TEXT NOT NULL,
+                operation_id TEXT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                anchor_token TEXT NULL,
+                FOREIGN KEY(root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
+            CREATE TABLE IF NOT EXISTS PermalinkWriterAdmissions (
+                admission_id TEXT PRIMARY KEY,
+                root_identity_id TEXT NOT NULL,
+                normalized_relative_path TEXT NOT NULL,
+                pinned_object_identity TEXT NOT NULL,
+                action TEXT NOT NULL,
+                snapshot_generation INTEGER NOT NULL,
+                authority_epoch INTEGER NOT NULL,
+                content_epoch INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('issued', 'started', 'completed', 'recovery-required')),
+                start_deadline_utc TEXT NOT NULL,
+                heartbeat_deadline_utc TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_PermalinkWriterAdmissions_ActivePath
+                ON PermalinkWriterAdmissions(root_identity_id, normalized_relative_path)
+                WHERE status IN ('issued', 'started', 'recovery-required');
+            -- Path reservations (P6): one ACTIVE row per (root, path) key. Rows are never
+            -- deleted; a released or consumed row stays so MAX(generation) for the key
+            -- exposes an insert-then-release that happened inside an evidence gap.
+            CREATE TABLE IF NOT EXISTS PathReservations (
+                reservation_id TEXT PRIMARY KEY,
+                root_identity_id TEXT NOT NULL,
+                normalized_relative_path TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('restore', 'successor', 'path-mutation')),
+                operation_id TEXT NOT NULL,
+                capsule_id TEXT NULL,
+                status TEXT NOT NULL CHECK(status IN ('active', 'consumed', 'released')),
+                generation INTEGER NOT NULL CHECK(generation > 0),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_PathReservations_ActiveKey
+                ON PathReservations(root_identity_id, normalized_relative_path)
+                WHERE status = 'active';
+            CREATE INDEX IF NOT EXISTS IX_PathReservations_KeyGeneration
+                ON PathReservations(root_identity_id, normalized_relative_path, generation);
+            -- Pending supersession slots (P6): a detached capsule's anchor waiting for a
+            -- successor at the key. One pending slot per key; one slot per (capsule, anchor).
+            CREATE TABLE IF NOT EXISTS PendingSupersessionSlots (
+                slot_id TEXT PRIMARY KEY,
+                root_identity_id TEXT NOT NULL,
+                normalized_relative_path TEXT NOT NULL,
+                detached_capsule_id TEXT NOT NULL,
+                anchor_token TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending', 'consumed')),
+                consumed_by_operation_id TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(detached_capsule_id, anchor_token),
+                FOREIGN KEY(root_identity_id) REFERENCES PermalinkRootIdentities(root_identity_id));
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_PendingSupersessionSlots_PendingKey
+                ON PendingSupersessionSlots(root_identity_id, normalized_relative_path)
+                WHERE status = 'pending';
             CREATE TABLE IF NOT EXISTS AnchorTokenCapsules (
                 anchor_token TEXT PRIMARY KEY, capsule_id TEXT NOT NULL,
                 binding_id TEXT NOT NULL, root_path TEXT NOT NULL,
@@ -122,8 +286,179 @@ internal static class PermalinkAuthoritySchema
             -- fails outright on this host.
             CREATE INDEX IF NOT EXISTS IX_FirstAliasClaims_PermalinkId
                 ON FirstAliasClaims(permalink_id);
+            CREATE TRIGGER IF NOT EXISTS protect_permalink_issuances_update
+            BEFORE UPDATE ON PermalinkIssuances BEGIN
+                SELECT CASE WHEN (SELECT enforcement_enabled FROM AuthorityWriteProtection WHERE singleton = 1) = 1
+                    THEN RAISE(ABORT, 'permalink-protected-immutable') END;
+            END;
+            CREATE TRIGGER IF NOT EXISTS protect_permalink_issuances_delete
+            BEFORE DELETE ON PermalinkIssuances BEGIN
+                SELECT CASE WHEN (SELECT enforcement_enabled FROM AuthorityWriteProtection WHERE singleton = 1) = 1
+                    THEN RAISE(ABORT, 'permalink-protected-immutable') END;
+            END;
             """;
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+        // CREATE TABLE IF NOT EXISTS never alters an existing table, so a database created before
+        // the anchor-intent token existed gets the column added in place (a no-op once present).
+        await AddColumnIfMissingAsync(
+            connection, "PermalinkEvidenceRegistry", "anchor_token", "TEXT NULL", cancellationToken)
+            .ConfigureAwait(false);
+        await InstallImmutableEvidenceAsync(connection, cancellationToken).ConfigureAwait(false);
+        await InstallWriteProtectionAsync(connection, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task AddColumnIfMissingAsync(
+        SqliteConnection connection,
+        string table,
+        string column,
+        string definition,
+        CancellationToken cancellationToken)
+    {
+        await using var probe = connection.CreateCommand();
+        probe.CommandText = "SELECT COUNT(*) FROM pragma_table_info($table) WHERE name = $column";
+        probe.Parameters.AddWithValue("$table", table);
+        probe.Parameters.AddWithValue("$column", column);
+        var present = Convert.ToInt64(
+            await probe.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            System.Globalization.CultureInfo.InvariantCulture);
+        if (present > 0)
+        {
+            return;
+        }
+
+        // Identifiers are compile-time constants of this class, never caller input.
+        await using var alter = connection.CreateCommand();
+        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
+        _ = await alter.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task InstallImmutableEvidenceAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        string[] tables =
+        [
+            "SnapshotMetadata",
+            "PermalinkIssuances",
+            "FirstAliasClaims",
+            "ContentTransitionClaims",
+            "OperationDecisions",
+            "PathOperationDecisions",
+            "MutationClaims",
+            "CanonicalTransitionClaims",
+            "LegacyPredecessorMap"
+        ];
+        foreach (var table in tables)
+        {
+            foreach (var verb in new[] { "UPDATE", "DELETE" })
+            {
+                await using var trigger = connection.CreateCommand();
+                trigger.CommandText = $"""
+                    CREATE TRIGGER IF NOT EXISTS immutable_{table.ToLowerInvariant()}_{verb.ToLowerInvariant()}
+                    BEFORE {verb} ON {table} BEGIN
+                        SELECT RAISE(ABORT, 'permalink-immutable-evidence');
+                    END;
+                    """;
+                _ = await trigger.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static async Task InstallWriteProtectionAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var tables = new (string Table, string Key)[]
+        {
+            ("AuthorityProtocolState", "CAST(NEW.singleton AS TEXT)"),
+            ("SnapshotMetadata", "CAST(NEW.generation AS TEXT)"),
+            ("AnchorTokenCapsules", "NEW.anchor_token"),
+            ("PermalinkIssuances", "NEW.PermalinkId"),
+            ("FirstAliasClaims", "NEW.capsule_id"),
+            ("PermalinkBindingCapsuleOverrides", "NEW.PermalinkId || char(0) || NEW.ItemId"),
+            ("ContentTransitionClaims", "NEW.capsule_id || char(0) || NEW.predecessor"),
+            ("OperationDecisions", "NEW.operation_id || char(0) || NEW.capsule_id || char(0) || NEW.predecessor"),
+            ("PathOperationDecisions", "NEW.operation_id || char(0) || NEW.capsule_id || char(0) || NEW.binding_id || char(0) || NEW.predecessor"),
+            ("MutationClaims", "NEW.capsule_id || char(0) || NEW.predecessor_root"),
+            ("CanonicalTransitionClaims", "NEW.domain || char(0) || NEW.capsule_id || char(0) || NEW.binding_key || char(0) || NEW.predecessor_event_id"),
+            ("LegacyPredecessorMap", "NEW.capsule_id || char(0) || NEW.predecessor_root"),
+            ("PermalinkBindings", "NEW.PermalinkId || char(0) || NEW.ItemId"),
+            ("PermalinkPendingMigration", "NEW.name"),
+            ("PermalinkOperationArchiveCandidates", "NEW.operation_id"),
+            ("PermalinkRootIdentities", "NEW.root_identity_id"),
+            ("PermalinkEvidenceRegistry", "NEW.registry_id"),
+            ("PermalinkWriterAdmissions", "NEW.admission_id"),
+            ("PathReservations", "NEW.reservation_id"),
+            ("PendingSupersessionSlots", "NEW.slot_id")
+        };
+        foreach (var (table, newKey) in tables)
+        {
+            foreach (var verb in new[] { "INSERT", "UPDATE", "DELETE" })
+            {
+                if (table == "PermalinkIssuances" && verb is "UPDATE" or "DELETE")
+                {
+                    continue;
+                }
+
+                var key = verb == "DELETE" ? newKey.Replace("NEW.", "OLD.", StringComparison.Ordinal) : newKey;
+                await using var trigger = connection.CreateCommand();
+                trigger.CommandText = $"""
+                    CREATE TRIGGER IF NOT EXISTS protect_{table.ToLowerInvariant()}_{verb.ToLowerInvariant()}
+                    BEFORE {verb} ON {table}
+                    WHEN (SELECT enforcement_enabled FROM AuthorityWriteProtection WHERE singleton = 1) = 1
+                    BEGIN
+                        SELECT CASE WHEN authority_capability(
+                            '{table}', '{verb}', {key},
+                            COALESCE((SELECT mac FROM AuthorityWriteAuthorizations
+                                WHERE table_name = '{table}' AND verb = '{verb}'
+                                  AND primary_key = {key}), '')) != 1
+                            THEN RAISE(ABORT, 'permalink-protected-write') END;
+                    END;
+                    """;
+                _ = await trigger.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        foreach (var table in tables.Select(entry => entry.Table).Where(table => table != "SnapshotMetadata"))
+        {
+            var journalIncrement = table is "OperationDecisions" or "PathOperationDecisions"
+                ? "journal_counter + 1"
+                : "journal_counter";
+
+            // Writer admissions are lease bookkeeping, not content: they advance
+            // authority_sequence but never content_epoch, so heartbeats cannot cause
+            // content-epoch conflicts for unrelated paths or stop the absence watermark
+            // from converging.
+            var contentIncrement = table == "PermalinkWriterAdmissions"
+                ? "content_epoch"
+                : "content_epoch + 1";
+            foreach (var verb in new[] { "INSERT", "UPDATE", "DELETE" })
+            {
+                var counterName = $"count_{table.ToLowerInvariant()}_{verb.ToLowerInvariant()}";
+                if (contentIncrement == "content_epoch")
+                {
+                    // CREATE TRIGGER IF NOT EXISTS never replaces a trigger, so a database that
+                    // already carries the content-bumping definition must be repaired in place.
+                    await using var drop = connection.CreateCommand();
+                    drop.CommandText = $"DROP TRIGGER IF EXISTS {counterName}";
+                    _ = await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                await using var counter = connection.CreateCommand();
+                counter.CommandText = $"""
+                    CREATE TRIGGER IF NOT EXISTS {counterName}
+                    AFTER {verb} ON {table} BEGIN
+                        UPDATE AuthorityCounters SET
+                            authority_sequence = authority_sequence + 1,
+                            content_epoch = {contentIncrement},
+                            journal_counter = {journalIncrement}
+                        WHERE singleton = 1;
+                    END;
+                    """;
+                _ = await counter.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     /// <summary>

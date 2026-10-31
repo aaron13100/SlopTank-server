@@ -90,53 +90,72 @@ public sealed class PermalinkManager : IPermalinkManager
             // lifetime so a browser navigation cannot strand a half-minted alias.
             var mutationCancellationToken = CancellationToken.None;
             var path = ResolveLocalPath(item);
-            if (IsContentItem(item))
+            IPermalinkPathLease? lease = null;
+            try
             {
-                // Anchor creation changes macOS ctime. Establish it before evidence so the
-                // digest is cached against the stable post-anchor token on the genesis call.
-                // Aggregates stay on the store-owned path: a virtual Season directory may not
-                // exist until the store validates and creates it, and aggregates hash no bytes.
-                await _store.PrepareContentIdentityAsync(
+                if (IsContentItem(item))
+                {
+                    // Anchor creation changes macOS ctime. Establish it before evidence so the
+                    // digest is cached against the stable post-anchor token on the genesis call.
+                    // The lease is held from here through Ensure, so the path key (item lock
+                    // first, then path key) cannot change underneath the evidence gap.
+                    // Aggregates take theirs just before Ensure: they recurse into children
+                    // that take their own, and a virtual Season directory may not exist until
+                    // the store validates and creates it.
+                    lease = await _store.BeginContentIdentityAsync(
+                        path,
+                        item.GetType().Name,
+                        mutationCancellationToken).ConfigureAwait(false);
+                }
+
+                var evidence = item switch
+                {
+                    Series series => await ComputeSeriesAsync(
+                        series,
+                        ancestry,
+                        mutationCancellationToken).ConfigureAwait(false),
+                    Season season => await ComputeSeasonAsync(
+                        season,
+                        ancestry,
+                        mutationCancellationToken).ConfigureAwait(false),
+                    BoxSet boxSet => await ComputeBoxSetAsync(
+                        boxSet,
+                        ancestry,
+                        mutationCancellationToken).ConfigureAwait(false),
+                    _ => await _evidence.ComputeContentItemAsync(item, mutationCancellationToken)
+                        .ConfigureAwait(false)
+                };
+                if (evidence.Leaves.Count == 0)
+                {
+                    throw new PermalinkException(
+                        PermalinkErrorKind.Conflict,
+                        "empty-manifest",
+                        $"{item.GetType().Name} '{item.Name}' has no identity leaves.");
+                }
+
+                lease ??= await _store.BeginContentIdentityAsync(
                     path,
                     item.GetType().Name,
                     mutationCancellationToken).ConfigureAwait(false);
+                return await _store.EnsureAsync(
+                    new PermalinkStoreRequest(
+                        item.Id,
+                        item.GetType().Name,
+                        path,
+                        evidence.ContentRoot,
+                        evidence.Leaves,
+                        publishAlias,
+                        preferredAlias),
+                    lease,
+                    mutationCancellationToken).ConfigureAwait(false);
             }
-
-            var evidence = item switch
+            finally
             {
-                Series series => await ComputeSeriesAsync(
-                    series,
-                    ancestry,
-                    mutationCancellationToken).ConfigureAwait(false),
-                Season season => await ComputeSeasonAsync(
-                    season,
-                    ancestry,
-                    mutationCancellationToken).ConfigureAwait(false),
-                BoxSet boxSet => await ComputeBoxSetAsync(
-                    boxSet,
-                    ancestry,
-                    mutationCancellationToken).ConfigureAwait(false),
-                _ => await _evidence.ComputeContentItemAsync(item, mutationCancellationToken)
-                    .ConfigureAwait(false)
-            };
-            if (evidence.Leaves.Count == 0)
-            {
-                throw new PermalinkException(
-                    PermalinkErrorKind.Conflict,
-                    "empty-manifest",
-                    $"{item.GetType().Name} '{item.Name}' has no identity leaves.");
+                if (lease is not null)
+                {
+                    await lease.DisposeAsync().ConfigureAwait(false);
+                }
             }
-
-            return await _store.EnsureAsync(
-                new PermalinkStoreRequest(
-                    item.Id,
-                    item.GetType().Name,
-                    path,
-                    evidence.ContentRoot,
-                    evidence.Leaves,
-                    publishAlias,
-                    preferredAlias),
-                mutationCancellationToken).ConfigureAwait(false);
         }
         finally
         {

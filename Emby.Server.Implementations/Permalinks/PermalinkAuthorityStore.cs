@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-09-03, 2026-09-09, 2026-09-10, 2026-10-07, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-09-03, 2026-09-09, 2026-09-10, 2026-09-19, 2026-10-01, 2026-10-07, 2026-10-14, 2026-10-31.
 using System;
 using System.Globalization;
 using System.IO;
@@ -23,6 +23,7 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly TimeProvider _timeProvider;
     private readonly IPermalinkAuthorityRootProvider _rootProvider;
+    private readonly PermalinkAuthorityCapability _capability = new();
     private readonly SemaphoreSlim _provisionLock = new(1, 1);
 
     /// <summary>
@@ -104,9 +105,9 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// </summary>
     internal bool IsConfigured => !string.IsNullOrWhiteSpace(_rootProvider.AuthorityRoot);
 
-    private string AuthorityRoot => Path.Combine(Root, ".sloptank", "permalinks");
+    internal string AuthorityRoot => Path.Combine(Root, ".sloptank", "permalinks");
 
-    private string DatabasePath => Path.Combine(AuthorityRoot, "authority.db");
+    internal string DatabasePath => Path.Combine(AuthorityRoot, "authority.db");
 
     internal string IssuedRoot => Path.Combine(AuthorityRoot, "issued");
 
@@ -213,14 +214,33 @@ internal sealed class PermalinkAuthorityStore : IDisposable
     /// <param name="candidate">The candidate.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task representing the asynchronous operation.</returns>
-    public async Task<PermalinkGenesisReservation> ReserveGenesisAsync(
+    public Task<PermalinkGenesisReservation> ReserveGenesisAsync(
         PermalinkGenesisCandidate candidate,
+        CancellationToken cancellationToken)
+        => ReserveGenesisAsync(candidate, null, cancellationToken);
+
+    /// <summary>
+    /// Atomically elects one genesis for a stable anchor, running per-key rechecks first inside
+    /// the same transaction so a refusal rolls the election back.
+    /// </summary>
+    /// <param name="candidate">The candidate.</param>
+    /// <param name="recheck">The recheck callback, or null for none.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    internal async Task<PermalinkGenesisReservation> ReserveGenesisAsync(
+        PermalinkGenesisCandidate candidate,
+        Func<SqliteConnection, SqliteTransaction, CancellationToken, Task>? recheck,
         CancellationToken cancellationToken)
     {
         await EnsureProvisionedAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = (SqliteTransaction)await connection
             .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        if (recheck is not null)
+        {
+            await recheck(connection, transaction, cancellationToken).ConfigureAwait(false);
+        }
+
         await using (var insert = connection.CreateCommand())
         {
             insert.Transaction = transaction;
@@ -276,6 +296,25 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         return reservation;
     }
 
+    /// <summary>
+    /// Runs a callback inside its own authority transaction and commits it; a throw rolls back.
+    /// Used by Ensure when the capsule already exists, so the per-key rechecks still run.
+    /// </summary>
+    /// <param name="callback">The work to run inside the transaction.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the transaction.</returns>
+    internal async Task SettleAsync(
+        Func<SqliteConnection, SqliteTransaction, CancellationToken, Task> callback,
+        CancellationToken cancellationToken)
+    {
+        await EnsureProvisionedAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection
+            .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await callback(connection, transaction, cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task EnsureProvisionedAsync(CancellationToken cancellationToken)
     {
         if (_provisioned)
@@ -316,7 +355,13 @@ internal sealed class PermalinkAuthorityStore : IDisposable
             }
 
             await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await PermalinkAuthoritySchema.ValidateProtocolEpochAsync(
+                connection,
+                cancellationToken).ConfigureAwait(false);
             await PermalinkAuthoritySchema.ApplyAsync(connection, cancellationToken).ConfigureAwait(false);
+            await PermalinkAuthoritySchema.ValidateProtocolEpochAsync(
+                connection,
+                cancellationToken).ConfigureAwait(false);
             _provisioned = true;
         }
         catch (PermalinkException)
@@ -469,12 +514,73 @@ internal sealed class PermalinkAuthorityStore : IDisposable
         _lastOpenedDatabasePath = databasePath;
         var connection = new SqliteConnection($"Data Source={databasePath};Pooling=True");
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        _capability.Register(connection);
         await using var command = connection.CreateCommand();
         command.CommandText = OperatingSystem.IsMacOS()
             ? "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON;"
             : "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;";
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         return connection;
+    }
+
+    /// <summary>Begins one exact protected-table write scope.</summary>
+    /// <param name="connection">The server-owned authority connection.</param>
+    /// <param name="operationId">The durable operation identifier.</param>
+    /// <param name="table">The exact protected table name.</param>
+    /// <param name="verb">The exact SQL write verb.</param>
+    /// <param name="primaryKey">The canonical primary-key text.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <param name="transaction">The optional transaction that owns the authorization row.</param>
+    /// <returns>The capability scope, which removes its authorization on disposal.</returns>
+    internal async Task<PermalinkAuthorityWriteScope> BeginAuthorizedWriteAsync(
+        SqliteConnection connection,
+        Guid operationId,
+        string table,
+        string verb,
+        string primaryKey,
+        CancellationToken cancellationToken,
+        SqliteTransaction? transaction = null)
+    {
+        var scope = _capability.Begin(
+            connection,
+            operationId,
+            table,
+            verb,
+            primaryKey,
+            PermalinkAuthoritySchema.SupportedProtocolEpoch);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO AuthorityWriteAuthorizations
+                (nonce, operation_id, table_name, verb, primary_key, epoch, mac, created_at)
+            VALUES ($nonce, $operation, $table, $verb, $key, $epoch, $mac, $created)
+            """;
+        command.Parameters.AddWithValue("$nonce", scope.Nonce);
+        command.Parameters.AddWithValue("$operation", operationId.ToString("D"));
+        command.Parameters.AddWithValue("$table", table);
+        command.Parameters.AddWithValue("$verb", verb);
+        command.Parameters.AddWithValue("$key", primaryKey);
+        command.Parameters.AddWithValue("$epoch", PermalinkAuthoritySchema.SupportedProtocolEpoch);
+        command.Parameters.AddWithValue("$mac", scope.Mac);
+        command.Parameters.AddWithValue("$created", UtcNow());
+        try
+        {
+            _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            scope.AddRelease(() =>
+            {
+                using var cleanup = connection.CreateCommand();
+                cleanup.Transaction = transaction;
+                cleanup.CommandText = "DELETE FROM AuthorityWriteAuthorizations WHERE nonce = $nonce";
+                cleanup.Parameters.AddWithValue("$nonce", scope.Nonce);
+                _ = cleanup.ExecuteNonQuery();
+            });
+            return scope;
+        }
+        catch
+        {
+            scope.Dispose();
+            throw;
+        }
     }
 
     /// <summary>

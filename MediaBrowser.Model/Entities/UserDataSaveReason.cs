@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-14, 2026-09-18.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-14, 2026-09-18, 2026-10-14, 2026-10-31.
 namespace MediaBrowser.Model.Entities
 {
     /// <summary>

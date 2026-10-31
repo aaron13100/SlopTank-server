@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SlopTank modification notice: added or changed by SlopTank on 2026-09-08, 2026-09-09.
+# SlopTank modification notice: added or changed by SlopTank on 2026-09-08, 2026-09-09, 2026-10-14, 2026-10-31.
 """Debrand regression guard: block Jellyfin product-identity branding.
 
 SlopTank is a fork of Jellyfin. The upstream trademark policy

@@ -1,4 +1,4 @@
-<!-- SlopTank modification notice: added or changed by SlopTank on 2026-07-22, 2026-09-08, 2026-09-09, 2026-09-19. -->
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-07-22, 2026-09-08, 2026-09-09, 2026-09-19, 2026-10-14, 2026-10-31. -->
 <h1 align="center">SlopTank Server</h1>
 <h3 align="center">A customized media server based on <a href="https://jellyfin.org">Jellyfin</a></h3>
 

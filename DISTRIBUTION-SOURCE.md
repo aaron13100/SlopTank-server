@@ -1,4 +1,4 @@
-<!-- SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09. -->
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09, 2026-10-14, 2026-10-31. -->
 # SlopTank server distribution source and licence status
 
 Every externally delivered server unit must be a completed delivery directory

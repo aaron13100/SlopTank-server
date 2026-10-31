@@ -1,5 +1,5 @@
 #!/bin/sh
-# SlopTank modification notice: added or changed by SlopTank on 2026-09-19.
+# SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-14, 2026-10-31.
 set -eu
 
 repository_root=$(git rev-parse --show-toplevel)

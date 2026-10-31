@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-09-09, 2026-10-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31.
 #pragma warning disable CA1044, CA1819, CA2227, CS1591
 
 using System;

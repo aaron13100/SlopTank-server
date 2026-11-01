@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-14, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-14, 2026-10-14, 2026-10-31, 2026-11-01.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -29,7 +29,8 @@ internal static class PermalinkCanonicalClaimMigration
     {
         Mapped,
         Contested,
-        PathClaimDeferred
+        PathClaimDeferred,
+        AggregateDependencyDeferred
     }
 
     /// <summary>
@@ -250,6 +251,14 @@ internal static class PermalinkCanonicalClaimMigration
             return Contested(
                 $"mutation capsule '{row.CapsuleId}' root '{row.PredecessorRoot}': the journal "
                 + $"bundle claim predecessor '{claim.Predecessor}' disagrees with the recorded root.");
+        }
+
+        // Aggregate rows are live dependency leases, not consumed content
+        // transitions. Their immutable decisions remain in the operation
+        // history when a later committed dependency acquires the slot.
+        if (string.Equals(claim.Kind, "aggregate", StringComparison.Ordinal))
+        {
+            return new LegacyFoldResult(LegacyFoldOutcome.AggregateDependencyDeferred, string.Empty);
         }
 
         var capsulePaths = await ReadCapsulePathsAsync(connection, capsuleId, cancellationToken)

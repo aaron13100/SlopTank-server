@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20, 2026-09-27, 2026-09-30, 2026-10-03, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20, 2026-09-27, 2026-09-30, 2026-10-03, 2026-10-14, 2026-10-31, 2026-11-01.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -129,6 +129,11 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
 
         var existing = await _journal.ReadAsync(request.OperationId, cancellationToken)
             .ConfigureAwait(false);
+        if (existing is null && request.Kind == "media")
+        {
+            await SettleAggregateClosureAsync(item, cancellationToken).ConfigureAwait(false);
+        }
+
         PermalinkResolutionBinding binding;
         string oldContentRoot;
         // A phantom shell's anchor is a random token no authority row knows, so the
@@ -177,8 +182,8 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         }
 
         var capsuleId = binding.CapsuleId;
-        var bundle = await _bundleFactory.CreateAsync(item, request, cancellationToken)
-            .ConfigureAwait(false);
+        var bundle = existing?.Bundle
+            ?? await _bundleFactory.CreateAsync(item, request, cancellationToken).ConfigureAwait(false);
         var operation = new PermalinkOperationDocument(
             request.OperationId,
             item.Id,
@@ -251,6 +256,11 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         var operation = await RequireOperationAsync(operationId, cancellationToken).ConfigureAwait(false);
         if (_journal.GetSettledPhase(operationId) is { } settledPhase)
         {
+            if (settledPhase == PermalinkPhase.Committed && operation.Kind == "media")
+            {
+                await SettleCommittedMediaAncestorsAsync(operation, cancellationToken).ConfigureAwait(false);
+            }
+
             return new PermalinkMutationResult(operationId, settledPhase.Name);
         }
 
@@ -277,7 +287,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
 
         var item = RequireItem(operation.ItemId);
 
-        return operation.Kind switch
+        var mutationResult = operation.Kind switch
         {
             "media" => await _mediaMutation.CommitAsync(
                 operation,
@@ -294,6 +304,12 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
             _ => await _itemStateMutation.CommitStateOnlyAsync(operation, cancellationToken)
                 .ConfigureAwait(false)
         };
+        if (operation.Kind == "media" && mutationResult.State == PermalinkPhase.Committed.Name)
+        {
+            await SettleCommittedMediaAncestorsAsync(operation, cancellationToken).ConfigureAwait(false);
+        }
+
+        return mutationResult;
     }
 
     /// <inheritdoc />
@@ -314,6 +330,11 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         var operation = await RequireOperationAsync(operationId, cancellationToken).ConfigureAwait(false);
         if (_journal.GetSettledPhase(operationId) is { } settledPhase)
         {
+            if (settledPhase == PermalinkPhase.Committed && operation.Kind == "media")
+            {
+                await SettleCommittedMediaAncestorsAsync(operation, cancellationToken).ConfigureAwait(false);
+            }
+
             return new PermalinkMutationResult(operationId, settledPhase.Name);
         }
 
@@ -350,8 +371,14 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         var item = RequireItem(operation.ItemId);
         if (operation.Kind == "media")
         {
-            return await _mediaRecovery.RecoverAsync(operation, item, cancellationToken)
+            var result = await _mediaRecovery.RecoverAsync(operation, item, cancellationToken)
                 .ConfigureAwait(false);
+            if (result.State == PermalinkPhase.Committed.Name)
+            {
+                await SettleCommittedMediaAncestorsAsync(operation, cancellationToken).ConfigureAwait(false);
+            }
+
+            return result;
         }
 
         if (operation.Kind is "path" or "cross-root" or "tree" or "multipart")
@@ -363,6 +390,48 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         throw Conflict(
             "manual-intervention",
             $"Operation '{operationId}' evidence does not match an automatic recovery branch.");
+    }
+
+    private async Task SettleAggregateClosureAsync(BaseItem item, CancellationToken cancellationToken)
+    {
+        // Use the same closure as bundle admission, including linked BoxSets.
+        // Seasons settle before Series; BoxSets then observe their current members.
+        var ancestors = _bundleFactory.DiscoverItems(item, "media")
+            .Where(value => !value.Id.Equals(item.Id))
+            .OrderBy(value => value is Season ? 0 : value is Series ? 1 : 2)
+            .ThenBy(value => value.Id);
+        foreach (var ancestor in ancestors)
+        {
+            if (await _bundleFactory.FindReservationAsync(ancestor, cancellationToken).ConfigureAwait(false) is null)
+            {
+                continue;
+            }
+
+            _ = await _manager.EnsurePermalinkIdsAsync(ancestor, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task SettleCommittedMediaAncestorsAsync(
+        PermalinkOperationDocument operation,
+        CancellationToken cancellationToken)
+    {
+        if (!_journal.HasPhase(operation.OperationId, PermalinkPhase.Published))
+        {
+            // A verified no-effect commit changed no descendant evidence and
+            // must not interfere with a different active publisher.
+            return;
+        }
+
+        var item = _libraryManager.GetItemById(operation.ItemId);
+        if (item is null
+            || (await _bindings.FindItemBindingsAsync(operation.ItemId, cancellationToken).ConfigureAwait(false)).Count == 0)
+        {
+            // A later sanctioned retirement may have removed this live item.
+            // Its immutable committed receipt remains valid and replayable.
+            return;
+        }
+
+        await SettleAggregateClosureAsync(item, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -389,16 +458,27 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         // operation; only a terminal phase closes it here.
         if (_journal.GetTerminalPhase(operationId) is { } terminalPhase)
         {
+            if (terminalPhase == PermalinkPhase.Committed && operation.Kind == "media")
+            {
+                await SettleCommittedMediaAncestorsAsync(operation, cancellationToken).ConfigureAwait(false);
+            }
+
             return new PermalinkMutationResult(operationId, terminalPhase.Name);
         }
 
         var item = RequireItem(operation.ItemId);
-        return operation.Kind == "media"
+        var result = operation.Kind == "media"
             ? await _mediaRecovery.ResolveAsync(operation, item, request, cancellationToken)
                 .ConfigureAwait(false)
             : throw Conflict(
                 "resolution-action-invalid",
                 $"Operation kind '{operation.Kind}' has no guarded '{request.Action}' action.");
+        if (result.State == PermalinkPhase.Committed.Name)
+        {
+            await SettleCommittedMediaAncestorsAsync(operation, cancellationToken).ConfigureAwait(false);
+        }
+
+        return result;
     }
 
     /// <inheritdoc />

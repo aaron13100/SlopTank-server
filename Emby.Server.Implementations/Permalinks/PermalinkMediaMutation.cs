@@ -1,6 +1,7 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-07, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-07, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31, 2026-11-01.
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
@@ -22,6 +23,7 @@ internal sealed class PermalinkMediaMutation
     private readonly PermalinkBindingIndex _bindings;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly PermalinkMutationClaimStore _claims;
+    private readonly PermalinkTransitionPublisher? _aggregatePublisher;
 
     public PermalinkMediaMutation(
         PermalinkEvidence evidence,
@@ -32,7 +34,8 @@ internal sealed class PermalinkMediaMutation
         PermalinkDocumentFactory documents,
         PermalinkBindingIndex bindings,
         IPermalinkAtomicFileSystem fileSystem,
-        PermalinkMutationClaimStore claims)
+        PermalinkMutationClaimStore claims,
+        PermalinkTransitionPublisher? aggregatePublisher = null)
     {
         _evidence = evidence;
         _authority = authority;
@@ -43,6 +46,7 @@ internal sealed class PermalinkMediaMutation
         _bindings = bindings;
         _fileSystem = fileSystem;
         _claims = claims;
+        _aggregatePublisher = aggregatePublisher;
     }
 
     public async Task<PermalinkMutationResult> CommitAsync(
@@ -56,6 +60,13 @@ internal sealed class PermalinkMediaMutation
             item,
             request.StagedPath,
             cancellationToken).ConfigureAwait(false);
+        var ready = await _journal.ReadPhaseAsync(
+            operation.OperationId, PermalinkPhase.Ready, cancellationToken).ConfigureAwait(false);
+        if (ready?.ContentRoot == operation.OldContentRoot)
+        {
+            return await CompleteNoEffectAsync(operation, item, cancellationToken).ConfigureAwait(false);
+        }
+
         await VerifyPreparedOldAsync(operation, item, claimed: false, cancellationToken)
             .ConfigureAwait(false);
         await _claims.ClaimAsync(RequireBundle(operation), operation.OperationId, cancellationToken)
@@ -275,7 +286,81 @@ internal sealed class PermalinkMediaMutation
         return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
     }
 
-    private async Task VerifyPreparedOldAsync(
+    /// <summary>Commits an exact unchanged result without publishing bytes or electing a successor.</summary>
+    /// <param name="operation">The immutable Ready media operation.</param>
+    /// <param name="item">The still-bound live source.</param>
+    /// <param name="cancellationToken">The durable operation lifetime.</param>
+    /// <returns>The truthful no-effect committed receipt understood by existing callers.</returns>
+    internal async Task<PermalinkMutationResult> CompleteNoEffectAsync(
+        PermalinkOperationDocument operation,
+        BaseItem item,
+        CancellationToken cancellationToken)
+    {
+        if (operation.Kind != "media" || _journal.HasPhase(operation.OperationId, PermalinkPhase.Published)
+            || File.Exists(GetQuarantinePath(operation)))
+        {
+            throw Conflict("no-effect-publication-present", "Published or quarantined evidence requires normal media recovery.");
+        }
+
+        var ready = await _journal.ReadPhaseAsync(
+            operation.OperationId, PermalinkPhase.Ready, cancellationToken).ConfigureAwait(false);
+        if (ready is null || !ready.OperationId.Equals(operation.OperationId)
+            || ready.State != PermalinkPhase.Ready.Name || ready.ContentRoot != operation.OldContentRoot
+            || ready.Type != "sloptank.permalink-operation-phase")
+        {
+            throw Conflict("no-effect-ready-mismatch", "The exact Ready record must prove desired equals prepared-old.");
+        }
+
+        await VerifyNoEffectLiveAsync(operation, item, cancellationToken).ConfigureAwait(false);
+        await _claims.SettleNoEffectAsync(operation, cancellationToken).ConfigureAwait(false);
+        await VerifyNoEffectLiveAsync(operation, item, cancellationToken).ConfigureAwait(false);
+        await _journal.WritePhaseAsync(
+            operation.OperationId,
+            PermalinkPhase.Committed,
+            new PermalinkOperationPhase(
+                operation.OperationId,
+                PermalinkPhase.Committed.Name,
+                operation.OldContentRoot,
+                operation.CreatedAt)
+            {
+                ObservedState = "effect=none;live=prepared-old;desired=prepared-old;publication=absent"
+            },
+            cancellationToken).ConfigureAwait(false);
+        return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
+    }
+
+    private async Task VerifyNoEffectLiveAsync(
+        PermalinkOperationDocument operation,
+        BaseItem item,
+        CancellationToken cancellationToken)
+    {
+        var live = await _evidence.ComputeContentItemAsync(item, cancellationToken).ConfigureAwait(false);
+        var reservation = await _authority.FindByCapsuleAsync(operation.CapsuleId, cancellationToken).ConfigureAwait(false);
+        var bindings = await _bindings.FindItemBindingsAsync(item.Id, cancellationToken).ConfigureAwait(false);
+        if (item.Path != operation.SourcePath || live.ContentRoot != operation.OldContentRoot
+            || reservation is null || reservation.CurrentPath != item.Path
+            || _fileSystem.ReadAnchorToken(item.Path) != reservation.AnchorToken
+            || bindings.Count == 0
+            || bindings.Any(value => !value.CapsuleId.Equals(operation.CapsuleId) || value.ContentRoot != live.ContentRoot)
+            || RequireBundle(operation).Claims.Any(value => value.Kind is not ("content" or "aggregate")))
+        {
+            throw Conflict("no-effect-live-mismatch", "A no-effect result requires exact live bytes, path, anchor and logical bindings.");
+        }
+
+        var capsule = await _capsules.ReadValidatedAsync(
+            reservation.CapsulePath, reservation.CapsuleId, reservation.ItemKind, cancellationToken).ConfigureAwait(false);
+        var authorized = capsule.ContentHead.Kind is "mint" or "identity_seed"
+            ? CanonicalJson.Digest(reservation.EventJson) == CanonicalJson.Digest(CanonicalJson.Serialize(capsule.ContentHead))
+            : await _transitions.IsAuthorizedContentEventAsync(
+                operation.CapsuleId, capsule.ContentHead, cancellationToken).ConfigureAwait(false);
+        if (capsule.ContentHead.ContentRoot != live.ContentRoot
+            || !capsule.ContentHead.BindingInstanceId.Equals(reservation.BindingId) || !authorized)
+        {
+            throw Conflict("no-effect-binding-mismatch", "The live source no longer has its exact authority content/binding head.");
+        }
+    }
+
+    internal async Task VerifyPreparedOldAsync(
         PermalinkOperationDocument operation,
         BaseItem item,
         bool claimed,
@@ -302,6 +387,39 @@ internal sealed class PermalinkMediaMutation
             throw Conflict(
                 "prepared-old-mismatch",
                 "Live content no longer matches prepared-old evidence.");
+        }
+
+        if (claimed && !await _claims.OwnsAsync(
+                RequireBundle(operation), operation.OperationId, cancellationToken).ConfigureAwait(false))
+        {
+            throw Conflict("claim-owner-mismatch", "The operation no longer owns its complete publication admission.");
+        }
+
+        await VerifyAggregateDependenciesAsync(operation, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Checks frozen ancestor bindings and authorized heads before a recovery move.</summary>
+    /// <param name="operation">The exact immutable operation.</param>
+    /// <param name="cancellationToken">The durable operation lifetime.</param>
+    /// <returns>A task representing dependency validation.</returns>
+    internal async Task VerifyAggregateDependenciesAsync(
+        PermalinkOperationDocument operation,
+        CancellationToken cancellationToken)
+    {
+        foreach (var claim in RequireBundle(operation).Claims)
+        {
+            if (claim.Kind != "aggregate")
+            {
+                continue;
+            }
+
+            if (_aggregatePublisher is null)
+            {
+                throw Conflict("aggregate-proof-unavailable", "Media publication requires authority-backed ancestor verification.");
+            }
+
+            await _aggregatePublisher.VerifyDependencyAsync(
+                claim, operation.CapsuleId, cancellationToken).ConfigureAwait(false);
         }
     }
 

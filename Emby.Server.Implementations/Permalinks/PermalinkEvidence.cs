@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-27, 2026-09-28, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-27, 2026-09-28, 2026-10-14, 2026-10-31, 2026-11-01.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -567,7 +567,10 @@ public sealed class PermalinkEvidence
         }
     }
 
-    private static PermalinkEvidenceResult Build(IReadOnlyList<PermalinkLeaf> source)
+    /// <summary>Builds the one canonical root used by live and authorized derived manifests.</summary>
+    /// <param name="source">The complete evidence leaf set.</param>
+    /// <returns>The canonical ordered leaves and their full-content root.</returns>
+    internal static PermalinkEvidenceResult Build(IReadOnlyList<PermalinkLeaf> source)
     {
         var leaves = source
             .OrderBy(leaf => leaf.Kind, StringComparer.Ordinal)

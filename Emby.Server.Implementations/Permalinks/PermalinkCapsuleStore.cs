@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-30, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-30, 2026-10-14, 2026-10-31, 2026-11-01.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -170,6 +170,59 @@ internal sealed class PermalinkCapsuleStore
             eventPath,
             eventJson,
             cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Retains exact canonical successor bytes before their authority election.</summary>
+    /// <param name="capsulePath">The existing capsule storage root.</param>
+    /// <param name="successor">The deterministic candidate.</param>
+    /// <param name="eventJson">Its canonical bytes.</param>
+    /// <param name="cancellationToken">The durable publication lifetime.</param>
+    /// <returns>A task representing durable staging.</returns>
+    public Task StageContentAsync(
+        string capsulePath,
+        PermalinkEventDocument successor,
+        ReadOnlyMemory<byte> eventJson,
+        CancellationToken cancellationToken) =>
+        PublishOrVerifyAsync(
+            Path.Combine(capsulePath, "pending-content", successor.EventId.ToString("D") + ".json"),
+            eventJson,
+            cancellationToken);
+
+    /// <summary>Reads the exact staged or already-published winner of a content election.</summary>
+    /// <param name="capsulePath">The existing capsule storage root.</param>
+    /// <param name="eventId">The authority-elected event.</param>
+    /// <param name="cancellationToken">The durable publication lifetime.</param>
+    /// <returns>The canonical event to authenticate before appending.</returns>
+    public async Task<PermalinkEventDocument> ReadPublicationAsync(
+        string capsulePath,
+        Guid eventId,
+        CancellationToken cancellationToken)
+    {
+        var published = Path.Combine(capsulePath, "events", eventId.ToString("D") + ".json");
+        var path = File.Exists(published)
+            ? published
+            : Path.Combine(capsulePath, "pending-content", eventId.ToString("D") + ".json");
+        byte[] bytes;
+        try
+        {
+            bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+        }
+        catch (IOException exception)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "aggregate-publication-unavailable",
+                $"Elected event '{eventId}' cannot be read at '{path}' ({exception.Message}).",
+                exception);
+        }
+
+        var document = CanonicalJson.Deserialize<PermalinkEventDocument>(bytes, path);
+        if (!document.EventId.Equals(eventId) || document.Type != "sloptank.permalink-event" || document.Version != 1)
+        {
+            throw Conflict("aggregate-publication-mismatch", $"Elected event '{eventId}' has foreign staged identity.");
+        }
+
+        return document;
     }
 
     /// <summary>

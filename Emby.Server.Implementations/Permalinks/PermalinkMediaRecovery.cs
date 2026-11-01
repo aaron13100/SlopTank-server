@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-09, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-09, 2026-10-14, 2026-10-31, 2026-11-01.
 using System;
 using System.Globalization;
 using System.IO;
@@ -59,9 +59,20 @@ internal sealed class PermalinkMediaRecovery
         var evidence = await ObserveAsync(operation, item, ready.ContentRoot, cancellationToken)
             .ConfigureAwait(false);
         var bundle = PermalinkMediaMutation.RequireBundle(operation);
+        if (ready.ContentRoot == operation.OldContentRoot
+            && evidence.LiveIsOld && !evidence.QuarantineExists
+            && !_journal.HasPhase(operation.OperationId, PermalinkPhase.Published))
+        {
+            return await _mutation.CompleteNoEffectAsync(operation, item, cancellationToken).ConfigureAwait(false);
+        }
+
         if (evidence.LiveIsOld && evidence.StagingIsDesired && !evidence.QuarantineExists)
         {
+            await _mutation.VerifyPreparedOldAsync(operation, item, claimed: false, cancellationToken)
+                .ConfigureAwait(false);
             await _claims.ClaimAsync(bundle, operation.OperationId, cancellationToken)
+                .ConfigureAwait(false);
+            await _mutation.VerifyPreparedOldAsync(operation, item, claimed: true, cancellationToken)
                 .ConfigureAwait(false);
             File.Move(item.Path, _mutation.GetQuarantinePath(operation));
             File.Move(_mutation.GetStagingPath(operation), item.Path);
@@ -73,6 +84,8 @@ internal sealed class PermalinkMediaRecovery
         if (!evidence.LiveExists && evidence.QuarantineIsOld && evidence.StagingIsDesired)
         {
             await RequireClaimsAsync(bundle, operation.OperationId, cancellationToken)
+                .ConfigureAwait(false);
+            await _mutation.VerifyAggregateDependenciesAsync(operation, cancellationToken)
                 .ConfigureAwait(false);
             File.Move(_mutation.GetStagingPath(operation), item.Path);
             _evidence.InvalidateContentDigest(item.Path);

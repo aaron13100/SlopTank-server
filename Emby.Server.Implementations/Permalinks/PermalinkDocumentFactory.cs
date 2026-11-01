@@ -1,7 +1,10 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-10-03, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-10-03, 2026-10-14, 2026-10-31, 2026-11-01.
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Security.Cryptography;
+using System.Text;
 using MediaBrowser.Controller.Permalinks;
 
 namespace Emby.Server.Implementations.Permalinks;
@@ -131,6 +134,46 @@ internal sealed class PermalinkDocumentFactory
             snapshot.ContentHead.BindingInstanceId,
             snapshot.ContentHead.PathAssignment,
             UtcNow());
+    }
+
+    /// <summary>Creates replayable aggregate evidence from immutable authorized causes.</summary>
+    /// <param name="request">The complete desired manifest.</param>
+    /// <param name="snapshot">The exact predecessor snapshot.</param>
+    /// <param name="causes">The canonical child events authorizing the manifest.</param>
+    /// <param name="removal">An optional exact guarded removal cause.</param>
+    /// <returns>The same canonical event for every replay of these inputs.</returns>
+    public PermalinkEventDocument CreateAggregateSuccessor(
+        PermalinkStoreRequest request,
+        PermalinkCapsuleSnapshot snapshot,
+        IReadOnlyList<PermalinkEventDocument> causes,
+        PermalinkOperationDocument? removal = null)
+    {
+        var causeIds = string.Join(",", causes.Select(value => value.EventId.ToString("D")).Order(StringComparer.Ordinal));
+        var identity = $"aggregate-content-v1\0{snapshot.Header.CapsuleId:D}\0"
+            + $"{snapshot.ContentHead.EventId:D}\0{request.ContentRoot}\0{causeIds}\0{removal?.OperationId:D}";
+        var eventId = new Guid(SHA256.HashData(Encoding.UTF8.GetBytes(identity)).AsSpan(0, 16));
+        var operationId = removal?.OperationId
+            ?? new Guid(SHA256.HashData(Encoding.UTF8.GetBytes("operation\0" + identity)).AsSpan(0, 16));
+        var createdAt = causes.Select(value => value.CreatedAt)
+            .Append(snapshot.ContentHead.CreatedAt)
+            .Concat(removal is null ? [] : new[] { removal.CreatedAt })
+            .OrderBy(value => DateTimeOffset.Parse(value, CultureInfo.InvariantCulture))
+            .Last();
+        return new PermalinkEventDocument(
+            eventId,
+            operationId,
+            [snapshot.ContentHead.EventId],
+            "controlled-mutation",
+            [],
+            snapshot.ContentHead.EventId,
+            snapshot.ContentHead.PreviousAssignmentEventId,
+            snapshot.ContentHead.AcceptedProviderClaim,
+            snapshot.ContentHead.ActiveExternalAliases,
+            request.ContentRoot,
+            request.Leaves,
+            snapshot.ContentHead.BindingInstanceId,
+            snapshot.ContentHead.PathAssignment,
+            createdAt);
     }
 
     /// <summary>

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-27, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-27, 2026-10-14, 2026-10-31, 2026-11-01.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -20,6 +20,10 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
     private readonly PermalinkBindingIndex _bindings;
     private readonly PermalinkRemovalEvidenceVerifier _verifier;
     private readonly TimeProvider _timeProvider;
+    private readonly PermalinkMutationBundleFactory? _bundleFactory;
+    private readonly IPermalinkManager? _manager;
+    private readonly PermalinkTransitionPublisher? _aggregatePublisher;
+    private readonly PermalinkMutationClaimStore? _claims;
     private readonly SemaphoreSlim[] _operationGates = Enumerable.Range(0, OperationGateCount)
         .Select(_ => new SemaphoreSlim(1, 1))
         .ToArray();
@@ -28,12 +32,20 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
         PermalinkOperationJournal journal,
         PermalinkBindingIndex bindings,
         PermalinkRemovalEvidenceVerifier verifier,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        PermalinkMutationBundleFactory? bundleFactory = null,
+        IPermalinkManager? manager = null,
+        PermalinkTransitionPublisher? aggregatePublisher = null,
+        PermalinkMutationClaimStore? claims = null)
     {
         _journal = journal;
         _bindings = bindings;
         _verifier = verifier;
         _timeProvider = timeProvider;
+        _bundleFactory = bundleFactory;
+        _manager = manager;
+        _aggregatePublisher = aggregatePublisher;
+        _claims = claims;
     }
 
     /// <inheritdoc />
@@ -52,6 +64,39 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
 
         var intent = await _verifier.FreezeAsync(item, request, cancellationToken)
             .ConfigureAwait(false);
+        PermalinkMutationBundle? bundle = null;
+        if (_bundleFactory is not null && _manager is not null && _aggregatePublisher is not null)
+        {
+            foreach (var parent in _bundleFactory.DiscoverItems(item, "removal")
+                         .Where(value => !value.Id.Equals(item.Id))
+                         .OrderBy(value => value is MediaBrowser.Controller.Entities.TV.Season ? 0
+                             : value is MediaBrowser.Controller.Entities.TV.Series ? 1 : 2)
+                         .ThenBy(value => value.Id))
+            {
+                if (await _bundleFactory.FindReservationAsync(parent, cancellationToken).ConfigureAwait(false) is null)
+                {
+                    continue;
+                }
+
+                _ = await _manager.EnsurePermalinkIdsAsync(parent, cancellationToken).ConfigureAwait(false);
+            }
+
+            bundle = await _bundleFactory.CreateAsync(
+                item,
+                new PermalinkMutationPrepareRequest(
+                    request.OperationId,
+                    item.Id,
+                    "removal",
+                    null,
+                    null),
+                cancellationToken).ConfigureAwait(false);
+            foreach (var dependency in bundle.Claims.Where(value => value.Kind == "aggregate"))
+            {
+                await _aggregatePublisher.VerifyDependencyAsync(
+                    dependency, intent.SourceCapsuleId, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         var operation = new PermalinkOperationDocument(
             request.OperationId,
             item.Id,
@@ -63,7 +108,7 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
             new Dictionary<string, string>(item.ProviderIds, StringComparer.OrdinalIgnoreCase),
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
             PermalinkIdentitySnapshot.Capture(item),
-            null,
+            bundle,
             UtcNow())
         {
             Version = 3,
@@ -119,10 +164,16 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
 
         if (_journal.GetSettledPhase(operationId) is { } settled)
         {
+            if (settled == PermalinkPhase.Committed)
+            {
+                await SettleAncestorsAsync(operation, cancellationToken).ConfigureAwait(false);
+            }
+
             return Result(operation, settled.Name);
         }
 
         await _verifier.VerifyCommitAsync(operation, cancellationToken).ConfigureAwait(false);
+        await AdmitAncestorsAsync(operation, cancellationToken).ConfigureAwait(false);
         await WritePhaseIfMissingAsync(operation, PermalinkPhase.Ready, cancellationToken)
             .ConfigureAwait(false);
         await _bindings.ApplyRemovalBindingsAsync(
@@ -132,6 +183,13 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
             intent.SurvivorContentRoot,
             intent.SourceAliases,
             cancellationToken).ConfigureAwait(false);
+        await SettleAncestorsAsync(operation, cancellationToken).ConfigureAwait(false);
+        if (operation.Bundle is { } bundle)
+        {
+            await _claims!.FinalizeAsync(
+                AggregateBundle(bundle), operation.OperationId, "no_change", cancellationToken).ConfigureAwait(false);
+        }
+
         await WritePhaseIfMissingAsync(operation, PermalinkPhase.Published, cancellationToken)
             .ConfigureAwait(false);
         await WritePhaseIfMissingAsync(operation, PermalinkPhase.Committed, cancellationToken)
@@ -146,6 +204,11 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
         var operation = await RequireOperationAsync(operationId, cancellationToken).ConfigureAwait(false);
         if (_journal.GetSettledPhase(operationId) is { } settled)
         {
+            if (settled == PermalinkPhase.Committed)
+            {
+                await SettleAncestorsAsync(operation, cancellationToken).ConfigureAwait(false);
+            }
+
             return Result(operation, settled.Name);
         }
 
@@ -183,6 +246,56 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
             "removal-recovery-ambiguous",
             "Removal recovery found a split, occupied, substituted, doubled, or missing group and will not guess.");
     }
+
+    private async Task SettleAncestorsAsync(PermalinkOperationDocument operation, CancellationToken cancellationToken)
+    {
+        if (operation.Bundle is null)
+        {
+            return;
+        }
+
+        if (_aggregatePublisher is null)
+        {
+            throw Conflict("aggregate-proof-unavailable", "Frozen removal ancestors require authority-backed settlement.");
+        }
+
+        await _aggregatePublisher.SettleRemovalAsync(operation, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task AdmitAncestorsAsync(PermalinkOperationDocument operation, CancellationToken cancellationToken)
+    {
+        if (operation.Bundle is not { } frozen)
+        {
+            return;
+        }
+
+        if (_claims is null || _aggregatePublisher is null)
+        {
+            throw Conflict("aggregate-proof-unavailable", "Removal publication requires live ancestor admission.");
+        }
+
+        var bundle = AggregateBundle(frozen);
+        foreach (var dependency in bundle.Claims)
+        {
+            await _aggregatePublisher.VerifyDependencyAsync(
+                dependency, operation.CapsuleId, cancellationToken, operation.OperationId).ConfigureAwait(false);
+        }
+
+        await _claims.ClaimAsync(bundle, operation.OperationId, cancellationToken).ConfigureAwait(false);
+        foreach (var dependency in bundle.Claims)
+        {
+            await _aggregatePublisher.VerifyDependencyAsync(
+                dependency, operation.CapsuleId, cancellationToken, operation.OperationId).ConfigureAwait(false);
+        }
+
+        if (!await _claims.OwnsAsync(bundle, operation.OperationId, cancellationToken).ConfigureAwait(false))
+        {
+            throw Conflict("claim-owner-mismatch", "Removal no longer owns its complete ancestor admission.");
+        }
+    }
+
+    private static PermalinkMutationBundle AggregateBundle(PermalinkMutationBundle bundle) =>
+        bundle with { Claims = bundle.Claims.Where(value => value.Kind == "aggregate").ToArray() };
 
     private async Task<PermalinkOperationDocument> RequireOperationAsync(
         Guid operationId,

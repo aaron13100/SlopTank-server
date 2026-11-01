@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-03, 2026-09-07, 2026-09-09, 2026-09-30, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-03, 2026-09-07, 2026-09-09, 2026-09-30, 2026-10-14, 2026-10-31, 2026-11-01.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -125,7 +125,11 @@ internal sealed class PermalinkMutationBundleFactory
                 : ResolveRoot(request.DestinationPath));
     }
 
-    private List<BaseItem> DiscoverItems(BaseItem item, string kind)
+    /// <summary>Discovers the shared source, ancestor, and linked-collection admission closure.</summary>
+    /// <param name="item">The protected source.</param>
+    /// <param name="kind">The existing mutation kind.</param>
+    /// <returns>The same deterministic membership used by mutation preparation.</returns>
+    internal List<BaseItem> DiscoverItems(BaseItem item, string kind)
     {
         var result = new Dictionary<Guid, BaseItem> { [item.Id] = item };
         if (kind is "path" or "cross-root" or "tree" or "multipart")
@@ -165,7 +169,11 @@ internal sealed class PermalinkMutationBundleFactory
         return result.Values.ToList();
     }
 
-    private async Task<PermalinkGenesisReservation?> FindReservationAsync(
+    /// <summary>Reads existing protection without minting identities for unrelated ancestors.</summary>
+    /// <param name="item">The closure member.</param>
+    /// <param name="cancellationToken">The operation lifetime.</param>
+    /// <returns>The existing reservation, or null when this member is unprotected.</returns>
+    internal async Task<PermalinkGenesisReservation?> FindReservationAsync(
         BaseItem item,
         CancellationToken cancellationToken)
     {

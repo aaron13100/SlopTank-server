@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-10, 2026-10-03, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-10, 2026-10-03, 2026-10-14, 2026-10-31, 2026-11-01.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -294,6 +294,38 @@ internal sealed class PermalinkTransitionStore
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
+            SELECT c.operation_id, c.event_id, c.event_digest, d.decision
+              FROM ContentTransitionClaims c
+              LEFT JOIN OperationDecisions d
+                ON d.operation_id = c.operation_id AND d.capsule_id = c.capsule_id
+               AND d.predecessor = c.predecessor
+               AND d.event_id = c.event_id AND d.event_digest = c.event_digest
+             WHERE c.capsule_id = $capsule AND c.predecessor = $predecessor
+            """;
+        command.Parameters.AddWithValue("$capsule", capsuleId.ToString("D"));
+        command.Parameters.AddWithValue("$predecessor", predecessorEventId.ToString("D"));
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (reader.GetString(0) != successor.OperationId.ToString("D")
+                    || reader.GetString(1) != successor.EventId.ToString("D")
+                    || reader.GetString(2) != digest
+                    || reader.IsDBNull(3) || reader.GetString(3) != "ready")
+                {
+                    throw new PermalinkException(
+                        PermalinkErrorKind.Conflict,
+                        "content-transition-conflict",
+                        $"Content predecessor '{predecessorEventId}' already has a different claimed successor.");
+                }
+
+                // Exact publication replay after a crash may append the same
+                // canonical event again; it must never elect another event.
+                return;
+            }
+        }
+
+        command.CommandText = """
             INSERT INTO ContentTransitionClaims
                 (capsule_id, predecessor, operation_id, event_id,
                  event_digest, created_at)
@@ -304,8 +336,6 @@ internal sealed class PermalinkTransitionStore
             VALUES ($operation, $capsule, $predecessor, 'ready',
                     $event, $digest, $created);
             """;
-        command.Parameters.AddWithValue("$capsule", capsuleId.ToString("D"));
-        command.Parameters.AddWithValue("$predecessor", predecessorEventId.ToString("D"));
         command.Parameters.AddWithValue("$operation", successor.OperationId.ToString("D"));
         command.Parameters.AddWithValue("$event", successor.EventId.ToString("D"));
         command.Parameters.AddWithValue("$digest", digest);
@@ -323,6 +353,39 @@ internal sealed class PermalinkTransitionStore
                 $"Content predecessor '{predecessorEventId}' already has a claimed successor.",
                 exception);
         }
+    }
+
+    /// <summary>Checks an event's exact canonical bytes against its authority election.</summary>
+    /// <param name="capsuleId">The child capsule.</param>
+    /// <param name="document">The persisted content event.</param>
+    /// <param name="cancellationToken">The request lifetime.</param>
+    /// <returns>Whether the complete edge is authority-authenticated.</returns>
+    public async Task<bool> IsAuthorizedContentEventAsync(
+        Guid capsuleId,
+        PermalinkEventDocument document,
+        CancellationToken cancellationToken)
+    {
+        var predecessor = document.PreviousContentEventId?.ToString("D") ?? "genesis";
+        var digest = CanonicalJson.Digest(CanonicalJson.Serialize(document));
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT 1 FROM ContentTransitionClaims c
+              JOIN OperationDecisions d
+                ON d.operation_id = c.operation_id AND d.capsule_id = c.capsule_id
+               AND d.predecessor = c.predecessor AND d.decision = 'ready'
+               AND d.event_id = c.event_id AND d.event_digest = c.event_digest
+             WHERE c.capsule_id = $capsule AND c.predecessor = $predecessor
+               AND c.operation_id = $operation AND c.event_id = $event
+               AND c.event_digest = $digest AND c.created_at = $created
+            """;
+        command.Parameters.AddWithValue("$capsule", capsuleId.ToString("D"));
+        command.Parameters.AddWithValue("$predecessor", predecessor);
+        command.Parameters.AddWithValue("$operation", document.OperationId.ToString("D"));
+        command.Parameters.AddWithValue("$event", document.EventId.ToString("D"));
+        command.Parameters.AddWithValue("$digest", digest);
+        command.Parameters.AddWithValue("$created", document.CreatedAt);
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
     }
 
     /// <summary>
@@ -346,6 +409,24 @@ internal sealed class PermalinkTransitionStore
             ("$capsule", capsuleId.ToString("D")),
             ("$operation", operationId.ToString("D")),
             cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Reads the one immutable winner for an exact content predecessor.</summary>
+    /// <param name="capsuleId">The logical aggregate capsule.</param>
+    /// <param name="predecessorEventId">The folded predecessor event.</param>
+    /// <param name="cancellationToken">The publication lifetime.</param>
+    /// <returns>The elected successor, or null before election.</returns>
+    public async Task<PermalinkContentTransitionClaim?> FindContentTransitionAsync(
+        Guid capsuleId,
+        Guid predecessorEventId,
+        CancellationToken cancellationToken)
+    {
+        var claims = await ReadContentTransitionsAsync(
+            "capsule_id = $capsule AND predecessor = $predecessor",
+            ("$capsule", capsuleId.ToString("D")),
+            ("$predecessor", predecessorEventId.ToString("D")),
+            cancellationToken).ConfigureAwait(false);
+        return claims.Count == 0 ? null : claims[0];
     }
 
     private async Task<IReadOnlyList<PermalinkContentTransitionClaim>> ReadContentTransitionsAsync(

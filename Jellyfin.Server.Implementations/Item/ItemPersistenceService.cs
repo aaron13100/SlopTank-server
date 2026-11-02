@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-02.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -257,14 +258,21 @@ public class ItemPersistenceService : IItemPersistenceService
         using var transaction = context.Database.BeginTransaction();
 
         var ids = tuples.Select(f => f.Item.Id).ToArray();
-        var existingItems = context.BaseItems.Where(e => ids.Contains(e.Id)).Select(f => f.Id).ToArray();
+        var existingItems = context.BaseItems
+            .Where(e => ids.Contains(e.Id))
+            .Select(e => new { e.Id, e.PermalinkContentId })
+            .ToDictionary(e => e.Id, e => e.PermalinkContentId);
 
         foreach (var item in tuples)
         {
             var entity = BaseItemMapper.Map(item.Item, _appHost);
             entity.TopParentId = item.TopParent?.Id;
+            if (existingItems.TryGetValue(entity.Id, out var existingContentId) && existingContentId.HasValue)
+            {
+                entity.PermalinkContentId = existingContentId;
+            }
 
-            if (!existingItems.Any(e => e == entity.Id))
+            if (!existingItems.ContainsKey(entity.Id))
             {
                 context.BaseItems.Add(entity);
             }

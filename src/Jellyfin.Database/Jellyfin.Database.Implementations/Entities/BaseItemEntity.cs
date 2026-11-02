@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-02.
 #pragma warning disable CS1591 // Missing XML comment for publicly visible type or member
 #pragma warning disable CA2227 // Collection properties should be read only
 
@@ -152,6 +152,11 @@ public class BaseItemEntity
     public string? ShowId { get; set; }
 
     public Guid? OwnerId { get; set; }
+
+    /// <summary>
+    /// Gets or sets the logical content identity used by permalinks.
+    /// </summary>
+    public Guid? PermalinkContentId { get; set; }
 
     /// <summary>
     /// Gets or sets the owner item (for extras like trailers, theme songs, etc.).

@@ -94,6 +94,7 @@ namespace Emby.Server.Implementations.Library
         private readonly IMediaStreamRepository _mediaStreamRepository;
         private readonly Lazy<IExternalDataManager> _externalDataManagerFactory;
         private readonly Lazy<IPermalinkIdentityMutationAdapter> _identityMutationAdapter;
+        private readonly Lazy<IPermalinkManager> _permalinkManager;
         private readonly IPlaybackPreparationService _playbackPreparationService;
 
         /// <summary>
@@ -141,6 +142,7 @@ namespace Emby.Server.Implementations.Library
         /// <param name="externalDataManagerFactory">The external data manager (lazy, to break the DI cycle through ChapterManager).</param>
         /// <param name="identityMutationAdapter">The durable identity mutation adapter.</param>
         /// <param name="playbackPreparationService">The playback preparation admission service.</param>
+        /// <param name="permalinkManager">The portable metadata association service (lazy to avoid a library dependency cycle).</param>
         public LibraryManager(
             IServerApplicationHost appHost,
             ILoggerFactory loggerFactory,
@@ -167,7 +169,8 @@ namespace Emby.Server.Implementations.Library
             IMediaStreamRepository mediaStreamRepository,
             Lazy<IExternalDataManager> externalDataManagerFactory,
             Lazy<IPermalinkIdentityMutationAdapter> identityMutationAdapter,
-            IPlaybackPreparationService playbackPreparationService)
+            IPlaybackPreparationService playbackPreparationService,
+            Lazy<IPermalinkManager> permalinkManager)
         {
             _appHost = appHost;
             _logger = loggerFactory.CreateLogger<LibraryManager>();
@@ -201,6 +204,7 @@ namespace Emby.Server.Implementations.Library
             _externalDataManagerFactory = externalDataManagerFactory;
             _identityMutationAdapter = identityMutationAdapter;
             _playbackPreparationService = playbackPreparationService;
+            _permalinkManager = permalinkManager;
 
             RecordConfigurationValues(_configurationManager.Configuration);
         }
@@ -2459,6 +2463,8 @@ namespace Emby.Server.Implementations.Library
                 RegisterItem(item);
             }
 
+            AssociatePermalinksAsync(allItems, cancellationToken).GetAwaiter().GetResult();
+
             if (parent is Folder folder)
             {
                 folder.Children = null;
@@ -2691,6 +2697,8 @@ namespace Emby.Server.Implementations.Library
                 }
             }
 
+            await AssociatePermalinksAsync(allItems, cancellationToken).ConfigureAwait(false);
+
             if (parent is Folder folder)
             {
                 folder.Children = null;
@@ -2729,6 +2737,24 @@ namespace Emby.Server.Implementations.Library
         /// <inheritdoc />
         public Task UpdateItemAsync(BaseItem item, BaseItem parent, ItemUpdateType updateReason, CancellationToken cancellationToken)
             => UpdateItemsAsync([item], parent, updateReason, cancellationToken);
+
+        private async Task AssociatePermalinksAsync(IReadOnlyList<BaseItem> items, CancellationToken token)
+        {
+            foreach (var item in items.Where(item => item.SourceType == SourceType.Library
+                && !item.ExtraType.HasValue && (item is Video or Series or Season or BoxSet)))
+            {
+                try
+                {
+                    await _permalinkManager.Value.EnsurePermalinkIdsAsync(item, token).ConfigureAwait(false);
+                }
+                catch (PermalinkException exception) when (exception.IsItemScoped)
+                {
+                    // A title's conflicting metadata must not abort an entire scan.
+                    // Its own link continues to report the specific conflict.
+                    _logger.LogWarning(exception, "Cannot associate permalink for {ItemId}: {PermalinkCode}", item.Id, exception.Code);
+                }
+            }
+        }
 
         /// <inheritdoc />
         public async Task ReattachUserDataAsync(BaseItem item, CancellationToken cancellationToken)

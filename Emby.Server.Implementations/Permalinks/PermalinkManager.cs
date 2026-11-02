@@ -1,6 +1,7 @@
 // SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31, 2026-11-02.
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -98,7 +99,8 @@ public sealed class PermalinkManager : IPermalinkManager
 
                 var current = await _repository.ReadForItemAsync(itemId, cancellationToken).ConfigureAwait(false);
                 var metadata = await ReadMetadataAsync(item, createSeriesIdentity: false, cancellationToken).ConfigureAwait(false);
-                if (current.ContentId != mapping.ContentId || metadata.Kind != mapping.Kind || IdentityChanged(current, metadata))
+                if (current.ContentId != mapping.ContentId || metadata.Kind != mapping.Kind || IdentityChanged(current, metadata)
+                    || (MediaContentIdentifier.ParseProviderAlias(identifier) is not null && !metadata.PublicAliases.Contains(identifier, StringComparer.Ordinal)))
                 {
                     continue;
                 }
@@ -158,18 +160,45 @@ public sealed class PermalinkManager : IPermalinkManager
             return;
         }
 
-        foreach (var association in legacy.GroupBy(value => value.ItemId))
+        foreach (var association in legacy.GroupBy(value => value.GroupId))
         {
             var providerAliases = association.Select(value => value.Alias)
                 .Where(value => MediaContentIdentifier.ParseProviderAlias(value) is not null).Distinct(StringComparer.Ordinal).ToArray();
             var items = new Dictionary<Guid, BaseItem>();
-            var original = _library.GetItemById<BaseItem>(association.Key, user);
+            var originalId = association.First().ItemId;
+            var original = originalId.HasValue ? _library.GetItemById<BaseItem>(originalId.Value, user) : null;
             if (original is not null && !original.ExtraType.HasValue)
             {
                 var metadata = await ReadMetadataAsync(original, createSeriesIdentity: true, token).ConfigureAwait(false);
                 if (providerAliases.Length == 0 || metadata.PublicAliases.Intersect(providerAliases, StringComparer.Ordinal).Any())
                 {
                     items[original.Id] = original;
+                }
+            }
+
+            var recordedPaths = association.Where(value => !string.IsNullOrEmpty(value.Path))
+                .SelectMany(value => new[] { value.Path!, Path.ChangeExtension(value.Path!, ".mp4") })
+                .Distinct(StringComparer.Ordinal);
+            var legacyKind = association.First().ItemKind;
+            foreach (var path in recordedPaths)
+            {
+                foreach (var item in _library.GetItemList(new InternalItemsQuery(user) { Recursive = true, Path = path }))
+                {
+                    if (item.ExtraType.HasValue || item is not (Video or Series or Season or MediaBrowser.Controller.Entities.Movies.BoxSet))
+                    {
+                        continue;
+                    }
+
+                    if (legacyKind is not null && !string.Equals(legacyKind, item.GetBaseItemKind().ToString(), StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    var metadata = await ReadMetadataAsync(item, createSeriesIdentity: true, token).ConfigureAwait(false);
+                    if (providerAliases.Length == 0 || metadata.PublicAliases.Intersect(providerAliases, StringComparer.Ordinal).Any())
+                    {
+                        items[item.Id] = item;
+                    }
                 }
             }
 
@@ -194,6 +223,12 @@ public sealed class PermalinkManager : IPermalinkManager
             foreach (var item in items.Values)
             {
                 var binding = await BindMetadataAsync(item, token).ConfigureAwait(false);
+                if (MediaContentIdentifier.ParseProviderAlias(alias) is not null
+                    && !(await ReadMetadataAsync(item, createSeriesIdentity: false, token).ConfigureAwait(false)).PublicAliases.Contains(alias, StringComparer.Ordinal))
+                {
+                    continue;
+                }
+
                 await _repository.ImportAliasAsync(new PermalinkBindingRequest(item.Id, binding.ContentId,
                     binding.ContentId, binding.Kind, [alias], null, _clock.GetUtcNow().UtcDateTime), token).ConfigureAwait(false);
             }
@@ -207,6 +242,8 @@ public sealed class PermalinkManager : IPermalinkManager
             throw new PermalinkException(PermalinkErrorKind.Ineligible, "item-ineligible", "A persisted library title is required; extras and trailers do not have title permalinks.");
         }
 
+        var primary = FindPrimaryVersion(item);
+        var primaryBinding = primary is null ? null : await BindMetadataAsync(primary, token).ConfigureAwait(false);
         var metadata = await ReadMetadataAsync(item, createSeriesIdentity: true, token).ConfigureAwait(false);
         for (var attempt = 0; attempt < 3; attempt++)
         {
@@ -219,15 +256,20 @@ public sealed class PermalinkManager : IPermalinkManager
                 throw new PermalinkException(PermalinkErrorKind.Conflict, "metadata-identity-conflict", "The library metadata identifies more than one title. Correct its provider or episode metadata before associating this file.", itemId: item.Id);
             }
 
-            var contentId = matches.Count == 1 ? matches[0].ContentId
+            var contentId = primaryBinding?.ContentId ?? (matches.Count == 1 ? matches[0].ContentId
                 : current.ContentId.HasValue && !IdentityChanged(current, metadata) ? current.ContentId.Value
-                : _identifiers.CreateContentId();
+                : _identifiers.CreateContentId());
             var inheritedContentId = current.ContentId.HasValue && current.ContentId != contentId
                 && current.Kind == metadata.Kind && current.Keys.All(key => key.StartsWith("sk-", StringComparison.Ordinal))
                 ? current.ContentId : null;
             var aliases = metadata.PublicAliases.Append(MediaContentIdentifier.OpaqueAlias(contentId))
                 .Concat(inheritedContentId.HasValue ? current.PublicAliases : Array.Empty<string>()).Distinct(StringComparer.Ordinal).ToArray();
+            var target = matches.FirstOrDefault(value => value.ContentId == contentId);
+            var retiredAliases = (target?.Keys ?? current.Keys).Where(alias => MediaContentIdentifier.IsReplacedClaim(alias, metadata)).ToArray();
+            var legacyAliases = current.ContentId.HasValue ? Array.Empty<string>()
+                : await ReadInitialLegacyAliasesAsync(item.Id, metadata, token).ConfigureAwait(false);
             if (current.ContentId == contentId
+                && retiredAliases.Length == 0
                 && aliases.All(alias => current.PublicAliases.Contains(alias, StringComparer.Ordinal))
                 && (metadata.CoordinateKey is null || current.Keys.Contains(metadata.CoordinateKey, StringComparer.Ordinal)))
             {
@@ -238,7 +280,8 @@ public sealed class PermalinkManager : IPermalinkManager
             try
             {
                 await _repository.BindAsync(new PermalinkBindingRequest(item.Id, current.ContentId, contentId,
-                    metadata.Kind, aliases, metadata.CoordinateKey, _clock.GetUtcNow().UtcDateTime, inheritedContentId), token).ConfigureAwait(false);
+                    metadata.Kind, aliases, metadata.CoordinateKey, _clock.GetUtcNow().UtcDateTime,
+                    inheritedContentId, legacyAliases, retiredAliases), token).ConfigureAwait(false);
                 var saved = await _repository.ReadForItemAsync(item.Id, token).ConfigureAwait(false);
                 if (saved.ContentId != contentId || saved.PublicAliases.Count == 0)
                 {
@@ -258,8 +301,27 @@ public sealed class PermalinkManager : IPermalinkManager
         throw MappingChanged();
     }
 
+    private async Task<string[]> ReadInitialLegacyAliasesAsync(Guid itemId, MediaContentIdentity metadata, CancellationToken token)
+    {
+        var aliases = await _legacy.ReadItemAliasesAsync(itemId, token).ConfigureAwait(false);
+        var providerAliases = aliases.Where(alias => MediaContentIdentifier.ParseProviderAlias(alias) is not null).ToArray();
+        if (metadata.PublicAliases.Count > 0 && providerAliases.Length > 0
+            && !metadata.PublicAliases.Intersect(providerAliases, StringComparer.Ordinal).Any())
+        {
+            // A record explicitly reassigned to another title must not take
+            // that earlier title's opaque URL with it during migration.
+            return Array.Empty<string>();
+        }
+
+        return aliases.Where(alias => MediaContentIdentifier.IsPublicAlias(alias)
+            && (alias.StartsWith("sk-", StringComparison.Ordinal) || metadata.PublicAliases.Contains(alias, StringComparer.Ordinal))).ToArray();
+    }
+
     private async Task<MediaContentIdentity> ReadMetadataAsync(BaseItem item, bool createSeriesIdentity, CancellationToken token)
     {
+        // Alternate versions already have a content relationship in the library.
+        // Use its primary metadata rather than minting a title for each file.
+        item = FindPrimaryVersion(item) ?? item;
         var series = item switch
         {
             Episode episode when episode.SeriesId != Guid.Empty => _library.GetItemById<Series>(episode.SeriesId),
@@ -275,6 +337,39 @@ public sealed class PermalinkManager : IPermalinkManager
         }
 
         return _identifiers.Identify(item, seriesContentId, series?.DisplayOrder);
+    }
+
+    private Video? FindPrimaryVersion(BaseItem item)
+    {
+        var visited = new HashSet<Guid> { item.Id };
+        var current = item as Video;
+        Video? primary = null;
+        while (current?.PrimaryVersionId is Guid primaryId)
+        {
+            if (!visited.Add(primaryId))
+            {
+                throw new PermalinkException(PermalinkErrorKind.Conflict, "version-link-cycle",
+                    "The library's alternate-version relationship contains a cycle.", itemId: item.Id);
+            }
+
+            current = _library.GetItemById<Video>(primaryId);
+            if (current is null)
+            {
+                // A surviving version retains its stored logical identity when
+                // the primary was removed; normal library promotion can follow.
+                break;
+            }
+
+            if (current.GetBaseItemKind() != item.GetBaseItemKind())
+            {
+                throw new PermalinkException(PermalinkErrorKind.Conflict, "version-kind-conflict",
+                    "Alternate versions must belong to the same library media kind.", itemId: item.Id);
+            }
+
+            primary = current;
+        }
+
+        return primary;
     }
 
     private static bool IdentityChanged(PermalinkItemBinding previous, MediaContentIdentity current)

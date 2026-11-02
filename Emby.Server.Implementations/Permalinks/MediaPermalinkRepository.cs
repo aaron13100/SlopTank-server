@@ -28,7 +28,9 @@ internal sealed record PermalinkBindingRequest(
     IReadOnlyList<string> PublicAliases,
     string? CoordinateKey,
     DateTime NowUtc,
-    Guid? InheritedContentId = null);
+    Guid? InheritedContentId = null,
+    IReadOnlyList<string>? LegacyAliases = null,
+    IReadOnlyList<string>? RetiredAliases = null);
 
 /// <summary>
 /// Persists permalink identity mappings and immutable aliases in the application database.
@@ -80,8 +82,8 @@ public sealed class MediaPermalinkRepository
         return new PermalinkItemBinding(
             contentId,
             kind,
-            rows.Where(row => row.IsPublic).OrderBy(row => row.Ordinal).Select(row => row.Alias).ToArray(),
-            rows.OrderBy(row => row.IsPublic ? row.Ordinal : int.MaxValue).Select(row => row.Alias).ToArray());
+            rows.Where(row => row.IsPublic && !row.DeletedAtUtc.HasValue).OrderBy(row => row.Ordinal).Select(row => row.Alias).ToArray(),
+            rows.Where(row => !row.DeletedAtUtc.HasValue).OrderBy(row => row.IsPublic ? row.Ordinal : int.MaxValue).Select(row => row.Alias).ToArray());
     }
 
     internal async Task<IReadOnlyList<MediaPermalinkBinding>> ReadByAliasesAsync(
@@ -97,7 +99,7 @@ public sealed class MediaPermalinkRepository
         await using var context = await _dbContextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var aliasKeys = aliases.Distinct(StringComparer.Ordinal).ToArray();
         var matchedContentIds = await context.MediaPermalinkAliases
-            .Where(alias => aliasKeys.Contains(alias.Alias))
+            .Where(alias => !alias.DeletedAtUtc.HasValue && aliasKeys.Contains(alias.Alias))
             .Select(alias => alias.ContentId)
             .Distinct()
             .ToArrayAsync(cancellationToken)
@@ -123,8 +125,8 @@ public sealed class MediaPermalinkRepository
                 return new MediaPermalinkBinding(
                     group.Key,
                     kind,
-                    contentRows.Where(row => row.IsPublic).OrderBy(row => row.Ordinal).Select(row => row.Alias).ToArray(),
-                    contentRows.OrderBy(row => row.IsPublic ? row.Ordinal : int.MaxValue).Select(row => row.Alias).ToArray());
+                    contentRows.Where(row => row.IsPublic && !row.DeletedAtUtc.HasValue).OrderBy(row => row.Ordinal).Select(row => row.Alias).ToArray(),
+                    contentRows.Where(row => !row.DeletedAtUtc.HasValue).OrderBy(row => row.IsPublic ? row.Ordinal : int.MaxValue).Select(row => row.Alias).ToArray());
             })
             .ToArray();
         return bindings;
@@ -216,7 +218,7 @@ public sealed class MediaPermalinkRepository
 
         var requestedAliases = request.PublicAliases.ToArray();
         if (await context.MediaPermalinkAliases.AnyAsync(
-                alias => requestedAliases.Contains(alias.Alias) && alias.ContentId != request.ContentId
+                alias => !alias.DeletedAtUtc.HasValue && requestedAliases.Contains(alias.Alias) && alias.ContentId != request.ContentId
                     && alias.ContentId != request.InheritedContentId,
                 cancellationToken).ConfigureAwait(false))
         {
@@ -234,7 +236,7 @@ public sealed class MediaPermalinkRepository
         if (request.CoordinateKey is not null)
         {
             var privateKeyRows = await context.MediaPermalinkAliases
-                .Where(alias => alias.Alias == request.CoordinateKey)
+                .Where(alias => !alias.DeletedAtUtc.HasValue && alias.Alias == request.CoordinateKey)
                 .ToArrayAsync(cancellationToken)
                 .ConfigureAwait(false);
             if (privateKeyRows.Any(row => row.ContentId != request.ContentId || row.IsPublic))
@@ -249,9 +251,28 @@ public sealed class MediaPermalinkRepository
             throw new PermalinkException(PermalinkErrorKind.Conflict, "alias-kind-conflict", "A private coordinate key cannot be changed into a public alias.", itemId: request.ItemId);
         }
 
+        var orderedAliases = (request.LegacyAliases ?? Array.Empty<string>()).Concat(request.PublicAliases).Distinct(StringComparer.Ordinal).ToArray();
+        var desiredKeys = orderedAliases.Concat(request.CoordinateKey is null ? Array.Empty<string>() : [request.CoordinateKey]).ToHashSet(StringComparer.Ordinal);
+        var aliasStateChanged = false;
+        foreach (var row in contentRows)
+        {
+            if (desiredKeys.Contains(row.Alias) && row.DeletedAtUtc.HasValue)
+            {
+                row.DeletedAtUtc = null;
+                row.UpdatedAtUtc = request.NowUtc;
+                aliasStateChanged = true;
+            }
+            else if (!row.DeletedAtUtc.HasValue && request.RetiredAliases?.Contains(row.Alias, StringComparer.Ordinal) == true)
+            {
+                row.DeletedAtUtc = request.NowUtc;
+                row.UpdatedAtUtc = request.NowUtc;
+                aliasStateChanged = true;
+            }
+        }
+
         var newRows = new List<MediaPermalinkAlias>();
         var nextOrdinal = existingPublicAliases.Count;
-        foreach (var alias in request.PublicAliases)
+        foreach (var alias in orderedAliases)
         {
             if (existingPublicAliases.ContainsKey(alias))
             {
@@ -284,7 +305,7 @@ public sealed class MediaPermalinkRepository
             });
         }
 
-        if (item.PermalinkContentId == request.ContentId && newRows.Count == 0)
+        if (item.PermalinkContentId == request.ContentId && newRows.Count == 0 && !aliasStateChanged)
         {
             // Metadata lookup is common during playback and must not rewrite
             // an unchanged row or force a WAL flush for each resolution.
@@ -331,6 +352,9 @@ public sealed class MediaPermalinkRepository
             request.PublicAliases.Distinct(StringComparer.Ordinal).Count() != request.PublicAliases.Count ||
             request.PublicAliases.Any(alias => alias.Length > 512) ||
             request.CoordinateKey is { Length: 0 or > 512 } ||
+            request.LegacyAliases?.Any(alias => !MediaContentIdentifier.IsPublicAlias(alias)) == true ||
+            request.RetiredAliases?.Any(alias => string.IsNullOrEmpty(alias) || alias.StartsWith("sk-", StringComparison.Ordinal)
+                || request.PublicAliases.Contains(alias, StringComparer.Ordinal) || request.CoordinateKey == alias) == true ||
             (request.InheritedContentId.HasValue && (request.InheritedContentId != request.ExpectedContentId || request.InheritedContentId == request.ContentId)) ||
             (request.CoordinateKey is not null && request.PublicAliases.Contains(request.CoordinateKey, StringComparer.Ordinal)))
         {

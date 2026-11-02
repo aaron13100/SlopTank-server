@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-02.
 #nullable disable
 
 #pragma warning disable CS1591, SA1401
@@ -137,6 +137,12 @@ namespace MediaBrowser.Controller.Entities
 
         [JsonIgnore]
         public bool IsVirtualItem { get; set; }
+
+        /// <summary>
+        /// Gets or sets the stable logical content identity used by permalinks.
+        /// </summary>
+        [JsonIgnore]
+        public Guid? PermalinkContentId { get; set; }
 
         /// <summary>
         /// Gets or sets how far this item has progressed through ingest. Persisted in its own column

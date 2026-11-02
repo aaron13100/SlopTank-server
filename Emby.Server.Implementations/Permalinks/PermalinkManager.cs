@@ -1,13 +1,12 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31, 2026-11-02.
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Entities;
-using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
@@ -15,362 +14,290 @@ using MediaBrowser.Controller.Permalinks;
 namespace Emby.Server.Implementations.Permalinks;
 
 /// <summary>
-/// Orchestrates the single permalink issuance path outside metadata processing.
+/// Creates and resolves logical content links using existing metadata and the
+/// application database. Media bytes and filesystem identities are not involved.
 /// </summary>
 public sealed class PermalinkManager : IPermalinkManager
 {
-    private readonly IPermalinkStore _store;
-    private readonly PermalinkEvidence _evidence;
-    private readonly ILibraryManager _libraryManager;
-    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _itemLocks = new();
+    private readonly MediaPermalinkRepository _repository;
+    private readonly MediaContentIdentifier _identifiers;
+    private readonly LegacyMediaPermalinkRepository _legacy;
+    private readonly ILibraryManager _library;
+    private readonly IUserManager _users;
+    private readonly TimeProvider _clock;
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="PermalinkManager"/> class.
-    /// </summary>
-    /// <param name="store">The store.</param>
-    /// <param name="evidence">The evidence.</param>
-    /// <param name="libraryManager">The library manager, used to enumerate local alternate versions.</param>
-    public PermalinkManager(
-        IPermalinkStore store,
-        PermalinkEvidence evidence,
-        ILibraryManager libraryManager)
+    /// <summary>Initializes the portable metadata-to-file association service.</summary>
+    public PermalinkManager(MediaPermalinkRepository repository, MediaContentIdentifier identifiers, LegacyMediaPermalinkRepository legacy,
+        ILibraryManager library, IUserManager users, TimeProvider clock)
     {
-        _store = store;
-        _evidence = evidence;
-        _libraryManager = libraryManager;
+        _repository = repository;
+        _identifiers = identifiers;
+        _legacy = legacy;
+        _library = library;
+        _users = users;
+        _clock = clock;
     }
 
-    /// <inheritdoc />
-    public async Task<PermalinkResponse> EnsurePermalinkIdsAsync(
-        BaseItem item,
-        CancellationToken cancellationToken)
+    /// <summary>Gets the identifier for this movie, series, season or specific episode.</summary>
+    /// <param name="videoFile">The server's existing library metadata record.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The same public response and URL namespaces used by existing clients.</returns>
+    public async Task<PermalinkResponse> EnsurePermalinkIdsAsync(BaseItem videoFile, CancellationToken cancellationToken)
     {
-        var external = GetCanonicalExternalId(item);
-        var state = await EnsureCoreAsync(
-            item,
-            publishAlias: true,
-            external,
-            new HashSet<Guid>(),
-            cancellationToken).ConfigureAwait(false);
-        if (state.Aliases.Count == 0)
-        {
-            throw new PermalinkException(
-                PermalinkErrorKind.Conflict,
-                "seed-not-published",
-                $"Capsule '{state.CapsuleId}' remains seeded-unpublished.");
-        }
-
-        return new PermalinkResponse(1, state.Aliases, state.Aliases[0]);
+        ArgumentNullException.ThrowIfNull(videoFile);
+        var binding = await BindMetadataAsync(videoFile, cancellationToken).ConfigureAwait(false);
+        return new PermalinkResponse(1, binding.Ids, binding.Ids[0]);
     }
 
-    private async Task<PermalinkStoredState> EnsureCoreAsync(
-        BaseItem item,
-        bool publishAlias,
-        string? preferredAlias,
-        HashSet<Guid> ancestry,
-        CancellationToken cancellationToken)
+    /// <summary>Looks up current library files for an identifier, applying normal user visibility.</summary>
+    /// <param name="identifier">A public logical content identifier.</param>
+    /// <param name="userId">The authenticated user requesting the library item.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>Visible logical candidates, each retaining its ordinary library versions.</returns>
+    public async Task<IReadOnlyList<Candidate>> GetVideoFileAsync(string identifier, Guid userId, CancellationToken cancellationToken)
     {
-        ValidateEligibility(item);
-        if (!ancestry.Add(item.Id))
+        if (!MediaContentIdentifier.IsPublicAlias(identifier))
         {
-            throw new PermalinkException(
-                PermalinkErrorKind.Conflict,
-                "aggregate-cycle-pending",
-                $"BoxSet cycle at '{item.Name}' requires reserved SCC initialization.");
+            return Array.Empty<Candidate>();
         }
 
-        var itemLock = _itemLocks.GetOrAdd(item.Id, _ => new SemaphoreSlim(1, 1));
-        await itemLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        var user = _users.GetUserById(userId);
+        if (user is null || user.HasPermission(PermissionKind.IsDisabled))
         {
-            // Request cancellation is an admission signal, not the lifetime of an admitted
-            // durable mutation. Once this item lock is held, interruption can leave authority,
-            // capsule, alias, and binding publication at different durable steps while the next
-            // resolver waits behind this lock. Finish or fail the admitted transaction on its own
-            // lifetime so a browser navigation cannot strand a half-minted alias.
-            var mutationCancellationToken = CancellationToken.None;
-            var path = ResolveLocalPath(item);
-            IPermalinkPathLease? lease = null;
-            try
-            {
-                if (IsContentItem(item))
-                {
-                    // Anchor creation changes macOS ctime. Establish it before evidence so the
-                    // digest is cached against the stable post-anchor token on the genesis call.
-                    // The lease is held from here through Ensure, so the path key (item lock
-                    // first, then path key) cannot change underneath the evidence gap.
-                    // Aggregates take theirs just before Ensure: they recurse into children
-                    // that take their own, and a virtual Season directory may not exist until
-                    // the store validates and creates it.
-                    lease = await _store.BeginContentIdentityAsync(
-                        path,
-                        item.GetType().Name,
-                        mutationCancellationToken).ConfigureAwait(false);
-                }
-
-                var evidence = item switch
-                {
-                    Series series => await ComputeSeriesAsync(
-                        series,
-                        ancestry,
-                        mutationCancellationToken).ConfigureAwait(false),
-                    Season season => await ComputeSeasonAsync(
-                        season,
-                        ancestry,
-                        mutationCancellationToken).ConfigureAwait(false),
-                    BoxSet boxSet => await ComputeBoxSetAsync(
-                        boxSet,
-                        ancestry,
-                        mutationCancellationToken).ConfigureAwait(false),
-                    _ => await _evidence.ComputeContentItemAsync(item, mutationCancellationToken)
-                        .ConfigureAwait(false)
-                };
-                if (evidence.Leaves.Count == 0)
-                {
-                    throw new PermalinkException(
-                        PermalinkErrorKind.Conflict,
-                        "empty-manifest",
-                        $"{item.GetType().Name} '{item.Name}' has no identity leaves.");
-                }
-
-                lease ??= await _store.BeginContentIdentityAsync(
-                    path,
-                    item.GetType().Name,
-                    mutationCancellationToken).ConfigureAwait(false);
-                return await _store.EnsureAsync(
-                    new PermalinkStoreRequest(
-                        item.Id,
-                        item.GetType().Name,
-                        path,
-                        evidence.ContentRoot,
-                        evidence.Leaves,
-                        publishAlias,
-                        preferredAlias),
-                    lease,
-                    mutationCancellationToken).ConfigureAwait(false);
-            }
-            finally
-            {
-                if (lease is not null)
-                {
-                    await lease.DisposeAsync().ConfigureAwait(false);
-                }
-            }
-        }
-        finally
-        {
-            _ = ancestry.Remove(item.Id);
-            itemLock.Release();
-        }
-    }
-
-    private async Task<PermalinkEvidenceResult> ComputeSeriesAsync(
-        Series series,
-        HashSet<Guid> ancestry,
-        CancellationToken cancellationToken)
-    {
-        var descendants = new List<(BaseItem, PermalinkStoredState)>();
-        foreach (var season in series.GetRecursiveChildren().OfType<Season>())
-        {
-            _ = await EnsureCoreAsync(
-                season,
-                publishAlias: false,
-                preferredAlias: null,
-                ancestry,
-                cancellationToken).ConfigureAwait(false);
+            return Array.Empty<Candidate>();
         }
 
-        foreach (var child in EnumerateContentDescendants(series))
+        await AssociateMetadataMatchesAsync(identifier, userId, cancellationToken).ConfigureAwait(false);
+        var mappings = await _repository.ReadByAliasesAsync([identifier], cancellationToken).ConfigureAwait(false);
+        if (mappings.Count == 0)
         {
-            var state = await EnsureCoreAsync(
-                child,
-                publishAlias: false,
-                preferredAlias: null,
-                ancestry,
-                cancellationToken).ConfigureAwait(false);
-            descendants.Add((child, state));
+            await ImportLegacyAliasAsync(identifier, userId, cancellationToken).ConfigureAwait(false);
+            mappings = await _repository.ReadByAliasesAsync([identifier], cancellationToken).ConfigureAwait(false);
         }
-
-        return _evidence.ComputeDescendantManifest(descendants);
-    }
-
-    private async Task<PermalinkEvidenceResult> ComputeSeasonAsync(
-        Season season,
-        HashSet<Guid> ancestry,
-        CancellationToken cancellationToken)
-    {
-        var descendants = new List<(BaseItem, PermalinkStoredState)>();
-        foreach (var child in EnumerateContentDescendants(season))
+        var candidates = new List<Candidate>(mappings.Count);
+        foreach (var mapping in mappings)
         {
-            var state = await EnsureCoreAsync(
-                child,
-                publishAlias: false,
-                preferredAlias: null,
-                ancestry,
-                cancellationToken).ConfigureAwait(false);
-            descendants.Add((child, state));
-        }
-
-        return _evidence.ComputeDescendantManifest(descendants);
-    }
-
-    /// <summary>
-    /// Enumerates the content items an aggregate's descendant manifest covers:
-    /// every content descendant plus every local alternate version of each.
-    /// The library query behind <c>GetRecursiveChildren</c> hides alternates
-    /// (they carry a primary version id), so a file that gains a better sibling
-    /// would otherwise drop out of the manifest and read as member replacement
-    /// instead of growth. Linked alternate versions are user-linked across
-    /// folders and are not members of the aggregate, so they stay excluded.
-    /// </summary>
-    /// <param name="aggregate">The Series or Season.</param>
-    /// <returns>Content items deduplicated by id, primaries before their alternates.</returns>
-    private List<BaseItem> EnumerateContentDescendants(Folder aggregate)
-    {
-        var result = new Dictionary<Guid, BaseItem>();
-        foreach (var child in aggregate.GetRecursiveChildren().Where(IsContentItem))
-        {
-            result[child.Id] = child;
-            if (child is not Video video)
+            if (!mapping.Ids.Contains(identifier, StringComparer.Ordinal))
             {
                 continue;
             }
 
-            foreach (var alternateId in _libraryManager.GetLocalAlternateVersionIds(video))
+            foreach (var providerAlias in mapping.Ids.Where(alias => MediaContentIdentifier.ParseProviderAlias(alias) is not null))
             {
-                if (!result.ContainsKey(alternateId)
-                    && _libraryManager.GetItemById(alternateId) is Video alternate)
+                await AssociateMetadataMatchesAsync(providerAlias, userId, cancellationToken).ConfigureAwait(false);
+            }
+
+            var visible = new List<BaseItem>();
+            foreach (var itemId in await _repository.ReadItemIdsAsync(mapping.ContentId, cancellationToken).ConfigureAwait(false))
+            {
+                var item = _library.GetItemById<BaseItem>(itemId, user);
+                if (item is null)
                 {
-                    result[alternate.Id] = alternate;
+                    continue;
+                }
+
+                var current = await _repository.ReadForItemAsync(itemId, cancellationToken).ConfigureAwait(false);
+                var metadata = await ReadMetadataAsync(item, createSeriesIdentity: false, cancellationToken).ConfigureAwait(false);
+                if (current.ContentId != mapping.ContentId || metadata.Kind != mapping.Kind || IdentityChanged(current, metadata))
+                {
+                    continue;
+                }
+
+                if (_library.GetItemById<BaseItem>(itemId, user) is not null)
+                {
+                    item.PermalinkContentId = mapping.ContentId;
+                    visible.Add(item);
                 }
             }
-        }
 
-        return result.Values.ToList();
-    }
-
-    private async Task<PermalinkEvidenceResult> ComputeBoxSetAsync(
-        BoxSet boxSet,
-        HashSet<Guid> ancestry,
-        CancellationToken cancellationToken)
-    {
-        var members = new List<(BaseItem, PermalinkStoredState)>();
-        foreach (var member in boxSet.GetLinkedChildren())
-        {
-            var state = await EnsureCoreAsync(
-                member,
-                publishAlias: false,
-                preferredAlias: null,
-                ancestry,
-                cancellationToken).ConfigureAwait(false);
-            members.Add((member, state));
-        }
-
-        return _evidence.ComputeBoxSetManifest(boxSet.Id, members);
-    }
-
-    private static void ValidateEligibility(BaseItem item)
-    {
-        if (item is not Movie and not Episode and not Video and not MusicVideo
-            and not Series and not Season and not BoxSet)
-        {
-            throw Ineligible(item, "kind is unsupported");
-        }
-
-        if (item.ExtraType.HasValue)
-        {
-            throw Ineligible(item, "extras and trailers are ineligible");
-        }
-
-        if (item is not Season { Path: null } && !item.IsFileProtocol)
-        {
-            throw Ineligible(item, "item is remote");
-        }
-    }
-
-    private static string ResolveLocalPath(BaseItem item)
-    {
-        if (!string.IsNullOrEmpty(item.Path))
-        {
-            return item.Path;
-        }
-
-        if (item is Season season)
-        {
-            var series = season.GetParents().OfType<Series>().FirstOrDefault();
-            if (series is not null && !string.IsNullOrEmpty(series.Path))
+            if (visible.Count > 0)
             {
-                var slot = season.IndexNumber?.ToString(
-                    System.Globalization.CultureInfo.InvariantCulture) ?? "unknown";
-                return Path.Combine(
-                    series.Path,
-                    ".sloptank",
-                    "permalink-virtual-seasons",
-                    slot);
+                candidates.Add(new Candidate(mapping.ContentId, mapping.Kind, visible.AsReadOnly()));
             }
         }
 
-        throw Ineligible(item, "no local physical ancestor");
+        return candidates.AsReadOnly();
     }
 
-    private static bool IsContentItem(BaseItem item)
+    private async Task AssociateMetadataMatchesAsync(string alias, Guid userId, CancellationToken token)
     {
-        return item is Movie or Episode or Video or MusicVideo;
-    }
-
-    private static string? GetCanonicalExternalId(BaseItem item)
-    {
-        if (item.ProviderIds.TryGetValue("Imdb", out var imdb)
-            && imdb.StartsWith("tt", StringComparison.Ordinal)
-            && imdb.AsSpan(2).IndexOfAnyExceptInRange('0', '9') < 0)
+        var provider = MediaContentIdentifier.ParseProviderAlias(alias);
+        var user = _users.GetUserById(userId);
+        if (provider is null || user is null || user.HasPermission(PermissionKind.IsDisabled))
         {
-            return imdb;
+            return;
         }
 
-        var qualifier = item switch
+        if ((await _repository.ReadByAliasesAsync([alias], token).ConfigureAwait(false)).Count > 1)
         {
-            Movie => "mv",
-            Series => "tv",
-            Episode => "ep",
-            Season => "se",
-            BoxSet => "co",
+            // Preserve an imported ambiguous alias for the existing chooser.
+            // Looking it up must not silently consolidate distinct titles.
+            return;
+        }
+
+        var items = _library.GetItemList(new InternalItemsQuery(user)
+        {
+            Recursive = true,
+            HasAnyProviderIds = new Dictionary<string, string[]> { [provider.Provider] = [provider.Value] },
+            IncludeItemTypes = provider.Kind.HasValue ? [provider.Kind.Value]
+                : [BaseItemKind.Movie, BaseItemKind.Series, BaseItemKind.Season, BaseItemKind.Episode, BaseItemKind.BoxSet, BaseItemKind.Video, BaseItemKind.MusicVideo]
+        });
+        foreach (var item in items.Where(value => !value.ExtraType.HasValue))
+        {
+            token.ThrowIfCancellationRequested();
+            await BindMetadataAsync(item, token).ConfigureAwait(false);
+        }
+    }
+
+    private async Task ImportLegacyAliasAsync(string alias, Guid userId, CancellationToken token)
+    {
+        var legacy = await _legacy.ReadAsync(alias, token).ConfigureAwait(false);
+        var user = _users.GetUserById(userId);
+        if (user is null || user.HasPermission(PermissionKind.IsDisabled))
+        {
+            return;
+        }
+
+        foreach (var association in legacy.GroupBy(value => value.ItemId))
+        {
+            var providerAliases = association.Select(value => value.Alias)
+                .Where(value => MediaContentIdentifier.ParseProviderAlias(value) is not null).Distinct(StringComparer.Ordinal).ToArray();
+            var items = new Dictionary<Guid, BaseItem>();
+            var original = _library.GetItemById<BaseItem>(association.Key, user);
+            if (original is not null && !original.ExtraType.HasValue)
+            {
+                var metadata = await ReadMetadataAsync(original, createSeriesIdentity: true, token).ConfigureAwait(false);
+                if (providerAliases.Length == 0 || metadata.PublicAliases.Intersect(providerAliases, StringComparer.Ordinal).Any())
+                {
+                    items[original.Id] = original;
+                }
+            }
+
+            // A conversion can have left the old path-derived library ID behind.
+            // Recover through recorded provider metadata, never by old file bytes.
+            foreach (var providerAlias in providerAliases)
+            {
+                await AssociateMetadataMatchesAsync(providerAlias, userId, token).ConfigureAwait(false);
+                foreach (var binding in await _repository.ReadByAliasesAsync([providerAlias], token).ConfigureAwait(false))
+                {
+                    foreach (var itemId in await _repository.ReadItemIdsAsync(binding.ContentId, token).ConfigureAwait(false))
+                    {
+                        var item = _library.GetItemById<BaseItem>(itemId, user);
+                        if (item is not null)
+                        {
+                            items[item.Id] = item;
+                        }
+                    }
+                }
+            }
+
+            foreach (var item in items.Values)
+            {
+                var binding = await BindMetadataAsync(item, token).ConfigureAwait(false);
+                await _repository.ImportAliasAsync(new PermalinkBindingRequest(item.Id, binding.ContentId,
+                    binding.ContentId, binding.Kind, [alias], null, _clock.GetUtcNow().UtcDateTime), token).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task<MediaPermalinkBinding> BindMetadataAsync(BaseItem item, CancellationToken token)
+    {
+        if (item.Id == Guid.Empty || item.ExtraType.HasValue)
+        {
+            throw new PermalinkException(PermalinkErrorKind.Ineligible, "item-ineligible", "A persisted library title is required; extras and trailers do not have title permalinks.");
+        }
+
+        var metadata = await ReadMetadataAsync(item, createSeriesIdentity: true, token).ConfigureAwait(false);
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            token.ThrowIfCancellationRequested();
+            var current = await _repository.ReadForItemAsync(item.Id, token).ConfigureAwait(false);
+            var keys = metadata.PublicAliases.Concat(metadata.CoordinateKey is null ? Array.Empty<string>() : [metadata.CoordinateKey]).ToArray();
+            var matches = await _repository.ReadByAliasesAsync(keys, token).ConfigureAwait(false);
+            if (matches.Any(value => value.Kind != metadata.Kind) || matches.Count > 1)
+            {
+                throw new PermalinkException(PermalinkErrorKind.Conflict, "metadata-identity-conflict", "The library metadata identifies more than one title. Correct its provider or episode metadata before associating this file.", itemId: item.Id);
+            }
+
+            var contentId = matches.Count == 1 ? matches[0].ContentId
+                : current.ContentId.HasValue && !IdentityChanged(current, metadata) ? current.ContentId.Value
+                : _identifiers.CreateContentId();
+            var inheritedContentId = current.ContentId.HasValue && current.ContentId != contentId
+                && current.Kind == metadata.Kind && current.Keys.All(key => key.StartsWith("sk-", StringComparison.Ordinal))
+                ? current.ContentId : null;
+            var aliases = metadata.PublicAliases.Append(MediaContentIdentifier.OpaqueAlias(contentId))
+                .Concat(inheritedContentId.HasValue ? current.PublicAliases : Array.Empty<string>()).Distinct(StringComparer.Ordinal).ToArray();
+            if (current.ContentId == contentId
+                && aliases.All(alias => current.PublicAliases.Contains(alias, StringComparer.Ordinal))
+                && (metadata.CoordinateKey is null || current.Keys.Contains(metadata.CoordinateKey, StringComparer.Ordinal)))
+            {
+                item.PermalinkContentId = contentId;
+                return new MediaPermalinkBinding(contentId, metadata.Kind, current.PublicAliases, current.Keys);
+            }
+
+            try
+            {
+                await _repository.BindAsync(new PermalinkBindingRequest(item.Id, current.ContentId, contentId,
+                    metadata.Kind, aliases, metadata.CoordinateKey, _clock.GetUtcNow().UtcDateTime, inheritedContentId), token).ConfigureAwait(false);
+                var saved = await _repository.ReadForItemAsync(item.Id, token).ConfigureAwait(false);
+                if (saved.ContentId != contentId || saved.PublicAliases.Count == 0)
+                {
+                    throw MappingChanged();
+                }
+
+                item.PermalinkContentId = contentId;
+                return new MediaPermalinkBinding(contentId, metadata.Kind, saved.PublicAliases, saved.Keys);
+            }
+            catch (PermalinkException exception) when (exception.Code == "mapping-changed" && attempt < 2)
+            {
+                // Re-read the database winner; a retry must not overwrite its association.
+                continue;
+            }
+        }
+
+        throw MappingChanged();
+    }
+
+    private async Task<MediaContentIdentity> ReadMetadataAsync(BaseItem item, bool createSeriesIdentity, CancellationToken token)
+    {
+        var series = item switch
+        {
+            Episode episode when episode.SeriesId != Guid.Empty => _library.GetItemById<Series>(episode.SeriesId),
+            Season season when season.SeriesId != Guid.Empty => _library.GetItemById<Series>(season.SeriesId),
             _ => null
         };
-        if (qualifier is null)
+        Guid? seriesContentId = null;
+        if (series is not null)
         {
-            return null;
+            seriesContentId = createSeriesIdentity
+                ? (await BindMetadataAsync(series, token).ConfigureAwait(false)).ContentId
+                : (await _repository.ReadForItemAsync(series.Id, token).ConfigureAwait(false)).ContentId;
         }
 
-        if (TryGetNumericProviderId(item, "Tmdb", out var tmdb))
-        {
-            return $"tm-{qualifier}-{tmdb}";
-        }
-
-        return TryGetNumericProviderId(item, "Tvdb", out var tvdb)
-            ? $"tv-{qualifier}-{tvdb}"
-            : null;
+        return _identifiers.Identify(item, seriesContentId, series?.DisplayOrder);
     }
 
-    private static bool TryGetNumericProviderId(BaseItem item, string provider, out string value)
+    private static bool IdentityChanged(PermalinkItemBinding previous, MediaContentIdentity current)
     {
-        if (item.ProviderIds.TryGetValue(provider, out var candidate)
-            && candidate.Length > 0
-            && candidate[0] != '0'
-            && candidate.AsSpan().IndexOfAnyExceptInRange('0', '9') < 0)
+        if (previous.Kind is not null && previous.Kind != current.Kind)
         {
-            value = candidate;
             return true;
         }
 
-        value = string.Empty;
-        return false;
+        var oldProviderIds = previous.PublicAliases.Where(value => !value.StartsWith("sk-", StringComparison.Ordinal)).ToArray();
+        if (oldProviderIds.Length > 0 && current.PublicAliases.Count > 0)
+        {
+            return !oldProviderIds.Intersect(current.PublicAliases, StringComparer.Ordinal).Any();
+        }
+
+        var oldCoordinates = previous.Keys.Where(value => value.StartsWith("metadata:v1:", StringComparison.Ordinal)).ToArray();
+        return current.CoordinateKey is not null && oldCoordinates.Length > 0
+            && !oldCoordinates.Contains(current.CoordinateKey, StringComparer.Ordinal);
     }
 
-    private static PermalinkException Ineligible(BaseItem item, string reason)
-    {
-        return new PermalinkException(
-            PermalinkErrorKind.Ineligible,
-            "item-ineligible",
-            $"Permalink item '{item.Id}' is ineligible: {reason}.");
-    }
+    private static PermalinkException MappingChanged() => new(PermalinkErrorKind.Conflict,
+        "mapping-changed", "The media metadata changed while its permalink association was being saved.");
+
+    /// <summary>A logical title and its current visible library versions.</summary>
+    public sealed record Candidate(Guid ContentId, string Kind, IReadOnlyList<BaseItem> Items);
 }

@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-02.
 using System;
 using Jellyfin.Database.Implementations.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -72,6 +73,7 @@ public class BaseItemConfiguration : IEntityTypeConfiguration<BaseItemEntity>
         // Latest TV: episode count per season, season count per series
         builder.HasIndex(e => e.SeasonId);
         builder.HasIndex(e => e.SeriesId);
+        builder.HasIndex(e => e.PermalinkContentId);
 
         // Items/Counts: SELECT Type, COUNT(*) GROUP BY Type filtered by TopParentId.
         builder.HasIndex(e => new { e.TopParentId, e.Type, e.IsVirtualItem })

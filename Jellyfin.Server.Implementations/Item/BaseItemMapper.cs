@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-02.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -74,6 +74,7 @@ public static class BaseItemMapper
         dto.LUFS = entity.LUFS;
         dto.NormalizationGain = entity.NormalizationGain;
         dto.IsVirtualItem = entity.IsVirtualItem;
+        dto.PermalinkContentId = entity.PermalinkContentId;
         dto.IngestState = entity.IngestState;
         dto.PlaybackReadiness = entity.PlaybackReadiness;
         dto.PlaybackReadyObjectIdentity = entity.PlaybackReadyObjectIdentity;
@@ -254,6 +255,7 @@ public static class BaseItemMapper
         entity.LUFS = dto.LUFS;
         entity.NormalizationGain = dto.NormalizationGain;
         entity.IsVirtualItem = dto.IsVirtualItem;
+        entity.PermalinkContentId = dto.PermalinkContentId;
         entity.IngestState = dto.IngestState;
         entity.PlaybackReadiness = dto.PlaybackReadiness;
         entity.PlaybackReadyObjectIdentity = dto.PlaybackReadyObjectIdentity;

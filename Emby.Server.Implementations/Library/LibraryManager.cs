@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-02.
 #pragma warning disable CS1591
 #pragma warning disable CA5394
 
@@ -512,7 +512,14 @@ namespace Emby.Server.Implementations.Library
                     missing.OwnerId = Guid.Empty;
                     missing.LocalAlternateVersions = [];
                     missing.LinkedAlternateVersions = [];
-                    DeleteItem(missing, new DeleteOptions { DeleteFileLocation = false }, false);
+                    DeleteItem(
+                        missing,
+                        new DeleteOptions
+                        {
+                            DeleteFileLocation = false,
+                            DeleteFromExternalProvider = options.DeleteFromExternalProvider
+                        },
+                        false);
                 }
 
                 if (alternateVersions.Count > 0)

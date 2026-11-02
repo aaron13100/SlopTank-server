@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-27, 2026-10-14, 2026-10-31, 2026-11-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-27, 2026-10-14, 2026-10-31, 2026-11-01, 2026-11-02.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
 
 namespace Emby.Server.Implementations.Permalinks;
@@ -24,6 +25,8 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
     private readonly IPermalinkManager? _manager;
     private readonly PermalinkTransitionPublisher? _aggregatePublisher;
     private readonly PermalinkMutationClaimStore? _claims;
+    private readonly ILibraryManager? _libraryManager;
+    private readonly IPermalinkIdentityMutationAdapter? _identityMutationAdapter;
     private readonly SemaphoreSlim[] _operationGates = Enumerable.Range(0, OperationGateCount)
         .Select(_ => new SemaphoreSlim(1, 1))
         .ToArray();
@@ -36,7 +39,9 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
         PermalinkMutationBundleFactory? bundleFactory = null,
         IPermalinkManager? manager = null,
         PermalinkTransitionPublisher? aggregatePublisher = null,
-        PermalinkMutationClaimStore? claims = null)
+        PermalinkMutationClaimStore? claims = null,
+        ILibraryManager? libraryManager = null,
+        IPermalinkIdentityMutationAdapter? identityMutationAdapter = null)
     {
         _journal = journal;
         _bindings = bindings;
@@ -46,6 +51,8 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
         _manager = manager;
         _aggregatePublisher = aggregatePublisher;
         _claims = claims;
+        _libraryManager = libraryManager;
+        _identityMutationAdapter = identityMutationAdapter;
     }
 
     /// <inheritdoc />
@@ -59,6 +66,7 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
         if (existing is not null)
         {
             ValidateReplay(existing, request);
+            RequireMetadataCleanupDependencies(existing);
             return Result(existing, GetCurrentState(existing.OperationId));
         }
 
@@ -114,6 +122,7 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
             Version = 3,
             Removal = intent
         };
+        RequireMetadataCleanupDependencies(operation);
         await _journal.WriteOperationAsync(operation, cancellationToken).ConfigureAwait(false);
         if (_journal.GetSettledPhase(operation.OperationId) is { } settled)
         {
@@ -162,11 +171,13 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
             throw Conflict("removal-commit-input", "Commit does not exactly match prepared intent.");
         }
 
+        RequireMetadataCleanupDependencies(operation);
         if (_journal.GetSettledPhase(operationId) is { } settled)
         {
             if (settled == PermalinkPhase.Committed)
             {
                 await SettleAncestorsAsync(operation, cancellationToken).ConfigureAwait(false);
+                await CompleteMetadataCleanupAsync(operation, cancellationToken).ConfigureAwait(false);
             }
 
             return Result(operation, settled.Name);
@@ -190,6 +201,7 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
                 AggregateBundle(bundle), operation.OperationId, "no_change", cancellationToken).ConfigureAwait(false);
         }
 
+        await CompleteMetadataCleanupAsync(operation, cancellationToken).ConfigureAwait(false);
         await WritePhaseIfMissingAsync(operation, PermalinkPhase.Published, cancellationToken)
             .ConfigureAwait(false);
         await WritePhaseIfMissingAsync(operation, PermalinkPhase.Committed, cancellationToken)
@@ -202,11 +214,13 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
         CancellationToken cancellationToken)
     {
         var operation = await RequireOperationAsync(operationId, cancellationToken).ConfigureAwait(false);
+        RequireMetadataCleanupDependencies(operation);
         if (_journal.GetSettledPhase(operationId) is { } settled)
         {
             if (settled == PermalinkPhase.Committed)
             {
                 await SettleAncestorsAsync(operation, cancellationToken).ConfigureAwait(false);
+                await CompleteMetadataCleanupAsync(operation, cancellationToken).ConfigureAwait(false);
             }
 
             return Result(operation, settled.Name);
@@ -245,6 +259,97 @@ internal sealed class PermalinkRemovalCoordinator : IPermalinkRemovalCoordinator
         throw Conflict(
             "removal-recovery-ambiguous",
             "Removal recovery found a split, occupied, substituted, doubled, or missing group and will not guess.");
+    }
+
+    private void RequireMetadataCleanupDependencies(PermalinkOperationDocument operation)
+    {
+        if (operation.Bundle is not null && (_libraryManager is null || _identityMutationAdapter is null))
+        {
+            throw Conflict(
+                "removal-library-unavailable",
+                "Frozen removal publication requires normal guarded library metadata cleanup.");
+        }
+    }
+
+    private async Task CompleteMetadataCleanupAsync(
+        PermalinkOperationDocument operation,
+        CancellationToken cancellationToken)
+    {
+        if (_libraryManager is not { } library || _identityMutationAdapter is not { } adapter)
+        {
+            // Older isolated file-only callers have no frozen library bundle.
+            // Frozen operations are refused before any publication without both dependencies.
+            return;
+        }
+
+        var item = FindMetadataItem(library, operation);
+        if (item is null)
+        {
+            return;
+        }
+
+        await RequireUnboundSourceAsync(operation, cancellationToken).ConfigureAwait(false);
+        await _verifier.VerifyCommitAsync(operation, cancellationToken).ConfigureAwait(false);
+        await adapter.ExecuteAsync(
+            [item],
+            new PermalinkIdentityMutationRequest("deletion"),
+            async (_, token) =>
+            {
+                // The adapter owns the normal item and version-promotion locks.
+                // Re-read inside those locks: checks made before admission cannot authorize
+                // deleting a later path assignment, rebound item, or reappeared source file.
+                var current = FindMetadataItem(library, operation);
+                if (current is null)
+                {
+                    return;
+                }
+
+                await RequireUnboundSourceAsync(operation, token).ConfigureAwait(false);
+                await _verifier.VerifyCommitAsync(operation, token).ConfigureAwait(false);
+                library.DeleteItem(
+                    current,
+                    new DeleteOptions
+                    {
+                        DeleteFileLocation = false,
+                        DeleteFromExternalProvider = false
+                    });
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static BaseItem? FindMetadataItem(ILibraryManager library, PermalinkOperationDocument operation)
+    {
+        var item = library.GetItemById<BaseItem>(operation.ItemId);
+        if (item is null)
+        {
+            // A prior cleanup or crash after deletion has already completed this projection.
+            return null;
+        }
+
+        if (!item.Id.Equals(operation.ItemId)
+            || !string.Equals(item.Path, operation.SourcePath, StringComparison.Ordinal)
+            || item is not Video { AdditionalParts.Length: 0 }
+            || (operation.OldIdentity is { } identity
+                && !string.Equals(item.GetType().Name, identity.ItemKind, StringComparison.Ordinal)))
+        {
+            throw Conflict(
+                "removal-source-metadata-changed",
+                "The prepared source item no longer has its exact frozen path and video identity.");
+        }
+
+        return item;
+    }
+
+    private async Task RequireUnboundSourceAsync(
+        PermalinkOperationDocument operation,
+        CancellationToken cancellationToken)
+    {
+        if (await _bindings.HasItemBindingAsync(operation.ItemId, cancellationToken).ConfigureAwait(false))
+        {
+            throw Conflict(
+                "removal-source-rebound",
+                "The prepared source acquired a live binding and cannot be removed as retired metadata.");
+        }
     }
 
     private async Task SettleAncestorsAsync(PermalinkOperationDocument operation, CancellationToken cancellationToken)

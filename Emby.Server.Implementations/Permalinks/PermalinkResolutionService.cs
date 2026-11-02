@@ -258,7 +258,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
 
     private DateTime Now => _clock.GetUtcNow().UtcDateTime;
 
-    private static BaseItem Representative(PermalinkManager.Candidate candidate) => candidate.Items.OrderBy(item => item.Id).First();
+    private static BaseItem Representative(PermalinkManager.Candidate candidate) => candidate.Items
+        .OrderBy(item => item is Video { PrimaryVersionId: not null } ? 1 : 0).ThenBy(item => item.Id).First();
 
     private static PermalinkCandidateEnvelope Envelope(IssuedLease issued, int rank) => new(rank,
         issued.Document.Alias.StartsWith("sk-", StringComparison.Ordinal) ? "sloptank" : "external",

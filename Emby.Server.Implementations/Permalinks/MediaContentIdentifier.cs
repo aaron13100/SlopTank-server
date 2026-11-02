@@ -62,6 +62,22 @@ public sealed class MediaContentIdentifier
     /// <returns>A new logical title ID, independent of any media file.</returns>
     internal Guid CreateContentId() => Guid.NewGuid();
 
+    /// <summary>Identifies superseded metadata claims while preserving opaque logical IDs.</summary>
+    internal static bool IsReplacedClaim(string alias, MediaContentIdentity metadata)
+    {
+        if (alias.StartsWith("metadata:v1:", StringComparison.Ordinal))
+        {
+            return metadata.CoordinateKey is not null && alias != metadata.CoordinateKey;
+        }
+
+        var previous = ParseProviderAlias(alias);
+        return previous is not null && metadata.PublicAliases.Any(value =>
+        {
+            var current = ParseProviderAlias(value);
+            return current is not null && current.Provider == previous.Provider && current.Kind == previous.Kind && current.Value != previous.Value;
+        });
+    }
+
     /// <summary>Translates an existing provider URL into the library's metadata query.</summary>
     internal static ProviderIdentity? ParseProviderAlias(string alias)
     {

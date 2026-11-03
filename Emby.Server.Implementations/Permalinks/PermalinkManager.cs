@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31, 2026-11-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -69,12 +69,28 @@ public sealed class PermalinkManager : IPermalinkManager
         }
 
         await AssociateMetadataMatchesAsync(identifier, userId, cancellationToken).ConfigureAwait(false);
-        var mappings = await _repository.ReadByAliasesAsync([identifier], cancellationToken).ConfigureAwait(false);
-        if (mappings.Count == 0)
+        var candidates = await ReadMappedCandidatesAsync(identifier, userId, cancellationToken).ConfigureAwait(false);
+        if (candidates.Count > 0)
         {
-            await ImportLegacyAliasAsync(identifier, userId, cancellationToken).ConfigureAwait(false);
-            mappings = await _repository.ReadByAliasesAsync([identifier], cancellationToken).ConfigureAwait(false);
+            return candidates;
         }
+
+        // A prior mapping can outlive its last library record. Give the saved
+        // legacy metadata one recovery attempt even when that dormant mapping
+        // still exists; its presence alone does not mean a file was resolved.
+        await ImportLegacyAliasAsync(identifier, userId, cancellationToken).ConfigureAwait(false);
+        return await ReadMappedCandidatesAsync(identifier, userId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<Candidate>> ReadMappedCandidatesAsync(string identifier, Guid userId, CancellationToken cancellationToken)
+    {
+        var user = _users.GetUserById(userId);
+        if (user is null || user.HasPermission(PermissionKind.IsDisabled))
+        {
+            return Array.Empty<Candidate>();
+        }
+
+        var mappings = await _repository.ReadByAliasesAsync([identifier], cancellationToken).ConfigureAwait(false);
         var candidates = new List<Candidate>(mappings.Count);
         foreach (var mapping in mappings)
         {
@@ -220,8 +236,9 @@ public sealed class PermalinkManager : IPermalinkManager
                 }
             }
 
-            foreach (var item in items.Values)
+            foreach (var associatedItem in items.Values)
             {
+                var item = FindTitleRecord(associatedItem, out _) ?? associatedItem;
                 var binding = await BindMetadataAsync(item, token).ConfigureAwait(false);
                 if (MediaContentIdentifier.ParseProviderAlias(alias) is not null
                     && !(await ReadMetadataAsync(item, createSeriesIdentity: false, token).ConfigureAwait(false)).PublicAliases.Contains(alias, StringComparer.Ordinal))
@@ -242,8 +259,15 @@ public sealed class PermalinkManager : IPermalinkManager
             throw new PermalinkException(PermalinkErrorKind.Ineligible, "item-ineligible", "A persisted library title is required; extras and trailers do not have title permalinks.");
         }
 
-        var primary = FindPrimaryVersion(item);
+        var primary = FindTitleRecord(item, out var isMultipart);
         var primaryBinding = primary is null ? null : await BindMetadataAsync(primary, token).ConfigureAwait(false);
+        if (isMultipart && primaryBinding is not null)
+        {
+            // Stacked parts are owned files of the title, not separate titles.
+            // The existing owner's AdditionalParts association supplies locators.
+            return primaryBinding;
+        }
+
         var metadata = await ReadMetadataAsync(item, createSeriesIdentity: true, token).ConfigureAwait(false);
         for (var attempt = 0; attempt < 3; attempt++)
         {
@@ -319,9 +343,9 @@ public sealed class PermalinkManager : IPermalinkManager
 
     private async Task<MediaContentIdentity> ReadMetadataAsync(BaseItem item, bool createSeriesIdentity, CancellationToken token)
     {
-        // Alternate versions already have a content relationship in the library.
-        // Use its primary metadata rather than minting a title for each file.
-        item = FindPrimaryVersion(item) ?? item;
+        // Versions and stacked parts already have title relationships in the
+        // library. Reuse their owner's metadata instead of identifying bytes.
+        item = FindTitleRecord(item, out _) ?? item;
         var series = item switch
         {
             Episode episode when episode.SeriesId != Guid.Empty => _library.GetItemById<Series>(episode.SeriesId),
@@ -339,37 +363,56 @@ public sealed class PermalinkManager : IPermalinkManager
         return _identifiers.Identify(item, seriesContentId, series?.DisplayOrder);
     }
 
-    private Video? FindPrimaryVersion(BaseItem item)
+    private Video? FindTitleRecord(BaseItem item, out bool isMultipart)
     {
+        isMultipart = false;
         var visited = new HashSet<Guid> { item.Id };
         var current = item as Video;
-        Video? primary = null;
-        while (current?.PrimaryVersionId is Guid primaryId)
+        Video? title = null;
+        while (current is not null)
         {
-            if (!visited.Add(primaryId))
+            Video? next;
+            if (current.PrimaryVersionId is Guid primaryId)
             {
-                throw new PermalinkException(PermalinkErrorKind.Conflict, "version-link-cycle",
-                    "The library's alternate-version relationship contains a cycle.", itemId: item.Id);
-            }
+                next = _library.GetItemById<Video>(primaryId);
+                if (next is null)
+                {
+                    // A surviving version keeps its stored identity after the
+                    // primary was removed; normal library promotion can follow.
+                    break;
+                }
 
-            current = _library.GetItemById<Video>(primaryId);
-            if (current is null)
+                if (next.GetBaseItemKind() != current.GetBaseItemKind())
+                {
+                    throw new PermalinkException(PermalinkErrorKind.Conflict, "version-kind-conflict",
+                        "Alternate versions must belong to the same library media kind.", itemId: item.Id);
+                }
+            }
+            else if (!current.ExtraType.HasValue && current.OwnerId != Guid.Empty
+                && _library.GetItemById<Video>(current.OwnerId) is Video owner
+                && owner.AdditionalParts.Contains(current.Path, StringComparer.Ordinal))
             {
-                // A surviving version retains its stored logical identity when
-                // the primary was removed; normal library promotion can follow.
+                // OwnerId alone also covers trailers and extras. Only an
+                // explicit stacked-part relationship identifies the same title.
+                next = owner;
+                isMultipart = true;
+            }
+            else
+            {
                 break;
             }
 
-            if (current.GetBaseItemKind() != item.GetBaseItemKind())
+            if (!visited.Add(next.Id))
             {
-                throw new PermalinkException(PermalinkErrorKind.Conflict, "version-kind-conflict",
-                    "Alternate versions must belong to the same library media kind.", itemId: item.Id);
+                throw new PermalinkException(PermalinkErrorKind.Conflict, "version-link-cycle",
+                    "The library's version or multipart relationship contains a cycle.", itemId: item.Id);
             }
 
-            primary = current;
+            current = next;
+            title = current;
         }
 
-        return primary;
+        return title;
     }
 
     private static bool IdentityChanged(PermalinkItemBinding previous, MediaContentIdentity current)

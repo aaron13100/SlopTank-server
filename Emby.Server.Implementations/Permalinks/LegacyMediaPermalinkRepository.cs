@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -86,14 +86,10 @@ public sealed class LegacyMediaPermalinkRepository(IPermalinkAuthorityRootProvid
                 }
             }
 
-            if (result.Count > 0)
-            {
-                return result;
-            }
-
-            // Old conversions sometimes removed the derived item binding while
-            // leaving the immutable alias and its metadata association intact.
-            // Read that association directly; do not recreate a physical proof.
+            // Conversions can remove an old item or leave its derived binding
+            // behind. In either case, also retain the saved filename/metadata
+            // association for the ordinary library lookup. A derived binding
+            // alone is not evidence that its library record still exists.
             await using var orphan = connection.CreateCommand();
             orphan.CommandText = """
                 SELECT f.capsule_id, a.current_path, a.event_json, f.event_json, a.item_kind

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-27, 2026-09-28, 2026-10-14, 2026-10-31, 2026-11-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-01, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-27, 2026-09-28, 2026-10-14, 2026-10-31, 2026-11-01, 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -43,6 +43,8 @@ public sealed class PermalinkEvidence
     private readonly PermalinkContentReadMeter _contentReads;
 
     private readonly PermalinkContentDigestCache _digestCache;
+    private readonly PermalinkAuthorityStore? _authority;
+    private readonly IPermalinkAtomicFileSystem? _fileSystem;
     private readonly int _contentDigestMemoryLimit;
 
     /// <summary>
@@ -59,11 +61,29 @@ public sealed class PermalinkEvidence
         PermalinkContentReadMeter contentReads,
         PermalinkContentDigestCache digestCache,
         int contentDigestMemoryLimit = DefaultContentDigestMemoryLimit)
+        : this(contentReads, digestCache, null, null, contentDigestMemoryLimit)
+    {
+    }
+
+    /// <summary>Initializes physical evidence with existing reservation metadata.</summary>
+    /// <param name="contentReads">Records each full media read.</param>
+    /// <param name="digestCache">Remembers digests across process lifetimes.</param>
+    /// <param name="authority">The existing physical write authority, when configured.</param>
+    /// <param name="fileSystem">The physical writer's filesystem adapter.</param>
+    /// <param name="contentDigestMemoryLimit">The memory cache limit.</param>
+    internal PermalinkEvidence(
+        PermalinkContentReadMeter contentReads,
+        PermalinkContentDigestCache digestCache,
+        PermalinkAuthorityStore? authority,
+        IPermalinkAtomicFileSystem? fileSystem,
+        int contentDigestMemoryLimit = DefaultContentDigestMemoryLimit)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(contentDigestMemoryLimit);
 
         _contentReads = contentReads;
         _digestCache = digestCache;
+        _authority = authority;
+        _fileSystem = fileSystem;
         _contentDigestMemoryLimit = contentDigestMemoryLimit;
     }
 
@@ -221,11 +241,37 @@ public sealed class PermalinkEvidence
         BaseItem item,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(item);
+        var physicalKind = item.GetType().Name;
+        if (item is Video { VideoType: VideoType.Dvd or VideoType.BluRay }
+            && _authority is { IsConfigured: true } && _fileSystem is not null
+            && !string.IsNullOrEmpty(item.Path)
+            && _fileSystem.ReadAnchorToken(item.Path) is { } anchorToken)
+        {
+            physicalKind = (await _authority.FindByAnchorAsync(anchorToken, cancellationToken)
+                .ConfigureAwait(false))?.ItemKind ?? physicalKind;
+        }
+
+        return await ComputeContentItemAsync(item, physicalKind, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Computes file, multipart, or optical evidence using the stable physical kind.
+    /// </summary>
+    /// <param name="item">The library item.</param>
+    /// <param name="physicalKind">The kind recorded with the physical content reservation.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    public async Task<PermalinkEvidenceResult> ComputeContentItemAsync(
+        BaseItem item,
+        string physicalKind,
+        CancellationToken cancellationToken)
+    {
         try
         {
             if (item is Video { VideoType: VideoType.Dvd or VideoType.BluRay })
             {
-                return await ComputeOpticalAsync(item, cancellationToken).ConfigureAwait(false);
+                return await ComputeOpticalAsync(item, physicalKind, cancellationToken).ConfigureAwait(false);
             }
 
             if (item is not Video video || string.IsNullOrEmpty(item.Path))
@@ -288,7 +334,9 @@ public sealed class PermalinkEvidence
         var leaves = descendants
             .Select(pair => new PermalinkLeaf(
                 "descendant",
-                pair.Item.GetType().Name,
+                string.IsNullOrEmpty(pair.State.PhysicalKind)
+                    ? pair.Item.GetType().Name
+                    : pair.State.PhysicalKind,
                 pair.State.CapsuleId.ToString("D"),
                 pair.State.ContentRoot,
                 0,
@@ -321,7 +369,9 @@ public sealed class PermalinkEvidence
         };
         leaves.AddRange(members.Select(pair => new PermalinkLeaf(
             "boxset-member",
-            pair.Item.GetType().Name,
+            string.IsNullOrEmpty(pair.State.PhysicalKind)
+                ? pair.Item.GetType().Name
+                : pair.State.PhysicalKind,
             pair.State.CapsuleId.ToString("D"),
             pair.State.ContentRoot,
             0,
@@ -331,6 +381,7 @@ public sealed class PermalinkEvidence
 
     private async Task<PermalinkEvidenceResult> ComputeOpticalAsync(
         BaseItem item,
+        string physicalKind,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(item.Path) || !Directory.Exists(item.Path))
@@ -376,7 +427,7 @@ public sealed class PermalinkEvidence
 
             leaves.Add(await HashFileAsync(
                 "optical",
-                item.GetType().Name,
+                physicalKind,
                 relative,
                 file,
                 cancellationToken).ConfigureAwait(false));

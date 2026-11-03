@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -11,6 +12,14 @@ namespace MediaBrowser.Controller.Persistence;
 /// </summary>
 public interface IItemPersistenceService
 {
+    /// <summary>Refines a generic video's classification without replacing its record or metadata.</summary>
+    /// <param name="source">The existing record observed by the library.</param>
+    /// <param name="targetType">Movie, Episode or MusicVideo.</param>
+    /// <param name="currentPath">The current filename, including a completed container conversion.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The completion of the metadata update.</returns>
+    Task RefineVideoKindAsync(Video source, Type targetType, string currentPath, CancellationToken cancellationToken);
+
     /// <summary>
     /// Deletes items by their IDs.
     /// </summary>

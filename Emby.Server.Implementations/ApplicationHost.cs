@@ -606,7 +606,9 @@ namespace Emby.Server.Implementations
             });
             serviceCollection.AddSingleton(provider => new PermalinkEvidence(
                 provider.GetRequiredService<PermalinkContentReadMeter>(),
-                provider.GetRequiredService<PermalinkContentDigestCache>()));
+                provider.GetRequiredService<PermalinkContentDigestCache>(),
+                provider.GetRequiredService<PermalinkAuthorityStore>(),
+                provider.GetRequiredService<IPermalinkAtomicFileSystem>()));
             serviceCollection.AddSingleton<IPermalinkStore, PermalinkStore>();
             serviceCollection.AddSingleton<Emby.Server.Implementations.MediaMutations.ProtectedMediaState>();
             serviceCollection.AddSingleton<MediaContentIdentifier>();

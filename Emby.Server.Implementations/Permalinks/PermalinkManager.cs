@@ -146,7 +146,8 @@ public sealed class PermalinkManager : IPermalinkManager
             return;
         }
 
-        if ((await _repository.ReadByAliasesAsync([alias], token).ConfigureAwait(false)).Count > 1)
+        var existingBindings = await _repository.ReadByAliasesAsync([alias], token).ConfigureAwait(false);
+        if (existingBindings.Count > 1)
         {
             // Preserve an imported ambiguous alias for the existing chooser.
             // Looking it up must not silently consolidate distinct titles.
@@ -159,8 +160,8 @@ public sealed class PermalinkManager : IPermalinkManager
             HasAnyProviderIds = new Dictionary<string, string[]> { [provider.Provider] = [provider.Value] },
             IncludeItemTypes = provider.Kind.HasValue ? [provider.Kind.Value]
                 : [BaseItemKind.Movie, BaseItemKind.Series, BaseItemKind.Season, BaseItemKind.Episode, BaseItemKind.BoxSet, BaseItemKind.Video, BaseItemKind.MusicVideo]
-        });
-        foreach (var item in items.Where(value => !value.ExtraType.HasValue))
+        }).Where(value => !value.ExtraType.HasValue).ToArray();
+        foreach (var item in items)
         {
             token.ThrowIfCancellationRequested();
             await BindMetadataAsync(item, token).ConfigureAwait(false);
@@ -275,7 +276,17 @@ public sealed class PermalinkManager : IPermalinkManager
             var current = await _repository.ReadForItemAsync(item.Id, token).ConfigureAwait(false);
             var keys = metadata.PublicAliases.Concat(metadata.CoordinateKey is null ? Array.Empty<string>() : [metadata.CoordinateKey]).ToArray();
             var matches = await _repository.ReadByAliasesAsync(keys, token).ConfigureAwait(false);
-            if (matches.Any(value => value.Kind != metadata.Kind) || matches.Count > 1)
+            if (item.GetType() == typeof(Video) && primaryBinding is null && matches.Count == 1
+                && matches[0].Kind != metadata.Kind && TryKnownVideoKind(matches[0].Kind, out var knownKind))
+            {
+                // Provider metadata can already identify a concrete title even
+                // while its file record still has the generic Video CLR type.
+                metadata = _identifiers.Identify(item, null, null, knownKind);
+                keys = metadata.PublicAliases.ToArray();
+                matches = await _repository.ReadByAliasesAsync(keys, token).ConfigureAwait(false);
+            }
+
+            if (matches.Any(value => !MediaContentIdentifier.IsKindRefinement(value.Kind, metadata.Kind)) || matches.Count > 1)
             {
                 throw new PermalinkException(PermalinkErrorKind.Conflict, "metadata-identity-conflict", "The library metadata identifies more than one title. Correct its provider or episode metadata before associating this file.", itemId: item.Id);
             }
@@ -284,7 +295,7 @@ public sealed class PermalinkManager : IPermalinkManager
                 : current.ContentId.HasValue && !IdentityChanged(current, metadata) ? current.ContentId.Value
                 : _identifiers.CreateContentId());
             var inheritedContentId = current.ContentId.HasValue && current.ContentId != contentId
-                && current.Kind == metadata.Kind && current.Keys.All(key => key.StartsWith("sk-", StringComparison.Ordinal))
+                && MediaContentIdentifier.IsKindRefinement(current.Kind, metadata.Kind) && current.Keys.All(key => key.StartsWith("sk-", StringComparison.Ordinal))
                 ? current.ContentId : null;
             var aliases = metadata.PublicAliases.Append(MediaContentIdentifier.OpaqueAlias(contentId))
                 .Concat(inheritedContentId.HasValue ? current.PublicAliases : Array.Empty<string>()).Distinct(StringComparer.Ordinal).ToArray();
@@ -293,7 +304,7 @@ public sealed class PermalinkManager : IPermalinkManager
             var legacyAliases = current.ContentId.HasValue ? Array.Empty<string>()
                 : await ReadInitialLegacyAliasesAsync(item.Id, metadata, token).ConfigureAwait(false);
             if (primaryBinding is not null && current.ContentId.HasValue && current.ContentId != contentId
-                && current.Kind == metadata.Kind)
+                && MediaContentIdentifier.IsKindRefinement(current.Kind, metadata.Kind))
             {
                 // Explicit version grouping is an existing library relationship.
                 // Carry its previously issued opaque URLs in the same database
@@ -303,7 +314,7 @@ public sealed class PermalinkManager : IPermalinkManager
                 legacyAliases = legacyAliases.Concat(current.PublicAliases.Where(alias => alias.StartsWith("sk-", StringComparison.Ordinal)))
                     .Distinct(StringComparer.Ordinal).ToArray();
             }
-            if (current.ContentId == contentId
+            if (current.ContentId == contentId && current.Kind == metadata.Kind
                 && retiredAliases.Length == 0
                 && aliases.All(alias => current.PublicAliases.Contains(alias, StringComparer.Ordinal))
                 && (metadata.CoordinateKey is null || current.Keys.Contains(metadata.CoordinateKey, StringComparer.Ordinal)))
@@ -371,8 +382,21 @@ public sealed class PermalinkManager : IPermalinkManager
                 : (await _repository.ReadForItemAsync(series.Id, token).ConfigureAwait(false)).ContentId;
         }
 
-        return _identifiers.Identify(item, seriesContentId, series?.DisplayOrder);
+        BaseItemKind? knownKind = null;
+        if (item.GetType() == typeof(Video))
+        {
+            var stored = await _repository.ReadForItemAsync(item.Id, token).ConfigureAwait(false);
+            if (TryKnownVideoKind(stored.Kind, out var kind))
+            {
+                knownKind = kind;
+            }
+        }
+
+        return _identifiers.Identify(item, seriesContentId, series?.DisplayOrder, knownKind);
     }
+
+    private static bool TryKnownVideoKind(string? value, out BaseItemKind kind) => Enum.TryParse(value, true, out kind)
+        && kind is BaseItemKind.Movie or BaseItemKind.Episode or BaseItemKind.MusicVideo;
 
     private Video? FindTitleRecord(BaseItem item, out bool isMultipart)
     {
@@ -393,7 +417,7 @@ public sealed class PermalinkManager : IPermalinkManager
                     break;
                 }
 
-                if (next.GetBaseItemKind() != current.GetBaseItemKind())
+                if (!MediaContentIdentifier.IsKindRefinement(current.GetBaseItemKind().ToString(), next.GetBaseItemKind().ToString()))
                 {
                     throw new PermalinkException(PermalinkErrorKind.Conflict, "version-kind-conflict",
                         "Alternate versions must belong to the same library media kind.", itemId: item.Id);
@@ -401,10 +425,11 @@ public sealed class PermalinkManager : IPermalinkManager
             }
             else if (!current.ExtraType.HasValue && current.OwnerId != Guid.Empty
                 && _library.GetItemById<Video>(current.OwnerId) is Video owner
-                && owner.AdditionalParts.Contains(current.Path, StringComparer.Ordinal))
+                && (owner.AdditionalParts.Contains(current.Path, StringComparer.Ordinal)
+                    || string.Equals(owner.Path, current.Path, StringComparison.Ordinal)))
             {
-                // OwnerId alone also covers trailers and extras. Only an
-                // explicit stacked-part relationship identifies the same title.
+                // OwnerId also covers extras. A stacked part or another
+                // record for this exact file retains the owner's title.
                 next = owner;
                 isMultipart = true;
             }
@@ -428,7 +453,7 @@ public sealed class PermalinkManager : IPermalinkManager
 
     private static bool IdentityChanged(PermalinkItemBinding previous, MediaContentIdentity current)
     {
-        if (previous.Kind is not null && previous.Kind != current.Kind)
+        if (previous.Kind is not null && !MediaContentIdentifier.IsKindRefinement(previous.Kind, current.Kind))
         {
             return true;
         }

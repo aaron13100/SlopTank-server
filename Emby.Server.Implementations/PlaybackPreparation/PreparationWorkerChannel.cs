@@ -130,6 +130,7 @@ internal sealed class PreparationWorkerChannel
     {
         RequireStage(WorkerStage.Preparing);
         RequireEcho(payload);
+        await _writer.RefreshMediaInfoIfRequiredAsync(token).ConfigureAwait(false);
         _claim = await _service.RecheckAsync(_requestId, _claim, token).ConfigureAwait(false);
         _stage = WorkerStage.Classifying;
         return new { request = _claim };

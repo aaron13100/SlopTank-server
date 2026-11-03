@@ -378,7 +378,24 @@ namespace Emby.Server.Implementations.Library
 
             var sources = await GetPlaybackMediaSources(item, null, false, enablePathSubstitution, cancellationToken).ConfigureAwait(false);
 
-            return sources.FirstOrDefault(i => string.Equals(i.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase));
+            var selected = sources.FirstOrDefault(i => string.Equals(i.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase));
+            if (selected is null && item is Video video && Guid.TryParse(mediaSourceId, out var requestedId))
+            {
+                // Source-list deduplication must not invalidate an issued source
+                // ID. Only an explicit version of this same file can use it.
+                var requested = video.GetAllVersions().FirstOrDefault(version => version.Id == requestedId);
+                if (requested is not null && !string.IsNullOrEmpty(requested.Path))
+                {
+                    selected = sources.FirstOrDefault(source => source.Protocol == MediaProtocol.File
+                        && string.Equals(source.Path, requested.Path, StringComparison.Ordinal));
+                    if (selected is not null)
+                    {
+                        selected.Id = mediaSourceId;
+                    }
+                }
+            }
+
+            return selected;
         }
 
         public IReadOnlyList<MediaSourceInfo> GetStaticMediaSources(BaseItem item, bool enablePathSubstitution, User user = null)

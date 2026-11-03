@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-09-03, 2026-09-07, 2026-09-08, 2026-09-09, 2026-09-10, 2026-09-22, 2026-09-27, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-09-03, 2026-09-07, 2026-09-08, 2026-09-09, 2026-09-10, 2026-09-22, 2026-09-27, 2026-10-14, 2026-10-31, 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -195,6 +195,97 @@ internal sealed class PermalinkBindingIndex
                 PermalinkErrorKind.Conflict,
                 "anchor-path-missing",
                 $"Cannot advance current path for unknown anchor '{anchorToken}'.");
+        }
+    }
+
+    /// <summary>
+    /// Advances the current physical carrier location after durable publication.
+    /// </summary>
+    /// <param name="expected">The identity and location observed before publication.</param>
+    /// <param name="location">The elected immutable identity and current location.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    public async Task UpdateCurrentLocationAsync(
+        PermalinkGenesisReservation expected,
+        PermalinkGenesisReservation location,
+        CancellationToken cancellationToken)
+    {
+        if (expected.AnchorToken != location.AnchorToken || expected.CapsuleId != location.CapsuleId
+            || expected.BindingId != location.BindingId)
+        {
+            throw new PermalinkException(PermalinkErrorKind.Conflict, "anchor-location-mismatch",
+                "A location update cannot change the physical binding identity.");
+        }
+
+        await using var connection = await _authority.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        // The change guard keeps an unchanged ensure from re-committing the
+        // identical location (a WAL append + FULL fsync on the contended
+        // authority volume, per the BindAsync measurement note). Zero rows
+        // then means either "already current" or "unknown/mismatched identity";
+        // the SELECT below accepts the first without paying a write and fails
+        // closed for the second.
+        command.CommandText = """
+            UPDATE AnchorTokenCapsules
+               SET current_path = $path,
+                   root_path = $root,
+                   capsule_path = $capsule
+             WHERE anchor_token = $token
+               AND capsule_id = $capsule_id
+               AND binding_id = $binding_id
+               AND current_path = $expected_path
+               AND root_path = $expected_root
+               AND capsule_path = $expected_capsule
+               AND (current_path <> $path
+                 OR root_path <> $root
+                 OR capsule_path <> $capsule)
+            """;
+        command.Parameters.AddWithValue("$path", location.CurrentPath);
+        command.Parameters.AddWithValue("$root", location.RootPath);
+        command.Parameters.AddWithValue("$capsule", location.CapsulePath);
+        command.Parameters.AddWithValue("$token", location.AnchorToken);
+        command.Parameters.AddWithValue("$capsule_id", location.CapsuleId.ToString("D"));
+        command.Parameters.AddWithValue("$binding_id", location.BindingId.ToString("D"));
+        command.Parameters.AddWithValue("$expected_path", expected.CurrentPath);
+        command.Parameters.AddWithValue("$expected_root", expected.RootPath);
+        command.Parameters.AddWithValue("$expected_capsule", expected.CapsulePath);
+        var updated = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        if (updated == 1)
+        {
+            return;
+        }
+
+        if (updated > 1)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "anchor-location-mismatch",
+                $"Cannot advance location for mismatched anchor '{location.AnchorToken}'.");
+        }
+
+        command.CommandText = """
+            SELECT 1
+              FROM AnchorTokenCapsules
+             WHERE anchor_token = $token
+               AND capsule_id = $capsule_id
+               AND binding_id = $binding_id
+               AND current_path = $path AND root_path = $root AND capsule_path = $capsule
+             LIMIT 1
+            """;
+        command.Parameters.Clear();
+        command.Parameters.AddWithValue("$token", location.AnchorToken);
+        command.Parameters.AddWithValue("$capsule_id", location.CapsuleId.ToString("D"));
+        command.Parameters.AddWithValue("$binding_id", location.BindingId.ToString("D"));
+        command.Parameters.AddWithValue("$path", location.CurrentPath);
+        command.Parameters.AddWithValue("$root", location.RootPath);
+        command.Parameters.AddWithValue("$capsule", location.CapsulePath);
+        if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "anchor-location-mismatch",
+                $"The physical location changed before anchor '{location.AnchorToken}' could be updated; resolve the current location before retrying.");
         }
     }
 

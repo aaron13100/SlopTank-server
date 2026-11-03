@@ -55,7 +55,12 @@ public class ItemPersistenceService : IItemPersistenceService
     }
 
     /// <inheritdoc />
-    public async Task RefineVideoKindAsync(Video source, Type targetType, string currentPath, CancellationToken cancellationToken)
+    public async Task RefineVideoKindAsync(
+        Video source,
+        Type targetType,
+        string currentPath,
+        CancellationToken cancellationToken,
+        Guid? primaryItemId = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         var itemId = source.Id;
@@ -73,6 +78,47 @@ public class ItemPersistenceService : IItemPersistenceService
         {
             throw new PermalinkException(PermalinkErrorKind.Conflict, "media-classification-changed",
                 "The media record's filename or classification changed before it could be refined.", itemId: itemId);
+        }
+
+        if (primaryItemId.HasValue)
+        {
+            if (primaryItemId.Value.Equals(itemId))
+            {
+                throw new PermalinkException(PermalinkErrorKind.Conflict, "media-primary-version-mismatch",
+                    "A refined media record cannot be its own primary version.", itemId: itemId);
+            }
+
+            var primary = await db.BaseItems.SingleOrDefaultAsync(
+                value => value.Id == primaryItemId.Value,
+                cancellationToken).ConfigureAwait(false);
+            if (primary is null || primary.Path is null
+                || primary.Type != targetType.FullName
+                || !string.Equals(_appHost.ExpandVirtualPath(primary.Path), currentPath, StringComparison.Ordinal))
+            {
+                throw new PermalinkException(PermalinkErrorKind.Conflict, "media-primary-version-mismatch",
+                    "The selected primary version no longer has the expected media kind and filename.", itemId: itemId);
+            }
+
+            item.PrimaryVersionId = primaryItemId.Value;
+            item.OwnerId = primaryItemId.Value;
+
+            var existingLink = await db.LinkedChildren.FirstOrDefaultAsync(
+                value => value.ParentId == primaryItemId.Value && value.ChildId == itemId,
+                cancellationToken).ConfigureAwait(false);
+            if (existingLink is null)
+            {
+                db.LinkedChildren.Add(new LinkedChildEntity
+                {
+                    ParentId = primaryItemId.Value,
+                    ChildId = itemId,
+                    ChildType = DbLinkedChildType.LinkedAlternateVersion,
+                    SortOrder = null
+                });
+            }
+            else
+            {
+                existingLink.ChildType = DbLinkedChildType.LinkedAlternateVersion;
+            }
         }
 
         var kind = targetType.Name.ToLowerInvariant();

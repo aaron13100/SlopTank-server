@@ -209,9 +209,14 @@ internal sealed class PermalinkStore : IPermalinkStore
                 cancellationToken).ConfigureAwait(false);
         }
 
-        await _bindings.UpdateCurrentPathAsync(
-            anchorToken,
-            request.Path,
+        await _bindings.UpdateCurrentLocationAsync(
+            reservation,
+            reservation with
+            {
+                RootPath = root,
+                CapsulePath = capsulePath,
+                CurrentPath = request.Path
+            },
             cancellationToken).ConfigureAwait(false);
         tBind = stepWatch.ElapsedMilliseconds;
         _logger.LogInformation(

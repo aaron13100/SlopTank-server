@@ -17,8 +17,14 @@ public interface IItemPersistenceService
     /// <param name="targetType">Movie, Episode or MusicVideo.</param>
     /// <param name="currentPath">The current filename, including a completed container conversion.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <param name="primaryItemId">The existing primary version, when this record is being linked to one.</param>
     /// <returns>The completion of the metadata update.</returns>
-    Task RefineVideoKindAsync(Video source, Type targetType, string currentPath, CancellationToken cancellationToken);
+    Task RefineVideoKindAsync(
+        Video source,
+        Type targetType,
+        string currentPath,
+        CancellationToken cancellationToken,
+        Guid? primaryItemId = null);
 
     /// <summary>
     /// Deletes items by their IDs.

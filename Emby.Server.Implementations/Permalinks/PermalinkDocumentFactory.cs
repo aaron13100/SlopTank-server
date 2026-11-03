@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-10-03, 2026-10-14, 2026-10-31, 2026-11-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-10-03, 2026-10-14, 2026-10-31, 2026-11-01, 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -203,6 +203,45 @@ internal sealed class PermalinkDocumentFactory
             snapshot.ContentHead.BindingInstanceId,
             snapshot.ContentHead.PathAssignment,
             UtcNow());
+    }
+
+    /// <summary>
+    /// Constructs the controlled content event that advances a binding to a prepared path.
+    /// </summary>
+    /// <param name="snapshot">The validated capsule snapshot.</param>
+    /// <param name="operation">The immutable path operation.</param>
+    /// <param name="bundle">The immutable path bundle.</param>
+    /// <param name="currentPath">The path published by the operation.</param>
+    /// <returns>The resulting event.</returns>
+    public PermalinkEventDocument CreateControlledPathSuccessor(
+        PermalinkCapsuleSnapshot snapshot,
+        PermalinkOperationDocument operation,
+        PermalinkMutationBundle bundle,
+        string currentPath)
+    {
+        var currentHead = snapshot.ContentHead;
+        var previousPathEventId = currentHead.PathAssignment.EventId;
+        var eventId = NewGuid();
+        var targetRoot = bundle.DestinationRootPath ?? bundle.ContentRootPath;
+        return new PermalinkEventDocument(
+            eventId,
+            operation.OperationId,
+            [currentHead.EventId],
+            "controlled-mutation",
+            [],
+            currentHead.EventId,
+            previousPathEventId,
+            currentHead.AcceptedProviderClaim,
+            currentHead.ActiveExternalAliases,
+            currentHead.ContentRoot,
+            currentHead.Leaves,
+            currentHead.BindingInstanceId,
+            new PermalinkPathAssignment(
+                eventId,
+                previousPathEventId,
+                currentPath,
+                targetRoot),
+            operation.CreatedAt);
     }
 
     /// <summary>

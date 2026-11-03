@@ -86,6 +86,39 @@ public sealed class MediaPermalinkRepository
             rows.Where(row => !row.DeletedAtUtc.HasValue).OrderBy(row => row.IsPublic ? row.Ordinal : int.MaxValue).Select(row => row.Alias).ToArray());
     }
 
+    /// <summary>Proves an unchanged unidentified TV coordinate across an established parent merge.</summary>
+    /// <param name="contentId">The item's existing logical content ID.</param>
+    /// <param name="kind">The current item's logical kind.</param>
+    /// <param name="coordinateKey">The coordinate computed from its current parent.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>Whether the active binding can retain its logical content ID.</returns>
+    internal async Task<bool> CanRetainUnidentifiedIdentityAsync(
+        Guid? contentId,
+        string kind,
+        string? coordinateKey,
+        CancellationToken cancellationToken)
+    {
+        if (!contentId.HasValue || contentId.Value == Guid.Empty || coordinateKey is null)
+        {
+            return false;
+        }
+
+        await using var context = await _dbContextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var rows = await context.MediaPermalinkAliases
+            .Where(alias => alias.ContentId == contentId.Value)
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return await IsSafeUnidentifiedBindingAsync(
+            context,
+            contentId.Value,
+            kind,
+            coordinateKey,
+            rows,
+            requireChangedCoordinate: true,
+            requiredPublicAliases: null,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     internal async Task<IReadOnlyList<MediaPermalinkBinding>> ReadByAliasesAsync(
         IReadOnlyCollection<string> aliases,
         CancellationToken cancellationToken)
@@ -213,12 +246,18 @@ public sealed class MediaPermalinkRepository
         {
             var inherited = await context.MediaPermalinkAliases.Where(alias => alias.ContentId == request.InheritedContentId.Value)
                 .ToArrayAsync(cancellationToken).ConfigureAwait(false);
-            ValidateStoredRows(request.InheritedContentId.Value, inherited);
-            if (inherited.Length == 0 || inherited.Any(alias => !MediaContentIdentifier.IsKindRefinement(alias.Kind, request.Kind) || !alias.IsPublic
-                || !alias.Alias.StartsWith("sk-", StringComparison.Ordinal) || !request.PublicAliases.Contains(alias.Alias, StringComparer.Ordinal)))
+            if (!await IsSafeUnidentifiedBindingAsync(
+                    context,
+                    request.InheritedContentId.Value,
+                    request.Kind,
+                    request.CoordinateKey,
+                    inherited,
+                    requireChangedCoordinate: false,
+                    requiredPublicAliases: request.PublicAliases,
+                    cancellationToken).ConfigureAwait(false))
             {
                 throw new PermalinkException(PermalinkErrorKind.Conflict, "metadata-merge-conflict",
-                    "Only an unidentified title's existing opaque aliases may follow its newly identified metadata.", itemId: request.ItemId);
+                    "Only an unidentified title with unchanged or parent-equivalent TV coordinates may follow its newly identified metadata.", itemId: request.ItemId);
             }
         }
 
@@ -388,6 +427,128 @@ public sealed class MediaPermalinkRepository
         {
             throw new PermalinkException(PermalinkErrorKind.Corrupt, "stored-alias-invalid", $"Stored permalink aliases for content '{contentId}' have unsupported or inconsistent metadata.");
         }
+    }
+
+    private static async Task<bool> IsSafeUnidentifiedBindingAsync(
+        JellyfinDbContext context,
+        Guid contentId,
+        string kind,
+        string? coordinateKey,
+        IReadOnlyCollection<MediaPermalinkAlias> rows,
+        bool requireChangedCoordinate,
+        IReadOnlyList<string>? requiredPublicAliases,
+        CancellationToken cancellationToken)
+    {
+        ValidateStoredRows(contentId, rows);
+        var active = rows.Where(row => !row.DeletedAtUtc.HasValue).ToArray();
+        var publicRows = active.Where(row => row.IsPublic).ToArray();
+        if (active.Length == 0
+            || publicRows.Length == 0
+            || active.Any(row => !MediaContentIdentifier.IsKindRefinement(row.Kind, kind))
+            || publicRows.Any(row => !row.Alias.StartsWith("sk-", StringComparison.Ordinal))
+            || (requiredPublicAliases is not null
+                && publicRows.Any(row => !requiredPublicAliases.Contains(row.Alias, StringComparer.Ordinal))))
+        {
+            return false;
+        }
+
+        var changedCoordinateFound = false;
+        foreach (var row in active.Where(row => !row.IsPublic))
+        {
+            if (string.Equals(row.Alias, coordinateKey, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (coordinateKey is null
+                || !MediaContentIdentifier.TryGetChangedCoordinateParents(
+                    row.Alias,
+                    coordinateKey,
+                    out var previousParentId,
+                    out var currentParentId)
+                || !await IsSeriesIdentityMergeAsync(
+                    context,
+                    previousParentId,
+                    currentParentId,
+                    cancellationToken).ConfigureAwait(false))
+            {
+                return false;
+            }
+
+            changedCoordinateFound = true;
+        }
+
+        return !requireChangedCoordinate || changedCoordinateFound;
+    }
+
+    private static async Task<bool> IsSeriesIdentityMergeAsync(
+        JellyfinDbContext context,
+        Guid previousParentId,
+        Guid currentParentId,
+        CancellationToken cancellationToken)
+    {
+        if (previousParentId == Guid.Empty || currentParentId == Guid.Empty || previousParentId == currentParentId)
+        {
+            return false;
+        }
+
+        var previousAlias = MediaContentIdentifier.OpaqueAlias(previousParentId);
+        var aliasRows = await context.MediaPermalinkAliases
+            .Where(alias => alias.Alias == previousAlias && !alias.DeletedAtUtc.HasValue)
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (aliasRows.Length == 0 || aliasRows.Any(alias => !alias.IsPublic || alias.Kind != "series"))
+        {
+            return false;
+        }
+
+        var aliasedContentIds = aliasRows.Select(alias => alias.ContentId).Distinct().ToArray();
+        var aliasedRows = await context.MediaPermalinkAliases
+            .Where(alias => aliasedContentIds.Contains(alias.ContentId))
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var group in aliasedRows.GroupBy(alias => alias.ContentId))
+        {
+            ValidateStoredRows(group.Key, group.ToArray());
+            if (group.Any(alias => !alias.DeletedAtUtc.HasValue && alias.Kind != "series"))
+            {
+                return false;
+            }
+        }
+
+        // Old alias rows remain active for URL compatibility after a merge.
+        // Only current item associations establish which series CID now owns it.
+        var itemBackedRows = await context.BaseItems
+            .Where(item => item.PermalinkContentId.HasValue && aliasedContentIds.Contains(item.PermalinkContentId.Value))
+            .Select(item => new { ContentId = item.PermalinkContentId!.Value, item.Type })
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (itemBackedRows.Length == 0 || itemBackedRows.Any(item => item.Type != typeof(Series).FullName))
+        {
+            return false;
+        }
+
+        var itemBackedContentIds = itemBackedRows.Select(item => item.ContentId).Distinct().ToArray();
+        if (itemBackedContentIds.Length != 1 || itemBackedContentIds[0] != currentParentId)
+        {
+            return false;
+        }
+
+        var currentRows = await context.MediaPermalinkAliases
+            .Where(alias => alias.ContentId == currentParentId)
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        ValidateStoredRows(currentParentId, currentRows);
+        var activeCurrentRows = currentRows.Where(alias => !alias.DeletedAtUtc.HasValue).ToArray();
+        if (activeCurrentRows.Length == 0
+            || activeCurrentRows.Any(alias => alias.Kind != "series")
+            || !activeCurrentRows.Any(alias => alias.IsPublic
+                && alias.Alias == MediaContentIdentifier.OpaqueAlias(currentParentId)))
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private static bool MatchesKind(Type? itemType, string kind)

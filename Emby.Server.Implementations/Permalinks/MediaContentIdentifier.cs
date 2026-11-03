@@ -73,6 +73,28 @@ public sealed class MediaContentIdentifier
                 || string.Equals(current, "episode", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(current, "musicvideo", StringComparison.OrdinalIgnoreCase)));
 
+    /// <summary>Recognizes an unchanged TV coordinate under a changed parent content ID.</summary>
+    /// <param name="previous">The stored private coordinate.</param>
+    /// <param name="current">The coordinate computed from current metadata.</param>
+    /// <param name="previousParentId">The parent ID embedded in the stored coordinate.</param>
+    /// <param name="currentParentId">The parent ID embedded in the current coordinate.</param>
+    /// <returns>Whether only the nonempty parent IDs differ and the encoded coordinate suffix is identical.</returns>
+    internal static bool TryGetChangedCoordinateParents(
+        string? previous,
+        string? current,
+        out Guid previousParentId,
+        out Guid currentParentId)
+    {
+        previousParentId = Guid.Empty;
+        currentParentId = Guid.Empty;
+        return TryParseCoordinate(previous, out previousParentId, out var previousSuffix)
+            && TryParseCoordinate(current, out currentParentId, out var currentSuffix)
+            && previousParentId != Guid.Empty
+            && currentParentId != Guid.Empty
+            && previousParentId != currentParentId
+            && string.Equals(previousSuffix, currentSuffix, StringComparison.Ordinal);
+    }
+
     /// <summary>Identifies superseded metadata claims while preserving opaque logical IDs.</summary>
     internal static bool IsReplacedClaim(string alias, MediaContentIdentity metadata)
     {
@@ -166,6 +188,30 @@ public sealed class MediaContentIdentifier
                 $"{prefix}:episode:{Number(episode.ParentIndexNumber!.Value)}:{Number(episode.IndexNumber!.Value)}:{Number(episode.IndexNumberEnd ?? episode.IndexNumber.Value)}",
             _ => null
         };
+    }
+
+    private static bool TryParseCoordinate(string? value, out Guid parentContentId, out string suffix)
+    {
+        const string prefix = "metadata:v1:";
+        parentContentId = Guid.Empty;
+        suffix = string.Empty;
+        if (value is null || !value.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var parentEnd = value.IndexOf(':', prefix.Length);
+        if (parentEnd != prefix.Length + 32
+            || !Guid.TryParseExact(value[prefix.Length..parentEnd], "N", out parentContentId)
+            || parentContentId == Guid.Empty)
+        {
+            return false;
+        }
+
+        suffix = value[(parentEnd + 1)..];
+        // The current coordinate comes from CoordinateKey above. Exact suffix
+        // equality also retains its order, media kind and episode numbers.
+        return suffix.Length > 0;
     }
 
     private static string Number(int value) => value.ToString(CultureInfo.InvariantCulture);

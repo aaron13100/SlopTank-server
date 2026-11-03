@@ -61,14 +61,16 @@ public sealed class PermalinkRewriteController : BaseJellyfinApiController
     {
         if (string.IsNullOrWhiteSpace(path))
         {
-            return Problem(detail: "A media path is required.", statusCode: StatusCodes.Status400BadRequest,
+            return Problem(
+                detail: "A media path is required.",
+                statusCode: StatusCodes.Status400BadRequest,
                 title: "media-path-required");
         }
 
         // This administrative metadata query deliberately includes unready
         // records. Ordinary viewing APIs retain their visibility/readiness rules.
         var records = _libraryManager.GetMediaFileRecords(path).Select(item => new MediaFileRecord(item.Id, item.Path)).ToArray();
-        return Ok(records);
+        return Ok<IReadOnlyList<MediaFileRecord>>(records);
     }
 
     /// <summary>Freezes the current verified state before mutation.</summary>

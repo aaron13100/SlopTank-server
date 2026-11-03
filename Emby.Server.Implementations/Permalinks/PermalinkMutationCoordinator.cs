@@ -214,7 +214,8 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         {
             // Physical replacement state belongs to this item, independently
             // of its public logical permalink or current provider assignment.
-            binding = ResolveVanishedContentBinding(item,
+            binding = ResolveVanishedContentBinding(
+                item,
                 await _bindings.FindItemBindingsAsync(item.Id, cancellationToken).ConfigureAwait(false));
             oldContentRoot = item is Series or Season or BoxSet
                 ? binding.ContentRoot

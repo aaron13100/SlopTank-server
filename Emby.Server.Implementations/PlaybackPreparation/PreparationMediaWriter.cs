@@ -209,7 +209,8 @@ internal sealed class PreparationMediaWriter
 
         async Task RunAsync()
         {
-            var prepared = await _mutations.PrepareAsync(item,
+            var prepared = await _mutations.PrepareAsync(
+                item,
                 new PermalinkMutationPrepareRequest(operationId, item.Id, kind, destination, null, item.Path), token).ConfigureAwait(false);
             if (prepared.State != "prepared")
             {

@@ -1,4 +1,4 @@
-<!-- SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09, 2026-10-14, 2026-10-31. -->
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09, 2026-10-14, 2026-10-31, 2026-11-04. -->
 # SlopTank server distribution source and licence status
 
 Every externally delivered server unit must be a completed delivery directory
@@ -14,27 +14,34 @@ commit. Archives and their URLs are retained for the period in the artifact
 manifest. Every delivery and rollback directory keeps its own manifest and
 points to its own exact source; a nearby branch is not a substitute.
 
-## Current licence status: external binary distribution blocked
+## Candidate licence election and distribution status
 
-The inherited server history contains conflicting version evidence: the root
-file is the GPLv2 text, historical program notices changed over time, and some
-upstream package metadata says GPL-3.0-only. SlopTank does not claim authority
-to resolve that conflict by relicensing upstream contributors. For
-independently copyrightable post-fork changes owned by the SlopTank maintainer,
-`LICENSE-ELECTION.md` elects GPL version 2 or any later FSF-published version.
+The current server candidate exercises GNU GPL version 3 under SlopTank's
+interpretation of the existing program grant. That interpretation reads the
+current affirmative versionless assembly grants and separately scoped v3
+package notices in the context of their history and GPLv2 section 9. It is
+not a new whole-history licence, a contributor copyright assignment, or a
+claim that dependencies create permission to relicense upstream code.
 
-Until the inherited-grant and linked-runtime compatibility work establishes a
-supported conveyance path, SlopTank server binaries are not externally
-distributed. Internal artifacts use this exact, deliberately blocking policy:
+The historical version-2 program notice and intervening contributor context
+remain adverse evidence. SlopTank does not claim universal contributor
+consent. Any specifically identified restrictive grant tied to retained
+material must be traced and resolved. For independently copyrightable
+post-fork changes owned by the SlopTank maintainer, `LICENSE-ELECTION.md`
+continues to elect GPL version 2 or any later FSF-published version. The
+unmodified root `LICENSE` text and component-specific grants are retained.
 
-`inherited-server=version-unresolved;owner-increments=GPL-2.0-or-later;external-binary-distribution=NO-GO`
+This is a candidate binary election, not clearance of an artifact. Until the
+exact dependency, source, notice, installer and qualification requirements
+are met, server binaries are not externally
+distributed. The enforced manifest policy remains deliberately blocking:
 
-Neither an unqualified GPL-2.0-or-later label nor a GPL-3.0-only label is an
-acceptable whole-repository claim. Existing project/package expressions are
-component metadata; they do not prove authority over every historical
-contribution. This is a conservative product gate based on observed primary
-source notices and licence texts, not a warranty about every rightsholder's
-grant.
+`inherited-server=current-grant-interpreted-for-GPL-3.0-candidate;owner-increments=GPL-2.0-or-later;candidate-binary-election=GPL-3.0-only;external-binary-distribution=NO-GO`
+
+Neither a blanket GPL-3.0-only repository label nor the maintainer's own
+or-later election changes inherited copyright permissions. The separate SVG
+converter has its own MIT source licence and dependency notices; its
+standard file interface does not by itself clear the final distribution.
 
 ## Reproducing the server artifact
 

@@ -1,4 +1,4 @@
-<!-- SlopTank modification notice: added or changed by SlopTank on 2026-08-01, 2026-09-08, 2026-09-09, 2026-10-14, 2026-10-31. -->
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-08-01, 2026-09-08, 2026-09-09, 2026-10-14, 2026-10-31, 2026-11-04. -->
 # License version election for SlopTank's own contributions
 
 This file is a license **election**, not a license **text**. The license
@@ -85,9 +85,10 @@ MediaBrowser code this repository was forked from. That code was written by
 its own upstream copyright holders, this repository's maintainer has no
 authority to elect a license version on their behalf, and this file makes
 no attempt to do so. Whatever version(s) that inherited code is actually
-under is a separate, unresolved question, tracked as attorney bullet A1 in
-`deliverables/gpl-license-boundary-audit-t_260730_175528_423.md` in the
-parent `mediaserver` working copy, and left for that review.
+under is a separate question from this maintainer election. The current
+supported candidate interpretation, contrary historical evidence and
+remaining artifact conditions are stated in `DISTRIBUTION-SOURCE.md`.
+That interpretation does not extend this document's ownership scope.
 
 A large share of the commits covered by this election are edits to files
 that predate the fork point and therefore still contain inherited upstream

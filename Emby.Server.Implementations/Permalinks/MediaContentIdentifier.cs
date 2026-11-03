@@ -68,6 +68,9 @@ public sealed class MediaContentIdentifier
     internal Guid CreateContentId() => Guid.NewGuid();
 
     /// <summary>Recognizes a concrete classification of an existing generic video title.</summary>
+    /// <param name="previous">The stored content classification.</param>
+    /// <param name="current">The classification from the current library record.</param>
+    /// <returns>Whether the classification is unchanged or refines a generic video to a supported content kind.</returns>
     internal static bool IsKindRefinement(string? previous, string current) => string.Equals(previous, current, StringComparison.OrdinalIgnoreCase)
         || (string.Equals(previous, "video", StringComparison.OrdinalIgnoreCase)
             && (string.Equals(current, "movie", StringComparison.OrdinalIgnoreCase)

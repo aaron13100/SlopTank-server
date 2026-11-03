@@ -99,7 +99,8 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
             // Metadata already has an authenticated library/database workflow.
             // Saving it does not change media bytes and must not hash a file,
             // establish a native anchor, or prepare a physical rewrite.
-            foreach (var item in items)
+            var metadataItems = ExpandMutationItems(items, request);
+            foreach (var item in metadataItems)
             {
                 RejectProtectedKindChange(item, items[0], request);
                 if ((await _legacy.ReadItemAliasesAsync(item.Id, cancellationToken).ConfigureAwait(false)).Count > 0)
@@ -114,7 +115,7 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
             // file operations retain their own normal guarded entry point.
             await mutation(new AmbientToken([]), cancellationToken).ConfigureAwait(false);
             await _playbackPreparationService.InvalidateReadinessIfChangedAsync(
-                items.Select(value => value.Id).ToArray(), cancellationToken).ConfigureAwait(false);
+                metadataItems.Select(value => value.Id).ToArray(), cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -440,7 +441,7 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         return kind is "logical" or "identify" or "manual-metadata" or "automatic-refresh" or "nfo-refresh";
     }
 
-    private static bool IsMetadataOnlyMutation(string kind) => IsRestorableIdentityMutation(kind) || kind == "scan-replacement";
+    private static bool IsMetadataOnlyMutation(string kind) => IsRestorableIdentityMutation(kind) || kind is "scan-replacement" or "grouping";
 
     private static PermalinkException Conflict(string code, string message)
     {

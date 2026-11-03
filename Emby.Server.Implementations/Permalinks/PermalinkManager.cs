@@ -292,6 +292,17 @@ public sealed class PermalinkManager : IPermalinkManager
             var retiredAliases = (target?.Keys ?? current.Keys).Where(alias => MediaContentIdentifier.IsReplacedClaim(alias, metadata)).ToArray();
             var legacyAliases = current.ContentId.HasValue ? Array.Empty<string>()
                 : await ReadInitialLegacyAliasesAsync(item.Id, metadata, token).ConfigureAwait(false);
+            if (primaryBinding is not null && current.ContentId.HasValue && current.ContentId != contentId
+                && current.Kind == metadata.Kind)
+            {
+                // Explicit version grouping is an existing library relationship.
+                // Carry its previously issued opaque URLs in the same database
+                // update, while keeping different provider claims separate.
+                // If other files still use the source title, the old URL retains
+                // both candidates instead of silently choosing one.
+                legacyAliases = legacyAliases.Concat(current.PublicAliases.Where(alias => alias.StartsWith("sk-", StringComparison.Ordinal)))
+                    .Distinct(StringComparer.Ordinal).ToArray();
+            }
             if (current.ContentId == contentId
                 && retiredAliases.Length == 0
                 && aliases.All(alias => current.PublicAliases.Contains(alias, StringComparer.Ordinal))

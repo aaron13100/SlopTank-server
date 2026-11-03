@@ -84,6 +84,7 @@ internal sealed class ProtectedMediaState
             IPermalinkPathLease? lease = null;
             try
             {
+                var physicalKind = item.GetType().Name;
                 if (IsContentItem(item))
                 {
                     // Anchor creation changes macOS ctime. Establish it before evidence so the
@@ -95,8 +96,11 @@ internal sealed class ProtectedMediaState
                     // the store validates and creates it.
                     lease = await _store.BeginContentIdentityAsync(
                         path,
-                        item.GetType().Name,
+                        physicalKind,
                         mutationCancellationToken).ConfigureAwait(false);
+                    physicalKind = await _store.GetReservedPhysicalKindAsync(
+                        lease,
+                        mutationCancellationToken).ConfigureAwait(false) ?? physicalKind;
                 }
 
                 var evidence = item switch
@@ -113,7 +117,10 @@ internal sealed class ProtectedMediaState
                         boxSet,
                         ancestry,
                         mutationCancellationToken).ConfigureAwait(false),
-                    _ => await _evidence.ComputeContentItemAsync(item, mutationCancellationToken)
+                    _ => await _evidence.ComputeContentItemAsync(
+                        item,
+                        physicalKind,
+                        mutationCancellationToken)
                         .ConfigureAwait(false)
                 };
                 if (evidence.Leaves.Count == 0)
@@ -126,12 +133,12 @@ internal sealed class ProtectedMediaState
 
                 lease ??= await _store.BeginContentIdentityAsync(
                     path,
-                    item.GetType().Name,
+                    physicalKind,
                     mutationCancellationToken).ConfigureAwait(false);
                 return await _store.EnsureAsync(
                     new PermalinkStoreRequest(
                         item.Id,
-                        item.GetType().Name,
+                        physicalKind,
                         path,
                         evidence.ContentRoot,
                         evidence.Leaves,

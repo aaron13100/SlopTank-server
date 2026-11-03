@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31, 2026-11-03.
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -20,6 +20,14 @@ public interface IPermalinkStore
     Task<IPermalinkPathLease> BeginContentIdentityAsync(
         string path,
         string itemKind,
+        CancellationToken cancellationToken);
+
+    /// <summary>Returns the immutable physical kind already bound to this leased path, if any.</summary>
+    /// <param name="lease">The active lease for the path.</param>
+    /// <param name="cancellationToken">The operation cancellation token.</param>
+    /// <returns>The reserved physical kind, or <see langword="null"/> before the first reservation.</returns>
+    Task<string?> GetReservedPhysicalKindAsync(
+        IPermalinkPathLease lease,
         CancellationToken cancellationToken);
 
     /// <summary>Ensures one verified fallback alias for the supplied snapshot.</summary>

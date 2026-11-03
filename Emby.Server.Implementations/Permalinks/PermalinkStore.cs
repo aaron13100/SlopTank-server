@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31, 2026-11-03.
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -81,6 +81,18 @@ internal sealed class PermalinkStore : IPermalinkStore
         var root = ResolveRoot(path);
         return await _leases.BeginAsync(root, path, IsVirtualSeason(path, itemKind), cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<string?> GetReservedPhysicalKindAsync(
+        IPermalinkPathLease lease,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        var reservation = await _authority.FindByAnchorAsync(
+            lease.AnchorToken,
+            cancellationToken).ConfigureAwait(false);
+        return reservation?.ItemKind;
     }
 
     /// <inheritdoc />
@@ -224,7 +236,10 @@ internal sealed class PermalinkStore : IPermalinkStore
         return new PermalinkStoredState(
             reservation.CapsuleId,
             snapshot.ContentHead.ContentRoot,
-            aliases);
+            aliases)
+        {
+            PhysicalKind = reservation.ItemKind
+        };
     }
 
     private async Task<PermalinkGenesisReservation> ReserveGenesisAsync(

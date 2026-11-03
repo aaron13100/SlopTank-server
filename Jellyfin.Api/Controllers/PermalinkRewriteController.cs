@@ -67,14 +67,7 @@ public sealed class PermalinkRewriteController : BaseJellyfinApiController
 
         // This administrative metadata query deliberately includes unready
         // records. Ordinary viewing APIs retain their visibility/readiness rules.
-        var records = _libraryManager.GetItemList(new InternalItemsQuery
-        {
-            Path = path,
-            Recursive = true,
-            IncludeOwnedItems = true,
-            GroupByPresentationUniqueKey = false,
-            EnableTotalRecordCount = false
-        }).OfType<Video>().Select(item => new MediaFileRecord(item.Id, item.Path)).ToArray();
+        var records = _libraryManager.GetMediaFileRecords(path).Select(item => new MediaFileRecord(item.Id, item.Path)).ToArray();
         return Ok(records);
     }
 

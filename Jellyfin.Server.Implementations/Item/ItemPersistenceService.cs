@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -12,6 +12,9 @@ using Jellyfin.Extensions;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
+using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Playlists;
 using Microsoft.EntityFrameworkCore;
@@ -30,6 +33,7 @@ public class ItemPersistenceService : IItemPersistenceService
     private readonly IDbContextFactory<JellyfinDbContext> _dbProvider;
     private readonly IServerApplicationHost _appHost;
     private readonly ILogger<ItemPersistenceService> _logger;
+    private readonly TimeProvider _clock;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="ItemPersistenceService"/> class.
@@ -37,14 +41,62 @@ public class ItemPersistenceService : IItemPersistenceService
     /// <param name="dbProvider">The database context factory.</param>
     /// <param name="appHost">The application host.</param>
     /// <param name="logger">The logger.</param>
+    /// <param name="clock">The clock for metadata updates.</param>
     public ItemPersistenceService(
         IDbContextFactory<JellyfinDbContext> dbProvider,
         IServerApplicationHost appHost,
-        ILogger<ItemPersistenceService> logger)
+        ILogger<ItemPersistenceService> logger,
+        TimeProvider? clock = null)
     {
         _dbProvider = dbProvider;
         _appHost = appHost;
         _logger = logger;
+        _clock = clock ?? TimeProvider.System;
+    }
+
+    /// <inheritdoc />
+    public async Task RefineVideoKindAsync(Video source, Type targetType, string currentPath, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        var itemId = source.Id;
+        var expectedPath = source.Path;
+        if (targetType != typeof(Movie) && targetType != typeof(Episode) && targetType != typeof(MusicVideo))
+        {
+            throw new ArgumentException("A generic video can only be refined to Movie, Episode or MusicVideo.", nameof(targetType));
+        }
+
+        await using var db = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        var item = await db.BaseItems.SingleOrDefaultAsync(value => value.Id == itemId, cancellationToken).ConfigureAwait(false);
+        if (item is null || item.Path is null || !string.Equals(_appHost.ExpandVirtualPath(item.Path), expectedPath, StringComparison.Ordinal)
+            || (item.Type != typeof(Video).FullName && item.Type != targetType.FullName))
+        {
+            throw new PermalinkException(PermalinkErrorKind.Conflict, "media-classification-changed",
+                "The media record's filename or classification changed before it could be refined.", itemId: itemId);
+        }
+
+        var kind = targetType.Name.ToLowerInvariant();
+        if (item.PermalinkContentId.HasValue)
+        {
+            var aliases = await db.MediaPermalinkAliases.Where(value => value.ContentId == item.PermalinkContentId.Value)
+                .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            // A generic video is an incomplete classification of the same
+            // identified title. A known, different kind remains a separate
+            // identity and is left to normal metadata identification.
+            if (aliases.All(value => value.Kind == "video" || value.Kind == kind))
+            {
+                foreach (var alias in aliases.Where(value => value.Kind == "video"))
+                {
+                    alias.Kind = kind;
+                    alias.UpdatedAtUtc = _clock.GetUtcNow().UtcDateTime;
+                }
+            }
+        }
+
+        item.Type = targetType.FullName!;
+        item.Path = _appHost.ReverseVirtualPath(currentPath);
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />

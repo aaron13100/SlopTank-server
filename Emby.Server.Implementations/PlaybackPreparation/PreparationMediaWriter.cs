@@ -5,11 +5,13 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Emby.Server.Implementations.Permalinks;
+using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.PlaybackPreparation;
+using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.PlaybackPreparation;
 
 namespace Emby.Server.Implementations.PlaybackPreparation;
@@ -26,6 +28,7 @@ internal sealed class PreparationMediaWriter
     private readonly string _workspace;
     private string _path;
     private string _identity;
+    private bool _mediaInfoRefreshRequired;
 
     public PreparationMediaWriter(IPlaybackPreparationService preparation, IPermalinkMutationCoordinator mutations,
         ILibraryManager library, IServerApplicationHost appHost, Func<bool> isIdle,
@@ -78,6 +81,7 @@ internal sealed class PreparationMediaWriter
         }
 
         await MutateAsync(item, "media", null, replacement.StagedPath, claim, token).ConfigureAwait(false);
+        _mediaInfoRefreshRequired = true;
         _identity = ReadInstalledIdentity();
         if (destination is not null && !string.Equals(destination, _path, StringComparison.Ordinal))
         {
@@ -87,6 +91,44 @@ internal sealed class PreparationMediaWriter
         }
 
         return _path;
+    }
+
+    public async Task RefreshMediaInfoIfRequiredAsync(CancellationToken token)
+    {
+        if (!_mediaInfoRefreshRequired)
+        {
+            return;
+        }
+
+        var item = _library.GetItemById<Video>(_itemId);
+        if (item is null || !string.Equals(_appHost.ExpandVirtualPath(item.Path), _path, StringComparison.Ordinal))
+        {
+            throw Error("media-location-changed", "The job's library record moved before its prepared media metadata could be refreshed.");
+        }
+
+        if (!File.Exists(_path))
+        {
+            throw Error("media-unavailable", "The installed media is unavailable for metadata refresh.");
+        }
+
+        // The bytes changed, so a previous successful probe cannot establish
+        // that the stored codec/stream metadata still describes this file.
+        item.IngestState = IngestState.Pending;
+        await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, token).ConfigureAwait(false);
+        await item.RefreshMetadata(
+            new MetadataRefreshOptions(new DirectoryService(BaseItem.FileSystem))
+            {
+                MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
+                ReplaceAllMetadata = false
+            },
+            token).ConfigureAwait(false);
+
+        if (item.IngestState != IngestState.Complete)
+        {
+            throw Error("media-metadata-refresh-failed", $"The library could not probe the prepared media at '{_path}' (ingest state: {item.IngestState}).");
+        }
+
+        _mediaInfoRefreshRequired = false;
     }
 
     private void ValidateStagedPath(string stagedPath)

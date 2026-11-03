@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
 #nullable disable
 
 #pragma warning disable CS1591
@@ -412,6 +413,15 @@ namespace Emby.Server.Implementations.Library
                 }
 
                 sources = SetAlternateVersionResumeStates(item, sources, user);
+            }
+
+            if (item is Video)
+            {
+                // Preserve the requested or most recently resumed record's
+                // source after normal authorization and resume ordering.
+                var paths = new HashSet<string>(StringComparer.Ordinal);
+                sources = sources.Where(source => source.Protocol != MediaProtocol.File
+                    || string.IsNullOrEmpty(source.Path) || paths.Add(source.Path)).ToArray();
             }
 
             return sources;

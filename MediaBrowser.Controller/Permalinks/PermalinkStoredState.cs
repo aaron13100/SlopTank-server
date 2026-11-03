@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-10-14, 2026-10-31, 2026-11-03.
 using System;
 using System.Collections.Generic;
 
@@ -11,4 +11,8 @@ namespace MediaBrowser.Controller.Permalinks;
 public sealed record PermalinkStoredState(
     Guid CapsuleId,
     string ContentRoot,
-    IReadOnlyList<string> Aliases);
+    IReadOnlyList<string> Aliases)
+{
+    /// <summary>Gets the immutable kind recorded with the physical content reservation.</summary>
+    public string PhysicalKind { get; init; } = string.Empty;
+}

@@ -428,7 +428,7 @@ namespace Emby.Server.Implementations.Library
         {
             _identityMutationAdapter.Value.ExecuteAsync(
                 [item],
-                new PermalinkIdentityMutationRequest("deletion"),
+                new PermalinkIdentityMutationRequest(options.DeleteFileLocation ? "deletion" : "metadata-removal"),
                 (_, _) =>
                 {
                     DeleteItemCore(item, options, parent, notifyParentItem);
@@ -489,12 +489,14 @@ namespace Emby.Server.Implementations.Library
                     .OfType<Video>()
                     .ToList();
 
-                // Partition alternates by whether their files still exist on disk
+                // A second record for the file being deleted is not a surviving version.
+                // Partition it with records whose physical file is already missing.
                 var alternateVersions = new List<Video>();
                 var missingAlternates = new List<Video>();
                 foreach (var alt in allAlternateVersions)
                 {
-                    if (!string.IsNullOrEmpty(alt.Path) && !_fileSystem.FileExists(alt.Path))
+                    if ((!string.IsNullOrEmpty(alt.Path) && !_fileSystem.FileExists(alt.Path))
+                        || (options.DeleteFileLocation && string.Equals(alt.Path, video.Path, StringComparison.Ordinal)))
                     {
                         missingAlternates.Add(alt);
                     }
@@ -543,8 +545,9 @@ namespace Emby.Server.Implementations.Library
                     newPrimary.LocalAlternateVersions = video.LocalAlternateVersions
                         .Where(p => !string.Equals(p, newPrimary.Path, StringComparison.OrdinalIgnoreCase))
                         .ToArray();
+                    var survivingIds = alternateVersions.Select(value => value.Id).ToHashSet();
                     newPrimary.LinkedAlternateVersions = video.LinkedAlternateVersions
-                        .Where(lc => !lc.ItemId.HasValue || !lc.ItemId.Value.Equals(newPrimary.Id))
+                        .Where(lc => !lc.ItemId.HasValue || (survivingIds.Contains(lc.ItemId.Value) && lc.ItemId.Value != newPrimary.Id))
                         .ToArray();
 
                     newPrimary.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).GetAwaiter().GetResult();
@@ -556,8 +559,10 @@ namespace Emby.Server.Implementations.Library
                     foreach (var alternate in alternateVersions.Skip(1))
                     {
                         alternate.SetPrimaryVersionId(newPrimary.Id);
-                        // Only set OwnerId for local alternates; linked alternates are independent items
-                        alternate.OwnerId = localAlternateIds.Contains(alternate.Id) ? newPrimary.Id : Guid.Empty;
+                        // Local versions and aliases for the same file remain owned;
+                        // linked versions in other files stay independent.
+                        alternate.OwnerId = localAlternateIds.Contains(alternate.Id) || string.Equals(alternate.Path, newPrimary.Path, StringComparison.Ordinal)
+                            ? newPrimary.Id : Guid.Empty;
                         alternate.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).GetAwaiter().GetResult();
                     }
                 }
@@ -870,14 +875,115 @@ namespace Emby.Server.Implementations.Library
             }
         }
 
-        private Video[] GetStoredMediaAtPath(string path, Type type) => _itemRepository.GetItemList(new InternalItemsQuery
+        private Video[] GetStoredMediaAtPath(string path, Type type) => GetMediaFileRecords(path)
+            .Where(item => item.GetType() == type).ToArray();
+
+        /// <inheritdoc />
+        public IReadOnlyList<Video> GetMediaFileRecords(string path)
         {
-            Path = path,
-            Recursive = true,
-            IncludeOwnedItems = true,
-            GroupByPresentationUniqueKey = false,
-            EnableTotalRecordCount = false
-        }).OfType<Video>().Where(item => item.GetType() == type).ToArray();
+            var records = _itemRepository.GetItemList(new InternalItemsQuery
+            {
+                Path = path,
+                Recursive = true,
+                IncludeOwnedItems = true,
+                GroupByPresentationUniqueKey = false,
+                EnableTotalRecordCount = false
+            }).OfType<Video>().ToDictionary(item => item.Id);
+            var roots = new Dictionary<Guid, Video>();
+            foreach (var record in records.Values)
+            {
+                var current = record;
+                var visited = new HashSet<Guid> { current.Id };
+                while (records.TryGetValue(current.PrimaryVersionId ?? (current.ExtraType.HasValue ? Guid.Empty : current.OwnerId), out var primary))
+                {
+                    if (!visited.Add(primary.Id))
+                    {
+                        throw new PermalinkException(PermalinkErrorKind.Conflict, "file-record-cycle",
+                            "The library's records for this filename contain a version cycle.", itemId: record.Id);
+                    }
+
+                    current = primary;
+                }
+
+                roots.TryAdd(current.Id, current);
+            }
+
+            return roots.Values.ToArray();
+        }
+
+        /// <inheritdoc />
+        public async Task<Video> RefineVideoKindAsync(Video item, Type targetType, CancellationToken cancellationToken, string? currentPath = null)
+        {
+            ArgumentNullException.ThrowIfNull(item);
+            currentPath ??= item.Path;
+            ArgumentException.ThrowIfNullOrEmpty(currentPath);
+            if (!string.Equals(currentPath, item.Path, StringComparison.Ordinal)
+                && (!string.Equals(Path.GetExtension(item.Path), ".mkv", StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(Path.ChangeExtension(item.Path, ".mp4"), currentPath, StringComparison.Ordinal)
+                    || !MediaFileIsMissing(item.Path)))
+            {
+                throw new PermalinkException(PermalinkErrorKind.Conflict, "media-location-changed",
+                    "Classification may only retain the filename or associate its completed MKV-to-MP4 conversion.", itemId: item.Id);
+            }
+
+            if (item.GetType() != typeof(Video))
+            {
+                if (item.GetType() == targetType)
+                {
+                    return item;
+                }
+
+                throw new PermalinkException(PermalinkErrorKind.Conflict, "media-classification-changed",
+                    "Only a generic video can be refined to a concrete video kind.", itemId: item.Id);
+            }
+
+            var existing = GetMediaFileRecords(currentPath).Where(value => value.Id != item.Id && !value.ExtraType.HasValue && value.GetType() == targetType).ToArray();
+            if (existing.Length > 1)
+            {
+                throw new PermalinkException(PermalinkErrorKind.Conflict, "library-path-ambiguous",
+                    "Several concrete media records already use this filename; resolve their metadata before refining another record.", itemId: item.Id);
+            }
+
+            Video? refined = null;
+            await _identityMutationAdapter.Value.ExecuteAsync(
+                existing.Length == 0 ? [item] : [item, existing[0]],
+                new PermalinkIdentityMutationRequest("kind-reclassification", DesiredItemKind: targetType.Name),
+                async (ambient, token) =>
+                {
+                    await _persistenceService.RefineVideoKindAsync(item, targetType, currentPath, token).ConfigureAwait(false);
+                    _cache.TryRemove(item.Id, out _);
+                    refined = RetrieveItem(item.Id) as Video
+                        ?? throw new PermalinkException(PermalinkErrorKind.Conflict, "media-record-missing",
+                            "The refined media record could not be loaded.", itemId: item.Id);
+                    RegisterItem(refined);
+                    if (existing.Length == 1)
+                    {
+                        // Keep both record IDs and their user data. The existing
+                        // concrete record is the normal primary for this file.
+                        var primary = existing[0];
+                        refined.SetPrimaryVersionId(primary.Id);
+                        refined.OwnerId = primary.Id;
+                        await UpdateItemAsync(refined, refined.GetParent(), ItemUpdateType.MetadataEdit, token).ConfigureAwait(false);
+                        if (!primary.LinkedAlternateVersions.Any(link => link.ItemId == refined.Id))
+                        {
+                            primary.LinkedAlternateVersions = [.. primary.LinkedAlternateVersions,
+                                new MediaBrowser.Controller.Entities.LinkedChild
+                                {
+                                    ItemId = refined.Id, Path = refined.Path,
+                                    Type = MediaBrowser.Controller.Entities.LinkedChildType.LinkedAlternateVersion
+                                }];
+                            await UpdateItemAsync(primary, primary.GetParent(), ItemUpdateType.MetadataEdit, token).ConfigureAwait(false);
+                        }
+
+                        UpsertLinkedChild(primary.Id, refined.Id, MediaBrowser.Controller.Entities.LinkedChildType.LinkedAlternateVersion);
+                    }
+                    else
+                    {
+                        await UpdateItemAsync(refined, refined.GetParent(), ItemUpdateType.MetadataEdit, token).ConfigureAwait(false);
+                    }
+                }, cancellationToken).ConfigureAwait(false);
+            return refined!;
+        }
 
         private Guid GetNewItemIdInternal(string key, Type type, bool forceCaseInsensitive)
         {
@@ -955,35 +1061,20 @@ namespace Emby.Server.Implementations.Library
                     $"Several library records of type '{expectedVideoType.Name}' use '{path}'; resolve the duplicate before adding a version.");
             }
 
-            // Clean up any existing item saved with wrong type (e.g. Video instead of Movie).
-            // This happens when items were previously resolved without proper type context
-            // in mixed-content libraries where collectionType is null.
-            var expectedId = GetNewItemId(path, expectedVideoType);
+            // Refine existing records in place instead of deleting metadata,
+            // user data and issued links before creating a different record.
             if (expectedVideoType != typeof(Video))
             {
                 var wrongTypeId = GetNewItemId(path, typeof(Video));
-                if (!wrongTypeId.Equals(expectedId) && GetItemById(wrongTypeId) is Video wrongTypeItem)
+                if (GetItemById(wrongTypeId) is Video wrongTypeItem && wrongTypeItem.GetType() == typeof(Video))
                 {
-                    _logger.LogInformation(
-                        "Removing alternate version with wrong type {WrongType}, expected {ExpectedType}: {Path}",
-                        wrongTypeItem.GetType().Name,
-                        expectedVideoType.Name,
-                        path);
-                    _identityMutationAdapter.Value.ExecuteAsync(
-                        [wrongTypeItem],
-                        new PermalinkIdentityMutationRequest(
-                            "kind-reclassification",
-                            DesiredItemKind: expectedVideoType.Name),
-                        (_, _) =>
-                        {
-                            DeleteItem(
-                                wrongTypeItem,
-                                new DeleteOptions { DeleteFileLocation = false });
-                            return Task.CompletedTask;
-                        },
-                        CancellationToken.None).GetAwaiter().GetResult();
+                    var refined = RefineVideoKindAsync(wrongTypeItem, expectedVideoType, CancellationToken.None, path).GetAwaiter().GetResult();
+
+                    return GetMediaFileRecords(path).FirstOrDefault(value => value.GetType() == expectedVideoType) ?? refined;
                 }
             }
+
+            var expectedId = GetNewItemId(path, expectedVideoType);
 
             var resolved = ResolvePath(
                 _fileSystem.GetFileSystemInfo(path),

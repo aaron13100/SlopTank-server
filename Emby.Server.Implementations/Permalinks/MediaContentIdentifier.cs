@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -25,8 +25,9 @@ public sealed class MediaContentIdentifier
     /// <param name="item">The existing library metadata record.</param>
     /// <param name="seriesContentId">The persistent logical series ID, when available.</param>
     /// <param name="seriesOrder">The series' metadata episode ordering.</param>
+    /// <param name="knownKind">An existing logical title classification for a generic video record.</param>
     /// <returns>Logical identifiers; an unidentified record can receive a persistent opaque ID.</returns>
-    internal MediaContentIdentity Identify(BaseItem item, Guid? seriesContentId, string? seriesOrder)
+    internal MediaContentIdentity Identify(BaseItem item, Guid? seriesContentId, string? seriesOrder, BaseItemKind? knownKind = null)
     {
         ArgumentNullException.ThrowIfNull(item);
         var (kind, qualifier) = item switch
@@ -37,6 +38,9 @@ public sealed class MediaContentIdentifier
             Episode => ("episode", "ep"),
             BoxSet => ("boxset", "co"),
             MusicVideo => ("musicvideo", (string?)null),
+            Video when knownKind == BaseItemKind.Movie => ("movie", "mv"),
+            Video when knownKind == BaseItemKind.Episode => ("episode", "ep"),
+            Video when knownKind == BaseItemKind.MusicVideo => ("musicvideo", (string?)null),
             Video => ("video", (string?)null),
             _ => throw new PermalinkException(PermalinkErrorKind.Ineligible, "item-ineligible", "This library item has no supported permalink content kind.")
         };
@@ -61,6 +65,13 @@ public sealed class MediaContentIdentifier
     /// <summary>Allocates a content ID once when the database has no existing identification.</summary>
     /// <returns>A new logical title ID, independent of any media file.</returns>
     internal Guid CreateContentId() => Guid.NewGuid();
+
+    /// <summary>Recognizes a concrete classification of an existing generic video title.</summary>
+    internal static bool IsKindRefinement(string? previous, string current) => string.Equals(previous, current, StringComparison.OrdinalIgnoreCase)
+        || (string.Equals(previous, "video", StringComparison.OrdinalIgnoreCase)
+            && (string.Equals(current, "movie", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(current, "episode", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(current, "musicvideo", StringComparison.OrdinalIgnoreCase)));
 
     /// <summary>Identifies superseded metadata claims while preserving opaque logical IDs.</summary>
     internal static bool IsReplacedClaim(string alias, MediaContentIdentity metadata)

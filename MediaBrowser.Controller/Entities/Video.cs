@@ -264,10 +264,7 @@ namespace MediaBrowser.Controller.Entities
                 {
                     if (callstack.Contains(video.Id))
                     {
-                        // Count alternate versions using LibraryManager
-                        var linkedCount = LibraryManager.GetLinkedAlternateVersions(video).Count();
-                        var localCount = LibraryManager.GetLocalAlternateVersionIds(video).Count();
-                        return linkedCount + localCount + 1;
+                        return video.CountDistinctMediaFiles();
                     }
 
                     callstack.Add(video.Id);
@@ -275,10 +272,16 @@ namespace MediaBrowser.Controller.Entities
                 }
             }
 
-            // Count alternate versions using LibraryManager
-            var linkedVersionCount = LibraryManager.GetLinkedAlternateVersions(this).Count();
-            var localVersionCount = LibraryManager.GetLocalAlternateVersionIds(this).Count();
-            return linkedVersionCount + localVersionCount + 1;
+            return CountDistinctMediaFiles();
+        }
+
+        private int CountDistinctMediaFiles()
+        {
+            // Metadata aliases can retain several record IDs for one file.
+            // Keep those IDs for user data, but show the physical source once.
+            var paths = new HashSet<string>(StringComparer.Ordinal);
+            return GetAllItemsForMediaSources().Count(source =>
+                string.IsNullOrEmpty(source.Item.Path) || paths.Add(source.Item.Path));
         }
 
         /// <inheritdoc />

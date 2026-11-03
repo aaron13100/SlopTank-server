@@ -448,6 +448,38 @@ namespace MediaBrowser.Controller.Entities
 
                 foreach (var child in nonCachedChildren)
                 {
+                    if (child is Video && !string.IsNullOrEmpty(child.Path) && (child.GetType() == typeof(MediaBrowser.Controller.Entities.Movies.Movie)
+                        || child.GetType() == typeof(Episode) || child.GetType() == typeof(MusicVideo)))
+                    {
+                        var genericId = LibraryManager.GetNewItemId(child.Path, typeof(Video));
+                        if (currentChildren.TryGetValue(genericId, out var generic) && generic.GetType() == typeof(Video)
+                            && !generic.ExtraType.HasValue && (generic.OwnerId == Guid.Empty || ((Video)generic).PrimaryVersionId.HasValue))
+                        {
+                            var oldPath = generic.Path;
+                            var refinement = await TryExecutePermalinkChildMutationAsync(generic, async () =>
+                            {
+                                var refined = await LibraryManager.RefineVideoKindAsync((Video)generic, child.GetType(), cancellationToken, child.Path).ConfigureAwait(false);
+                                currentChildren[refined.Id] = refined;
+                                currentChildrenByPath.Remove(oldPath);
+                                currentChildrenByPath[refined.Path] = refined;
+                                // A second existing record for the same file can
+                                // remain its primary. Keep the former generic ID
+                                // as an owned version so its user data survives.
+                                child.Id = LibraryManager.GetNewItemId(child.Path, child.GetType());
+                                if (child.Id != refined.Id)
+                                {
+                                    validChildren.Add(refined);
+                                }
+                            }).ConfigureAwait(false);
+                            if (refinement == PermalinkChildMutationOutcome.SkippedConflict)
+                            {
+                                permalinkConflictsSkipped++;
+                                validChildren.Add(generic);
+                                continue;
+                            }
+                        }
+                    }
+
                     if (!currentChildren.ContainsKey(child.Id) && !string.IsNullOrEmpty(child.Path)
                         && currentChildrenByPath.ContainsKey(child.Path))
                     {

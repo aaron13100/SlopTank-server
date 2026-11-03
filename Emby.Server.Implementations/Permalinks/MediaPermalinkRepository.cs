@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -192,23 +192,29 @@ public sealed class MediaPermalinkRepository
             throw MappingChanged();
         }
 
-        var itemType = BaseItemMapper.GetType(item.Type);
-        if (!MatchesKind(itemType, request.Kind))
-        {
-            throw new PermalinkException(PermalinkErrorKind.Ineligible, "item-kind-mismatch", $"Library item type '{item.Type}' does not match permalink kind '{request.Kind}'.", itemId: request.ItemId);
-        }
-
         var contentRows = await context.MediaPermalinkAliases
             .Where(alias => alias.ContentId == request.ContentId)
             .ToArrayAsync(cancellationToken)
             .ConfigureAwait(false);
         ValidateStoredRows(request.ContentId, contentRows);
+        var itemType = BaseItemMapper.GetType(item.Type);
+        // A generic physical record can already belong to an identified title.
+        // Its concrete logical kind comes from that existing database mapping,
+        // never from a guessed filename or an unqualified numeric provider ID.
+        var matchesKind = MatchesKind(itemType, request.Kind)
+            || (itemType == typeof(Video) && (request.Kind is "movie" or "episode" or "musicvideo")
+                && contentRows.Length > 0 && contentRows.All(row => row.Kind == request.Kind));
+        if (!matchesKind)
+        {
+            throw new PermalinkException(PermalinkErrorKind.Ineligible, "item-kind-mismatch", $"Library item type '{item.Type}' does not match permalink kind '{request.Kind}'.", itemId: request.ItemId);
+        }
+
         if (request.InheritedContentId.HasValue)
         {
             var inherited = await context.MediaPermalinkAliases.Where(alias => alias.ContentId == request.InheritedContentId.Value)
                 .ToArrayAsync(cancellationToken).ConfigureAwait(false);
             ValidateStoredRows(request.InheritedContentId.Value, inherited);
-            if (inherited.Length == 0 || inherited.Any(alias => alias.Kind != request.Kind || !alias.IsPublic
+            if (inherited.Length == 0 || inherited.Any(alias => !MediaContentIdentifier.IsKindRefinement(alias.Kind, request.Kind) || !alias.IsPublic
                 || !alias.Alias.StartsWith("sk-", StringComparison.Ordinal) || !request.PublicAliases.Contains(alias.Alias, StringComparer.Ordinal)))
             {
                 throw new PermalinkException(PermalinkErrorKind.Conflict, "metadata-merge-conflict",
@@ -228,7 +234,8 @@ public sealed class MediaPermalinkRepository
             throw MappingChanged();
         }
 
-        if (contentRows.Any(row => !string.Equals(row.Kind, request.Kind, StringComparison.Ordinal)))
+        var refinesKind = contentRows.Any(row => row.Kind != request.Kind);
+        if (contentRows.Any(row => !MediaContentIdentifier.IsKindRefinement(row.Kind, request.Kind)))
         {
             throw new PermalinkException(PermalinkErrorKind.Conflict, "content-kind-mismatch", "A logical content identity cannot contain aliases of different kinds.", itemId: request.ItemId);
         }
@@ -253,9 +260,15 @@ public sealed class MediaPermalinkRepository
 
         var orderedAliases = (request.LegacyAliases ?? Array.Empty<string>()).Concat(request.PublicAliases).Distinct(StringComparer.Ordinal).ToArray();
         var desiredKeys = orderedAliases.Concat(request.CoordinateKey is null ? Array.Empty<string>() : [request.CoordinateKey]).ToHashSet(StringComparer.Ordinal);
-        var aliasStateChanged = false;
+        var aliasStateChanged = refinesKind;
         foreach (var row in contentRows)
         {
+            if (row.Kind != request.Kind)
+            {
+                row.Kind = request.Kind;
+                row.UpdatedAtUtc = request.NowUtc;
+            }
+
             if (desiredKeys.Contains(row.Alias) && row.DeletedAtUtc.HasValue)
             {
                 row.DeletedAtUtc = null;

@@ -394,7 +394,7 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         // unconditionally made the HTTP response wait on one durable prepare,
         // ensure, and commit per episode of the edited folder, which is the
         // never-ending-spinner latency measured on 2026-09-21/23.
-        if (request.Kind == "deletion"
+        if (request.Kind is "deletion" or "metadata-removal"
             || (request.Kind == "manual-metadata" && request.CascadeToDescendants))
         {
             expanded.AddRange(items
@@ -432,7 +432,8 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
             .Concat(_libraryManager.GetLinkedAlternateVersions(primary).Select(value => value.Id))
             .Distinct()
             .Select(value => _libraryManager.GetItemById(value))
-            .FirstOrDefault(value => value is Video);
+            .FirstOrDefault(value => value is Video && !string.Equals(value.Path, primary.Path, StringComparison.Ordinal)
+                && (string.IsNullOrEmpty(value.Path) || System.IO.File.Exists(value.Path)));
         return promotedItem is null ? request.Kind : "promotion";
     }
 
@@ -441,7 +442,8 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         return kind is "logical" or "identify" or "manual-metadata" or "automatic-refresh" or "nfo-refresh";
     }
 
-    private static bool IsMetadataOnlyMutation(string kind) => IsRestorableIdentityMutation(kind) || kind is "scan-replacement" or "grouping";
+    private static bool IsMetadataOnlyMutation(string kind) => IsRestorableIdentityMutation(kind)
+        || kind is "scan-replacement" or "grouping" or "kind-reclassification" or "metadata-removal";
 
     private static PermalinkException Conflict(string code, string message)
     {

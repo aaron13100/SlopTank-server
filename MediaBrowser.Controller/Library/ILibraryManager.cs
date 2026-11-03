@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
 #pragma warning disable CA1002, CS1591
 
 using System;
@@ -82,6 +83,19 @@ namespace MediaBrowser.Controller.Library
             Type expectedVideoType,
             Folder? parent,
             CollectionType? collectionType);
+
+        /// <summary>Refines a generic video using its existing database record.</summary>
+        /// <param name="item">The persisted generic video.</param>
+        /// <param name="targetType">The concrete video classification.</param>
+        /// <param name="cancellationToken">The caller's cancellation token.</param>
+        /// <param name="currentPath">The current filename after a recognized container conversion, or null to retain it.</param>
+        /// <returns>The same record with the concrete runtime type.</returns>
+        Task<Video> RefineVideoKindAsync(Video item, Type targetType, CancellationToken cancellationToken, string? currentPath = null);
+
+        /// <summary>Finds stored records for a filename, including pending and owned files.</summary>
+        /// <param name="path">The current library filename.</param>
+        /// <returns>Canonical records for that physical path, retaining genuine ambiguity.</returns>
+        IReadOnlyList<Video> GetMediaFileRecords(string path);
 
         /// <summary>
         /// Resolves a set of files into a list of BaseItem.

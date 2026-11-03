@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-19, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-19, 2026-10-14, 2026-10-31, 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -12,6 +12,12 @@ namespace MediaBrowser.Controller.Permalinks;
 /// </summary>
 public interface IPermalinkIdentityMutationAdapter
 {
+    /// <summary>Rejects access while an existing legacy identity operation is unfinished.</summary>
+    /// <param name="itemId">The library item with an existing legacy binding.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task that completes when no pending operation fences the item.</returns>
+    Task EnsureNoPendingMutationAsync(Guid itemId, CancellationToken cancellationToken);
+
     /// <summary>
     /// Returns whether an already-resolved scan child is provably identical at every
     /// permalink-bearing boundary and its persisted content digest still matches the

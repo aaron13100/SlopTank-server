@@ -220,17 +220,23 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         return result;
     }
 
-    private async Task RejectPendingOperationAsync(BaseItem item, CancellationToken token)
+    private Task RejectPendingOperationAsync(BaseItem item, CancellationToken token)
     {
-        var pending = await _pending.FindPendingAsync(item.Id, token).ConfigureAwait(false);
+        return EnsureNoPendingMutationAsync(item.Id, token);
+    }
+
+    /// <inheritdoc />
+    public async Task EnsureNoPendingMutationAsync(Guid itemId, CancellationToken cancellationToken)
+    {
+        var pending = await _pending.FindPendingAsync(itemId, cancellationToken).ConfigureAwait(false);
         if (pending is not null)
         {
             throw new PermalinkException(
                 PermalinkErrorKind.Conflict,
                 "identity-mutation-pending",
-                $"Item '{item.Id}' is fenced by unfinished durable operation '{pending.OperationId}'.",
+                $"Item '{itemId}' is fenced by unfinished durable operation '{pending.OperationId}'.",
                 operationId: pending.OperationId,
-                itemId: item.Id);
+                itemId: itemId);
         }
     }
 

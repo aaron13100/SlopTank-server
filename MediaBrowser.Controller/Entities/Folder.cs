@@ -590,6 +590,19 @@ namespace MediaBrowser.Controller.Entities
                                 // omitting it here strands them forever.
                                 accessibleChildren.Add(currentChild);
                             }
+                            else if (child is Video && currentChild is Video
+                                && !string.Equals(currentChild.Path, child.Path, StringComparison.Ordinal))
+                            {
+                                // A known container conversion normally reuses
+                                // the old record. If unfinished legacy work
+                                // prevents moving that record, retain it for
+                                // recovery and admit the new file separately.
+                                child.Id = Guid.NewGuid();
+                                child.SetParent(this);
+                                newItems.Add(child);
+                                validChildren.Add(child);
+                                accessibleChildren.Add(child);
+                            }
                         }
                         else
                         {

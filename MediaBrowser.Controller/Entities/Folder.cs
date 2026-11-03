@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-30, 2026-09-04, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-26, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-30, 2026-09-04, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-26, 2026-10-14, 2026-10-31, 2026-11-03.
 #nullable disable
 
 #pragma warning disable CA1002, CA1721, CA1819, CS1591
@@ -448,6 +448,34 @@ namespace MediaBrowser.Controller.Entities
 
                 foreach (var child in nonCachedChildren)
                 {
+                    if (!currentChildren.ContainsKey(child.Id) && !string.IsNullOrEmpty(child.Path)
+                        && currentChildrenByPath.ContainsKey(child.Path))
+                    {
+                        var pathComparison = ConfigurationManager.Configuration.EnableCaseSensitiveItemIds
+                            ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+                        var sameRecord = currentChildren.Values.Where(existing => existing.GetType() == child.GetType()
+                            && string.Equals(existing.Path, child.Path, pathComparison)).ToArray();
+                        if (sameRecord.Length == 1)
+                        {
+                            // A guarded rename updates the existing record's path.
+                            // Its persisted ID remains authoritative even though a
+                            // fresh filesystem resolve calculates another path ID.
+                            child.Id = sameRecord[0].Id;
+                        }
+                        else if (sameRecord.Length > 1)
+                        {
+                            Logger.LogWarning("Several stored {ItemType} items use {Path}; retaining their metadata until the duplicate is resolved",
+                                child.GetType().Name, child.Path);
+                            foreach (var duplicate in sameRecord)
+                            {
+                                validChildren.Add(duplicate);
+                                accessibleChildren.Add(duplicate);
+                            }
+
+                            continue;
+                        }
+                    }
+
                     if (!IsLibraryFolderAccessible(directoryService, child, allowRemoveRoot))
                     {
                         // Preserve inaccessible items so they aren't treated as removed.

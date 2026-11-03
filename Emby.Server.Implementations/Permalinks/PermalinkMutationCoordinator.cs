@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20, 2026-09-27, 2026-09-30, 2026-10-03, 2026-10-14, 2026-10-31, 2026-11-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-03, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-20, 2026-09-27, 2026-09-30, 2026-10-03, 2026-10-14, 2026-10-31, 2026-11-01, 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Emby.Server.Implementations.MediaMutations;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
@@ -44,7 +45,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     };
 
     private readonly ILibraryManager _libraryManager;
-    private readonly IPermalinkManager _manager;
+    private readonly ProtectedMediaState _protection;
     private readonly PermalinkEvidence _evidence;
     private readonly PermalinkAuthorityStore _authority;
     private readonly PermalinkOperationJournal _journal;
@@ -66,7 +67,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     /// Initializes a new instance of the <see cref="PermalinkMutationCoordinator"/> class.
     /// </summary>
     /// <param name="libraryManager">The library manager.</param>
-    /// <param name="manager">The manager.</param>
+    /// <param name="protection">The existing guarded file-replacement state.</param>
     /// <param name="evidence">The evidence.</param>
     /// <param name="authority">The permalink authority store.</param>
     /// <param name="journal">The journal.</param>
@@ -82,7 +83,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     /// <param name="logger">The logger.</param>
     public PermalinkMutationCoordinator(
         ILibraryManager libraryManager,
-        IPermalinkManager manager,
+        ProtectedMediaState protection,
         PermalinkEvidence evidence,
         PermalinkAuthorityStore authority,
         PermalinkOperationJournal journal,
@@ -99,7 +100,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     {
         _logger = logger;
         _libraryManager = libraryManager;
-        _manager = manager;
+        _protection = protection;
         _evidence = evidence;
         _authority = authority;
         _journal = journal;
@@ -129,6 +130,12 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
 
         var existing = await _journal.ReadAsync(request.OperationId, cancellationToken)
             .ConfigureAwait(false);
+        if (request.ExpectedSourcePath is not null
+            && !string.Equals(request.ExpectedSourcePath, existing?.SourcePath ?? item.Path, StringComparison.Ordinal))
+        {
+            throw Conflict("media-location-changed", "The media record's filename changed after the replacement was selected. Resolve the current record before retrying.");
+        }
+
         if (existing is null && request.Kind == "media")
         {
             await SettleAggregateClosureAsync(item, cancellationToken).ConfigureAwait(false);
@@ -138,9 +145,9 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         string oldContentRoot;
         // A phantom shell's anchor is a random token no authority row knows, so the
         // ensure step would fence the delete before the vanished route is reached.
-        var ensuredIdentity = PermalinkCapsuleShell.IsPhantomShell(item)
+        var ensuredIdentity = PermalinkCapsuleShell.IsPhantomShell(item) || IsDeletionOfVanishedContent(request.Kind, item)
             ? null
-            : await TryEnsureIdentityForDeletionAsync(request, item, cancellationToken)
+            : await TryEnsureProtectionAsync(request, item, cancellationToken)
                 .ConfigureAwait(false);
         if (IsDeletionOfVanishedContent(request.Kind, item)
             || ensuredIdentity is null)
@@ -171,10 +178,10 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         }
         else
         {
-            binding = await _bindings.FindResolutionBindingAsync(
-                ensuredIdentity.CanonicalId,
-                item.Id,
-                cancellationToken).ConfigureAwait(false);
+            // Physical replacement state belongs to this item, independently
+            // of its public logical permalink or current provider assignment.
+            binding = ResolveVanishedContentBinding(item,
+                await _bindings.FindItemBindingsAsync(item.Id, cancellationToken).ConfigureAwait(false));
             oldContentRoot = item is Series or Season or BoxSet
                 ? binding.ContentRoot
                 : (await _evidence.ComputeContentItemAsync(item, cancellationToken)
@@ -407,7 +414,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
                 continue;
             }
 
-            _ = await _manager.EnsurePermalinkIdsAsync(ancestor, cancellationToken).ConfigureAwait(false);
+            _ = await _protection.EnsureAsync(ancestor, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -730,20 +737,20 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The ensured identity for non-removals and healthy removals;
     /// null when this removal must take the authority-recorded route.</returns>
-    private async Task<PermalinkResponse?> TryEnsureIdentityForDeletionAsync(
+    private async Task<PermalinkStoredState?> TryEnsureProtectionAsync(
         PermalinkMutationPrepareRequest request,
         BaseItem item,
         CancellationToken cancellationToken)
     {
         if (!IsRemovalKind(request.Kind))
         {
-            return await _manager.EnsurePermalinkIdsAsync(item, cancellationToken)
+            return await _protection.EnsureAsync(item, cancellationToken)
                 .ConfigureAwait(false);
         }
 
         try
         {
-            return await _manager.EnsurePermalinkIdsAsync(item, cancellationToken)
+            return await _protection.EnsureAsync(item, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (PermalinkException exception)

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03.
 #pragma warning disable CS1591
 #pragma warning disable CA5394
 
@@ -822,8 +822,31 @@ namespace Emby.Server.Implementations.Library
 
         public Guid GetNewItemId(string key, Type type)
         {
+            ArgumentException.ThrowIfNullOrEmpty(key);
+            ArgumentNullException.ThrowIfNull(type);
+            if (typeof(Video).IsAssignableFrom(type)
+                && (!Uri.TryCreate(key, UriKind.Absolute, out var uri) || uri.IsFile))
+            {
+                var stored = GetStoredMediaByPath(key, type);
+                if (stored.Length == 1)
+                {
+                    // A container/filename change updates the existing media
+                    // record. Its database ID wins over a newly calculated ID.
+                    return stored[0].Id;
+                }
+            }
+
             return GetNewItemIdInternal(key, type, false);
         }
+
+        private Video[] GetStoredMediaByPath(string path, Type type) => _itemRepository.GetItemList(new InternalItemsQuery
+        {
+            Path = path,
+            Recursive = true,
+            IncludeOwnedItems = true,
+            GroupByPresentationUniqueKey = false,
+            EnableTotalRecordCount = false
+        }).OfType<Video>().Where(item => item.GetType() == type).ToArray();
 
         private Guid GetNewItemIdInternal(string key, Type type, bool forceCaseInsensitive)
         {
@@ -895,6 +918,12 @@ namespace Emby.Server.Implementations.Library
         /// <inheritdoc />
         public Video? ResolveAlternateVersion(string path, Type expectedVideoType, Folder? parent, CollectionType? collectionType)
         {
+            if (GetStoredMediaByPath(path, expectedVideoType).Length > 1)
+            {
+                throw new PermalinkException(PermalinkErrorKind.Conflict, "library-path-ambiguous",
+                    $"Several library records of type '{expectedVideoType.Name}' use '{path}'; resolve the duplicate before adding a version.");
+            }
+
             // Clean up any existing item saved with wrong type (e.g. Video instead of Movie).
             // This happens when items were previously resolved without proper type context
             // in mixed-content libraries where collectionType is null.

@@ -1,5 +1,7 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-31, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-31, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-10-01, 2026-10-14, 2026-10-31, 2026-11-03.
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Extensions;
@@ -7,6 +9,7 @@ using MediaBrowser.Common.Api;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
+using MediaBrowser.Model.Dto;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -48,6 +51,32 @@ public sealed class PermalinkRewriteController : BaseJellyfinApiController
     // Journaled work is bound to the host lifetime, never to RequestAborted: a client
     // that disconnects mid-copy must not cancel a durable operation (c196).
     private CancellationToken DurableToken => _lifetime.ApplicationStopping;
+
+    /// <summary>Finds stored video records before encoding, including pending and owned media.</summary>
+    /// <param name="path">The exact current library filename.</param>
+    /// <returns>Matching database records; an empty list confirms a new, unindexed import.</returns>
+    [HttpGet("MediaRecordsV1")]
+    [Authorize(Policy = Policies.RequiresElevation)]
+    public ActionResult<IReadOnlyList<MediaFileRecord>> GetMediaRecords([FromQuery] string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return Problem(detail: "A media path is required.", statusCode: StatusCodes.Status400BadRequest,
+                title: "media-path-required");
+        }
+
+        // This administrative metadata query deliberately includes unready
+        // records. Ordinary viewing APIs retain their visibility/readiness rules.
+        var records = _libraryManager.GetItemList(new InternalItemsQuery
+        {
+            Path = path,
+            Recursive = true,
+            IncludeOwnedItems = true,
+            GroupByPresentationUniqueKey = false,
+            EnableTotalRecordCount = false
+        }).OfType<Video>().Select(item => new MediaFileRecord(item.Id, item.Path)).ToArray();
+        return Ok(records);
+    }
 
     /// <summary>Freezes the current verified state before mutation.</summary>
     /// <param name="request">The immutable mutation intent.</param>

@@ -569,6 +569,8 @@ namespace Emby.Server.Implementations
             serviceCollection.AddTransient(provider => new Lazy<ILibraryManager>(provider.GetRequiredService<ILibraryManager>));
             serviceCollection.AddTransient(provider => new Lazy<IPermalinkIdentityMutationAdapter>(
                 provider.GetRequiredService<IPermalinkIdentityMutationAdapter>));
+            serviceCollection.AddTransient(provider => new Lazy<IPermalinkManager>(
+                provider.GetRequiredService<IPermalinkManager>));
             serviceCollection.AddSingleton<ILibraryManager, LibraryManager>();
             serviceCollection.AddSingleton(TimeProvider.System);
             serviceCollection.AddSingleton<MacPermalinkMountPolicy>();

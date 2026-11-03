@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
-<!-- SlopTank modification notice: added or changed by SlopTank on 2026-10-06, 2026-10-14, 2026-10-31. -->
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-10-06, 2026-10-14, 2026-10-31, 2026-11-03. -->
   <!-- ProjectGuid is only included as a requirement for SonarQube analysis -->
   <PropertyGroup>
     <ProjectGuid>{07E39F42-A2C6-4B32-AF8C-725F957A73FF}</ProjectGuid>
@@ -84,5 +84,20 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
+
+  <PropertyGroup>
+    <SvgRasterizerProject>$(MSBuildThisFileDirectory)../tools/svg-rasterizer/SvgRasterizer.csproj</SvgRasterizerProject>
+    <SvgRasterizerRuntimeArgument Condition="'$(RuntimeIdentifier)' != ''">--runtime &quot;$(RuntimeIdentifier)&quot;</SvgRasterizerRuntimeArgument>
+    <SvgRasterizerSelfContainedArgument Condition="'$(SelfContained)' != ''">--property:SelfContained=&quot;$(SelfContained)&quot;</SvgRasterizerSelfContainedArgument>
+    <SvgRasterizerRestorePackagesArgument Condition="'$(RestorePackagesPath)' != ''">--property:RestorePackagesPath=&quot;$(RestorePackagesPath)&quot;</SvgRasterizerRestorePackagesArgument>
+  </PropertyGroup>
+
+  <Target Name="PublishSvgRasterizer" AfterTargets="Publish">
+    <PropertyGroup>
+      <SvgRasterizerPublishOutput>$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '$(PublishDir)', 'svg-rasterizer'))))</SvgRasterizerPublishOutput>
+    </PropertyGroup>
+    <Error Condition="'$(DOTNET_HOST_PATH)' == ''" Text="DOTNET_HOST_PATH must be set to publish the standalone SVG rasterizer." />
+    <Exec Command="&quot;$(DOTNET_HOST_PATH)&quot; publish &quot;$(SvgRasterizerProject)&quot; --configuration &quot;$(Configuration)&quot; --output &quot;$(SvgRasterizerPublishOutput)&quot; $(SvgRasterizerRuntimeArgument) $(SvgRasterizerSelfContainedArgument) $(SvgRasterizerRestorePackagesArgument)" />
+  </Target>
 
 </Project>

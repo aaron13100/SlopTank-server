@@ -1,5 +1,6 @@
 // SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-03, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-16, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03.
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
@@ -7,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Data;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Entities;
@@ -24,6 +26,8 @@ namespace Emby.Server.Implementations.Permalinks;
 /// </summary>
 internal sealed class PermalinkResolutionService : IPermalinkResolutionService
 {
+    private static readonly SearchValues<char> _tokenCharacters = SearchValues.Create("0123456789abcdef");
+
     private readonly PermalinkManager _manager;
     private readonly MediaPermalinkLeaseRepository _leases;
     private readonly ILibraryManager _library;
@@ -43,6 +47,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         _users = users;
         _clock = clock;
     }
+
+    private DateTime Now => _clock.GetUtcNow().UtcDateTime;
 
     public async Task<IReadOnlyList<PermalinkCandidateEnvelope>> DiscoverAsync(
         string permalinkId, string purpose, Guid userId, CancellationToken cancellationToken)
@@ -91,17 +97,34 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
     }
 
     public async Task<PermalinkPlaybackSnapshot> RedeemPlaybackReadyV1Async(
-        string handle, string lease, string playbackSessionId, int queueOrdinal, bool complete,
-        Guid userId, CancellationToken cancellationToken)
+        string handle,
+        string lease,
+        string playbackSessionId,
+        int queueOrdinal,
+        bool complete,
+        Guid userId,
+        CancellationToken cancellationToken)
     {
         var playback = await ExchangePlaybackLeaseAsync(handle, lease, userId, cancellationToken).ConfigureAwait(false);
-        return await RedeemPlaybackAsync(playback.Handle, playback.Lease, playbackSessionId,
-            queueOrdinal, complete, userId, cancellationToken).ConfigureAwait(false);
+        return await RedeemPlaybackAsync(
+            playback.Handle,
+            playback.Lease,
+            playbackSessionId,
+            queueOrdinal,
+            complete,
+            userId,
+            cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<PermalinkPlaybackSnapshot> RedeemPlaybackAsync(
-        string handle, string lease, string playbackSessionId, int queueOrdinal, bool complete,
-        Guid userId, CancellationToken cancellationToken, bool clientHeldLease = true)
+        string handle,
+        string lease,
+        string playbackSessionId,
+        int queueOrdinal,
+        bool complete,
+        Guid userId,
+        CancellationToken cancellationToken,
+        bool clientHeldLease = true)
     {
         if (string.IsNullOrWhiteSpace(playbackSessionId) || playbackSessionId.Length > 128)
         {
@@ -150,9 +173,9 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
 
         var entry = plan.Entries[queueOrdinal];
         var visible = await _manager.GetVideoFileAsync(MediaContentIdentifier.OpaqueAlias(entry.ContentId), userId, cancellationToken).ConfigureAwait(false);
-        var version = visible.SingleOrDefault(value => value.ContentId == entry.ContentId)
+        var version = visible.SingleOrDefault(value => value.ContentId.Equals(entry.ContentId))
             ?? throw Conflict("playback-item-unavailable", "This queued title is no longer available to the current user.");
-        var item = version.Items.FirstOrDefault(value => value.Id == entry.ItemId) ?? Representative(version);
+        var item = version.Items.FirstOrDefault(value => value.Id.Equals(entry.ItemId)) ?? Representative(version);
         var paths = item is Video video
             ? new[] { item.Path }.Concat(video.AdditionalParts).Where(path => !string.IsNullOrEmpty(path)).Distinct(StringComparer.Ordinal).ToArray()
             : Array.Empty<string>();
@@ -181,7 +204,7 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         }
 
         var document = await _leases.ReadAsync(credentials.Handle, token).ConfigureAwait(false);
-        if (document is null || document.UserId != credentials.UserId || document.Kind != credentials.Purpose
+        if (document is null || !document.UserId.Equals(credentials.UserId) || document.Kind != credentials.Purpose
             || document.DeletedAtUtc.HasValue || document.ExpiresAtUtc <= Now
             || !CryptographicOperations.FixedTimeEquals(
                 Encoding.UTF8.GetBytes(document.SecretDigest),
@@ -204,7 +227,7 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
     private async Task<PermalinkManager.Candidate> ResolveAsync(MediaPermalinkLease lease, CancellationToken token)
     {
         var candidates = await _manager.GetVideoFileAsync(lease.Alias, lease.UserId, token).ConfigureAwait(false);
-        return candidates.SingleOrDefault(value => value.ContentId == lease.ContentId)
+        return candidates.SingleOrDefault(value => value.ContentId.Equals(lease.ContentId))
             ?? throw Conflict("lease-evidence-changed", "The linked title is no longer available to this user under this identifier.");
     }
 
@@ -265,8 +288,6 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
             secret);
     }
 
-    private DateTime Now => _clock.GetUtcNow().UtcDateTime;
-
     private static BaseItem Representative(PermalinkManager.Candidate candidate) => candidate.Items
         .OrderBy(item => item is Video { PrimaryVersionId: not null } ? 1 : 0).ThenBy(item => item.Id).First();
 
@@ -276,7 +297,7 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         issued.Document.Handle,
         issued.Secret);
 
-    private static bool IsToken(string value) => value is { Length: 64 } && value.AsSpan().IndexOfAnyExcept("0123456789abcdef") < 0;
+    private static bool IsToken(string value) => value is { Length: 64 } && value.AsSpan().IndexOfAnyExcept(_tokenCharacters) < 0;
 
     private static void RequireUnconsumed(MediaPermalinkLease lease)
     {
@@ -291,7 +312,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         try
         {
             var plan = JsonSerializer.Deserialize<PlaybackQueue>(document.PlaybackPlan ?? "null");
-            return plan is { Version: 1, Entries.Count: > 0 and <= 100 } && plan.Entries.All(entry => entry.ContentId != Guid.Empty && entry.ItemId != Guid.Empty)
+            return plan is { Version: 1, Entries.Count: > 0 and <= 100 }
+                && plan.Entries.All(entry => !entry.ContentId.Equals(Guid.Empty) && !entry.ItemId.Equals(Guid.Empty))
                 ? plan : throw new JsonException("The stored logical queue is missing or unsupported.");
         }
         catch (JsonException exception)
@@ -303,8 +325,12 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
     private static PermalinkException Conflict(string code, string message) => new(PermalinkErrorKind.Conflict, code, message);
 
     private sealed record LeaseIdentity(string Alias, Guid ContentId, Guid UserId, string Purpose);
+
     private sealed record LeaseCredentials(string Handle, string Secret, Guid UserId, string Purpose);
+
     private sealed record IssuedLease(MediaPermalinkLease Document, string Secret);
+
     private sealed record QueueEntry(Guid ItemId, Guid ContentId);
+
     private sealed record PlaybackQueue(int Version, IReadOnlyList<QueueEntry> Entries);
 }

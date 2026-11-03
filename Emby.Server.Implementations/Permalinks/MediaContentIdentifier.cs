@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Numerics;
 using System.Text.RegularExpressions;
 using Jellyfin.Data.Enums;
@@ -89,13 +90,16 @@ public sealed class MediaContentIdentifier
         currentParentId = Guid.Empty;
         return TryParseCoordinate(previous, out previousParentId, out var previousSuffix)
             && TryParseCoordinate(current, out currentParentId, out var currentSuffix)
-            && previousParentId != Guid.Empty
-            && currentParentId != Guid.Empty
-            && previousParentId != currentParentId
+            && !previousParentId.Equals(Guid.Empty)
+            && !currentParentId.Equals(Guid.Empty)
+            && !previousParentId.Equals(currentParentId)
             && string.Equals(previousSuffix, currentSuffix, StringComparison.Ordinal);
     }
 
     /// <summary>Identifies superseded metadata claims while preserving opaque logical IDs.</summary>
+    /// <param name="alias">The previously stored alias.</param>
+    /// <param name="metadata">The current metadata-derived identity.</param>
+    /// <returns>Whether the alias represents a claim replaced by the current metadata.</returns>
     internal static bool IsReplacedClaim(string alias, MediaContentIdentity metadata)
     {
         if (alias.StartsWith("metadata:v1:", StringComparison.Ordinal))
@@ -112,6 +116,8 @@ public sealed class MediaContentIdentifier
     }
 
     /// <summary>Translates an existing provider URL into the library's metadata query.</summary>
+    /// <param name="alias">The public provider or opaque alias.</param>
+    /// <returns>The provider identity represented by the alias, or <see langword="null"/> for an opaque alias.</returns>
     internal static ProviderIdentity? ParseProviderAlias(string alias)
     {
         if (!IsPublicAlias(alias) || alias.StartsWith("sk-", StringComparison.Ordinal))
@@ -203,7 +209,7 @@ public sealed class MediaContentIdentifier
         var parentEnd = value.IndexOf(':', prefix.Length);
         if (parentEnd != prefix.Length + 32
             || !Guid.TryParseExact(value[prefix.Length..parentEnd], "N", out parentContentId)
-            || parentContentId == Guid.Empty)
+            || parentContentId.Equals(Guid.Empty))
         {
             return false;
         }

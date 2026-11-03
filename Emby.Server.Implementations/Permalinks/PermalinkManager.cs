@@ -5,12 +5,16 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Data;
 using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
+using MediaPermalinkBinding = Emby.Server.Implementations.Permalinks.MediaPermalinkRepository.MediaPermalinkBinding;
+using PermalinkBindingRequest = Emby.Server.Implementations.Permalinks.MediaPermalinkRepository.PermalinkBindingRequest;
+using PermalinkItemBinding = Emby.Server.Implementations.Permalinks.MediaPermalinkRepository.PermalinkItemBinding;
 
 namespace Emby.Server.Implementations.Permalinks;
 
@@ -27,7 +31,13 @@ public sealed class PermalinkManager : IPermalinkManager
     private readonly IUserManager _users;
     private readonly TimeProvider _clock;
 
-    /// <summary>Initializes the portable metadata-to-file association service.</summary>
+    /// <summary>Initializes a new instance of the <see cref="PermalinkManager"/> class.</summary>
+    /// <param name="repository">The application database repository for logical title mappings.</param>
+    /// <param name="identifiers">The metadata identity adapter.</param>
+    /// <param name="legacy">The reader for existing legacy permalink aliases.</param>
+    /// <param name="library">The existing library metadata and visibility service.</param>
+    /// <param name="users">The existing user lookup service.</param>
+    /// <param name="clock">The clock used for persisted timestamps.</param>
     public PermalinkManager(
         MediaPermalinkRepository repository,
         MediaContentIdentifier identifiers,
@@ -45,13 +55,13 @@ public sealed class PermalinkManager : IPermalinkManager
     }
 
     /// <summary>Gets the identifier for this movie, series, season or specific episode.</summary>
-    /// <param name="videoFile">The server's existing library metadata record.</param>
+    /// <param name="item">The server's existing library metadata record.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>The same public response and URL namespaces used by existing clients.</returns>
-    public async Task<PermalinkResponse> EnsurePermalinkIdsAsync(BaseItem videoFile, CancellationToken cancellationToken)
+    public async Task<PermalinkResponse> EnsurePermalinkIdsAsync(BaseItem item, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(videoFile);
-        var binding = await BindMetadataAsync(videoFile, cancellationToken).ConfigureAwait(false);
+        ArgumentNullException.ThrowIfNull(item);
+        var binding = await BindMetadataAsync(item, cancellationToken).ConfigureAwait(false);
         return new PermalinkResponse(1, binding.Ids, binding.Ids[0]);
     }
 
@@ -103,7 +113,7 @@ public sealed class PermalinkManager : IPermalinkManager
             foreach (var itemId in await _repository.ReadItemIdsAsync(mapped.ContentId, cancellationToken).ConfigureAwait(false))
             {
                 if (_library.GetItemById<BaseItem>(itemId, user) is Video video
-                    && (video.PrimaryVersionId.HasValue || (!video.ExtraType.HasValue && video.OwnerId != Guid.Empty)))
+                    && (video.PrimaryVersionId.HasValue || (!video.ExtraType.HasValue && !video.OwnerId.Equals(Guid.Empty))))
                 {
                     await BindMetadataAsync(video, cancellationToken).ConfigureAwait(false);
                 }
@@ -139,7 +149,7 @@ public sealed class PermalinkManager : IPermalinkManager
                     current,
                     metadata,
                     cancellationToken).ConfigureAwait(false);
-                if (current.ContentId != mapping.ContentId || metadata.Kind != mapping.Kind
+                if (!Nullable.Equals(current.ContentId, mapping.ContentId) || metadata.Kind != mapping.Kind
                     || (IdentityChanged(current, metadata) && !canRetainUnidentifiedIdentity)
                     || (MediaContentIdentifier.ParseProviderAlias(identifier) is not null && !metadata.PublicAliases.Contains(identifier, StringComparer.Ordinal)))
                 {
@@ -157,7 +167,7 @@ public sealed class PermalinkManager : IPermalinkManager
                             physicalRecord = fileRecords[0];
                         }
 
-                        if (!video.ExtraType.HasValue && video.OwnerId != Guid.Empty
+                        if (!video.ExtraType.HasValue && !video.OwnerId.Equals(Guid.Empty)
                             && _library.GetItemById<Video>(video.OwnerId) is { } owner
                             && owner.AdditionalParts.Contains(video.Path, StringComparer.Ordinal))
                         {
@@ -166,7 +176,7 @@ public sealed class PermalinkManager : IPermalinkManager
                     }
 
                     if (_library.GetItemById<BaseItem>(physicalRecord.Id, user) is not null
-                        && !visible.Any(existing => existing.Id == physicalRecord.Id))
+                        && !visible.Any(existing => existing.Id.Equals(physicalRecord.Id)))
                     {
                         physicalRecord.PermalinkContentId = mapping.ContentId;
                         visible.Add(physicalRecord);
@@ -309,7 +319,7 @@ public sealed class PermalinkManager : IPermalinkManager
 
     private async Task<MediaPermalinkBinding> BindMetadataAsync(BaseItem item, CancellationToken token)
     {
-        if (item.Id == Guid.Empty || item.ExtraType.HasValue)
+        if (item.Id.Equals(Guid.Empty) || item.ExtraType.HasValue)
         {
             throw new PermalinkException(PermalinkErrorKind.Ineligible, "item-ineligible", "A persisted library title is required; extras and trailers do not have title permalinks.");
         }
@@ -346,17 +356,17 @@ public sealed class PermalinkManager : IPermalinkManager
             var contentId = primaryBinding?.ContentId ?? (matches.Count == 1 ? matches[0].ContentId
                 : current.ContentId.HasValue && (!IdentityChanged(current, metadata) || canRetainUnidentifiedIdentity) ? current.ContentId.Value
                 : _identifiers.CreateContentId());
-            var inheritedContentId = current.ContentId.HasValue && current.ContentId != contentId
+            var inheritedContentId = current.ContentId.HasValue && !current.ContentId.Value.Equals(contentId)
                 && MediaContentIdentifier.IsKindRefinement(current.Kind, metadata.Kind)
                 && (current.Keys.All(key => key.StartsWith("sk-", StringComparison.Ordinal)) || canRetainUnidentifiedIdentity)
                 ? current.ContentId : null;
             var aliases = metadata.PublicAliases.Append(MediaContentIdentifier.OpaqueAlias(contentId))
                 .Concat(inheritedContentId.HasValue ? current.PublicAliases : Array.Empty<string>()).Distinct(StringComparer.Ordinal).ToArray();
-            var target = matches.FirstOrDefault(value => value.ContentId == contentId);
+            var target = matches.FirstOrDefault(value => value.ContentId.Equals(contentId));
             var retiredAliases = (target?.Keys ?? current.Keys).Where(alias => MediaContentIdentifier.IsReplacedClaim(alias, metadata)).ToArray();
             var legacyAliases = current.ContentId.HasValue ? Array.Empty<string>()
                 : await ReadInitialLegacyAliasesAsync(item.Id, metadata, token).ConfigureAwait(false);
-            if (primaryBinding is not null && current.ContentId.HasValue && current.ContentId != contentId
+            if (primaryBinding is not null && current.ContentId.HasValue && !current.ContentId.Value.Equals(contentId)
                 && MediaContentIdentifier.IsKindRefinement(current.Kind, metadata.Kind))
             {
                 // Explicit version grouping is an existing library relationship.
@@ -367,7 +377,8 @@ public sealed class PermalinkManager : IPermalinkManager
                 legacyAliases = legacyAliases.Concat(current.PublicAliases.Where(alias => alias.StartsWith("sk-", StringComparison.Ordinal)))
                     .Distinct(StringComparer.Ordinal).ToArray();
             }
-            if (current.ContentId == contentId && current.Kind == metadata.Kind
+
+            if (current.ContentId.HasValue && current.ContentId.Value.Equals(contentId) && current.Kind == metadata.Kind
                 && retiredAliases.Length == 0
                 && aliases.All(alias => current.PublicAliases.Contains(alias, StringComparer.Ordinal))
                 && (metadata.CoordinateKey is null || current.Keys.Contains(metadata.CoordinateKey, StringComparer.Ordinal)))
@@ -392,7 +403,7 @@ public sealed class PermalinkManager : IPermalinkManager
                         retiredAliases),
                     token).ConfigureAwait(false);
                 var saved = await _repository.ReadForItemAsync(item.Id, token).ConfigureAwait(false);
-                if (saved.ContentId != contentId || saved.PublicAliases.Count == 0)
+                if (!saved.ContentId.HasValue || !saved.ContentId.Value.Equals(contentId) || saved.PublicAliases.Count == 0)
                 {
                     throw MappingChanged();
                 }
@@ -433,8 +444,8 @@ public sealed class PermalinkManager : IPermalinkManager
         item = FindTitleRecord(item, out _) ?? item;
         var series = item switch
         {
-            Episode episode when episode.SeriesId != Guid.Empty => _library.GetItemById<Series>(episode.SeriesId),
-            Season season when season.SeriesId != Guid.Empty => _library.GetItemById<Series>(season.SeriesId),
+            Episode episode when !episode.SeriesId.Equals(Guid.Empty) => _library.GetItemById<Series>(episode.SeriesId),
+            Season season when !season.SeriesId.Equals(Guid.Empty) => _library.GetItemById<Series>(season.SeriesId),
             _ => null
         };
         Guid? seriesContentId = null;
@@ -489,7 +500,7 @@ public sealed class PermalinkManager : IPermalinkManager
                         itemId: item.Id);
                 }
             }
-            else if (!current.ExtraType.HasValue && current.OwnerId != Guid.Empty
+            else if (!current.ExtraType.HasValue && !current.OwnerId.Equals(Guid.Empty)
                 && _library.GetItemById<Video>(current.OwnerId) is Video owner
                 && (owner.AdditionalParts.Contains(current.Path, StringComparer.Ordinal)
                     || string.Equals(owner.Path, current.Path, StringComparison.Ordinal)))

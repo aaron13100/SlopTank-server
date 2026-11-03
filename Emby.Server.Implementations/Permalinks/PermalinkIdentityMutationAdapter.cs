@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-23, 2026-10-04, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-29, 2026-08-30, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-23, 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-03.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -23,23 +23,23 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
     private readonly PermalinkBindingIndex _bindings;
     private readonly PermalinkPendingIdentityMutation _pending;
     private readonly ILibraryManager _libraryManager;
-    private readonly PermalinkEvidence _evidence;
     private readonly IPlaybackPreparationService _playbackPreparationService;
+    private readonly LegacyMediaPermalinkRepository _legacy;
 
     public PermalinkIdentityMutationAdapter(
         IPermalinkMutationCoordinator coordinator,
         PermalinkBindingIndex bindings,
         PermalinkPendingIdentityMutation pending,
         ILibraryManager libraryManager,
-        PermalinkEvidence evidence,
-        IPlaybackPreparationService playbackPreparationService)
+        IPlaybackPreparationService playbackPreparationService,
+        LegacyMediaPermalinkRepository legacy)
     {
         _coordinator = coordinator;
         _bindings = bindings;
         _pending = pending;
         _libraryManager = libraryManager;
-        _evidence = evidence;
         _playbackPreparationService = playbackPreparationService;
+        _legacy = legacy;
     }
 
     /// <inheritdoc />
@@ -65,14 +65,16 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
             && resolvedItem.ProviderIds.All(pair =>
                 currentItem.ProviderIds.TryGetValue(pair.Key, out var value)
                 && string.Equals(pair.Value, value, StringComparison.Ordinal))
-            && !string.IsNullOrEmpty(currentItem.Path)
-            && _evidence.IsContentDigestKnown(currentItem.Path);
+            && !string.IsNullOrEmpty(currentItem.Path);
         if (!hasNoIdentityContradiction)
         {
             return false;
         }
 
-        return await _pending.FindPendingAsync(currentItem.Id, cancellationToken).ConfigureAwait(false) is null;
+        // A scan updates metadata. Readiness probing and guarded file writers
+        // own physical media validation; an unchanged metadata merge needs no hash.
+        return (await _legacy.ReadItemAliasesAsync(currentItem.Id, cancellationToken).ConfigureAwait(false)).Count == 0
+            || await _pending.FindPendingAsync(currentItem.Id, cancellationToken).ConfigureAwait(false) is null;
     }
 
     /// <inheritdoc />
@@ -89,6 +91,30 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         if (_ambient.Value is { } ambient)
         {
             await mutation(ambient, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (IsMetadataOnlyMutation(request.Kind))
+        {
+            // Metadata already has an authenticated library/database workflow.
+            // Saving it does not change media bytes and must not hash a file,
+            // establish a native anchor, or prepare a physical rewrite.
+            foreach (var item in items)
+            {
+                RejectProtectedKindChange(item, items[0], request);
+                if ((await _legacy.ReadItemAliasesAsync(item.Id, cancellationToken).ConfigureAwait(false)).Count > 0)
+                {
+                    // Preserve real unfinished legacy operations until normal
+                    // recovery settles them; do not discard that state at cutover.
+                    await RejectPendingOperationAsync(item, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            // No physical ambient scope is granted to this callback. Nested
+            // file operations retain their own normal guarded entry point.
+            await mutation(new AmbientToken([]), cancellationToken).ConfigureAwait(false);
+            await _playbackPreparationService.InvalidateReadinessIfChangedAsync(
+                items.Select(value => value.Id).ToArray(), cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -170,17 +196,7 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
             }
 
             RejectProtectedKindChange(item, items[0], request);
-            var pendingOperation = await _pending.FindPendingAsync(item.Id, cancellationToken)
-                .ConfigureAwait(false);
-            if (pendingOperation is not null)
-            {
-                throw new PermalinkException(
-                    PermalinkErrorKind.Conflict,
-                    "identity-mutation-pending",
-                    $"Item '{item.Id}' is fenced by unfinished durable operation '{pendingOperation.OperationId}'.",
-                    operationId: pendingOperation.OperationId,
-                    itemId: item.Id);
-            }
+            await RejectPendingOperationAsync(item, cancellationToken).ConfigureAwait(false);
 
             if (CanSkipPreparationForUnchangedIdentity(items[0], request))
             {
@@ -201,6 +217,17 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         }
 
         return result;
+    }
+
+    private async Task RejectPendingOperationAsync(BaseItem item, CancellationToken token)
+    {
+        var pending = await _pending.FindPendingAsync(item.Id, token).ConfigureAwait(false);
+        if (pending is not null)
+        {
+            throw new PermalinkException(PermalinkErrorKind.Conflict, "identity-mutation-pending",
+                $"Item '{item.Id}' is fenced by unfinished durable operation '{pending.OperationId}'.",
+                operationId: pending.OperationId, itemId: item.Id);
+        }
     }
 
     private static bool CanSkipPreparationForUnchangedIdentity(
@@ -412,6 +439,8 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
     {
         return kind is "logical" or "identify" or "manual-metadata" or "automatic-refresh" or "nfo-refresh";
     }
+
+    private static bool IsMetadataOnlyMutation(string kind) => IsRestorableIdentityMutation(kind) || kind == "scan-replacement";
 
     private static PermalinkException Conflict(string code, string message)
     {

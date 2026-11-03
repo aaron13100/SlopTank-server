@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03.
 using System;
 
 namespace Jellyfin.Database.Implementations.Entities;
@@ -17,7 +17,7 @@ public sealed class MediaPermalinkAlias
     /// <summary>Gets or sets the logical content kind.</summary>
     public required string Kind { get; set; }
 
-    /// <summary>Gets or sets whether this alias is public.</summary>
+    /// <summary>Gets or sets a value indicating whether this alias is public.</summary>
     public bool IsPublic { get; set; }
 
     /// <summary>Gets or sets the alias order, or null for private keys.</summary>

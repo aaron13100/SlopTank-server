@@ -278,8 +278,11 @@ public sealed class MediaPermalinkRepository
                             requiredPublicAliases: request.PublicAliases,
                             cancellationToken).ConfigureAwait(false))
                     {
-                        throw new PermalinkException(PermalinkErrorKind.Conflict, "metadata-merge-conflict",
-                            "Only an unidentified title with unchanged or parent-equivalent TV coordinates may follow its newly identified metadata.", itemId: request.ItemId);
+                        throw new PermalinkException(
+                            PermalinkErrorKind.Conflict,
+                            "metadata-merge-conflict",
+                            "Only an unidentified title with unchanged or parent-equivalent TV coordinates may follow its newly identified metadata.",
+                            itemId: request.ItemId);
                     }
                 }
 

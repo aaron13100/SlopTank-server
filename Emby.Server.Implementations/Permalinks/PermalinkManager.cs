@@ -28,8 +28,13 @@ public sealed class PermalinkManager : IPermalinkManager
     private readonly TimeProvider _clock;
 
     /// <summary>Initializes the portable metadata-to-file association service.</summary>
-    public PermalinkManager(MediaPermalinkRepository repository, MediaContentIdentifier identifiers, LegacyMediaPermalinkRepository legacy,
-        ILibraryManager library, IUserManager users, TimeProvider clock)
+    public PermalinkManager(
+        MediaPermalinkRepository repository,
+        MediaContentIdentifier identifiers,
+        LegacyMediaPermalinkRepository legacy,
+        ILibraryManager library,
+        IUserManager users,
+        TimeProvider clock)
     {
         _repository = repository;
         _identifiers = identifiers;
@@ -289,8 +294,15 @@ public sealed class PermalinkManager : IPermalinkManager
                 }
 
                 await _repository.ImportAliasAsync(
-                    new PermalinkBindingRequest(item.Id, binding.ContentId,
-                    binding.ContentId, binding.Kind, [alias], null, _clock.GetUtcNow().UtcDateTime), token).ConfigureAwait(false);
+                    new PermalinkBindingRequest(
+                        item.Id,
+                        binding.ContentId,
+                        binding.ContentId,
+                        binding.Kind,
+                        [alias],
+                        null,
+                        _clock.GetUtcNow().UtcDateTime),
+                    token).ConfigureAwait(false);
             }
         }
     }
@@ -367,9 +379,18 @@ public sealed class PermalinkManager : IPermalinkManager
             try
             {
                 await _repository.BindAsync(
-                    new PermalinkBindingRequest(item.Id, current.ContentId, contentId,
-                    metadata.Kind, aliases, metadata.CoordinateKey, _clock.GetUtcNow().UtcDateTime,
-                    inheritedContentId, legacyAliases, retiredAliases), token).ConfigureAwait(false);
+                    new PermalinkBindingRequest(
+                        item.Id,
+                        current.ContentId,
+                        contentId,
+                        metadata.Kind,
+                        aliases,
+                        metadata.CoordinateKey,
+                        _clock.GetUtcNow().UtcDateTime,
+                        inheritedContentId,
+                        legacyAliases,
+                        retiredAliases),
+                    token).ConfigureAwait(false);
                 var saved = await _repository.ReadForItemAsync(item.Id, token).ConfigureAwait(false);
                 if (saved.ContentId != contentId || saved.PublicAliases.Count == 0)
                 {
@@ -461,8 +482,11 @@ public sealed class PermalinkManager : IPermalinkManager
 
                 if (!MediaContentIdentifier.IsKindRefinement(current.GetBaseItemKind().ToString(), next.GetBaseItemKind().ToString()))
                 {
-                    throw new PermalinkException(PermalinkErrorKind.Conflict, "version-kind-conflict",
-                        "Alternate versions must belong to the same library media kind.", itemId: item.Id);
+                    throw new PermalinkException(
+                        PermalinkErrorKind.Conflict,
+                        "version-kind-conflict",
+                        "Alternate versions must belong to the same library media kind.",
+                        itemId: item.Id);
                 }
             }
             else if (!current.ExtraType.HasValue && current.OwnerId != Guid.Empty
@@ -482,8 +506,11 @@ public sealed class PermalinkManager : IPermalinkManager
 
             if (!visited.Add(next.Id))
             {
-                throw new PermalinkException(PermalinkErrorKind.Conflict, "version-link-cycle",
-                    "The library's version or multipart relationship contains a cycle.", itemId: item.Id);
+                throw new PermalinkException(
+                    PermalinkErrorKind.Conflict,
+                    "version-link-cycle",
+                    "The library's version or multipart relationship contains a cycle.",
+                    itemId: item.Id);
             }
 
             current = next;
@@ -535,7 +562,8 @@ public sealed class PermalinkManager : IPermalinkManager
 
     private static PermalinkException MappingChanged() => new(
         PermalinkErrorKind.Conflict,
-        "mapping-changed", "The media metadata changed while its permalink association was being saved.");
+        "mapping-changed",
+        "The media metadata changed while its permalink association was being saved.");
 
     /// <summary>A logical title and its current visible library versions.</summary>
     public sealed record Candidate(Guid ContentId, string Kind, IReadOnlyList<BaseItem> Items);

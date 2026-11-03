@@ -839,7 +839,38 @@ namespace Emby.Server.Implementations.Library
             return GetNewItemIdInternal(key, type, false);
         }
 
-        private Video[] GetStoredMediaByPath(string path, Type type) => _itemRepository.GetItemList(new InternalItemsQuery
+        private Video[] GetStoredMediaByPath(string path, Type type)
+        {
+            var current = GetStoredMediaAtPath(path, type);
+            if (current.Length > 0 || !string.Equals(Path.GetExtension(path), ".mp4", StringComparison.OrdinalIgnoreCase))
+            {
+                return current;
+            }
+
+            // Recover the known container conversion without creating a new
+            // media record. A surviving MKV is a separate version, not a rename.
+            return GetStoredMediaAtPath(Path.ChangeExtension(path, ".mkv"), type)
+                .Where(video => MediaFileIsMissing(video.Path)).ToArray();
+        }
+
+        private static bool MediaFileIsMissing(string path)
+        {
+            try
+            {
+                _ = File.GetAttributes(path);
+                return false;
+            }
+            catch (FileNotFoundException)
+            {
+                return true;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return true;
+            }
+        }
+
+        private Video[] GetStoredMediaAtPath(string path, Type type) => _itemRepository.GetItemList(new InternalItemsQuery
         {
             Path = path,
             Recursive = true,

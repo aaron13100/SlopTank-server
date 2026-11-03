@@ -526,7 +526,14 @@ namespace MediaBrowser.Controller.Entities
                                     child.GetBaseItemKind().ToString()),
                                 async (_, ambientCancellationToken) =>
                                 {
-                                    if (currentChild.UpdateFromResolvedItem(child) > ItemUpdateType.None)
+                                    var updateType = currentChild.UpdateFromResolvedItem(child);
+                                    if (!string.Equals(currentChild.Path, child.Path, StringComparison.Ordinal))
+                                    {
+                                        currentChild.Path = child.Path;
+                                        updateType |= ItemUpdateType.MetadataImport;
+                                    }
+
+                                    if (updateType > ItemUpdateType.None)
                                     {
                                         await currentChild.UpdateToRepositoryAsync(
                                             ItemUpdateType.MetadataImport,

@@ -1,5 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- SlopTank modification notice: added or changed by SlopTank on 2026-11-03. -->
+
   <!-- ProjectGuid is only included as a requirement for SonarQube analysis -->
   <PropertyGroup>
     <ProjectGuid>{154872D9-6C12-4007-96E3-8F70A58386CE}</ProjectGuid>
@@ -24,7 +26,6 @@
     <PackageReference Include="SkiaSharp" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux" />
     <PackageReference Include="SkiaSharp.HarfBuzz" />
-    <PackageReference Include="Svg.Skia" />
   </ItemGroup>
 
   <ItemGroup>

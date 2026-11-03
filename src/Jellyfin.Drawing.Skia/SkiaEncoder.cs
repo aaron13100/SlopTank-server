@@ -1,8 +1,11 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using BlurHashSharp.SkiaSharp;
 using Jellyfin.Extensions;
 using MediaBrowser.Common.Configuration;
@@ -11,7 +14,6 @@ using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Model.Drawing;
 using Microsoft.Extensions.Logging;
 using SkiaSharp;
-using Svg.Skia;
 
 namespace Jellyfin.Drawing.Skia;
 
@@ -183,23 +185,14 @@ public class SkiaEncoder : IImageEncoder
         var extension = Path.GetExtension(path.AsSpan());
         if (extension.Equals(".svg", StringComparison.OrdinalIgnoreCase))
         {
-            using var svg = new SKSvg();
             try
             {
-                using var picture = svg.Load(path);
-                if (picture is null)
-                {
-                    _logger.LogError("Unable to determine image dimensions for {FilePath}", path);
-                    return default;
-                }
-
-                return new ImageDimensions(Convert.ToInt32(picture.CullRect.Width), Convert.ToInt32(picture.CullRect.Height));
+                using var bitmap = GetBitmapFromSvg(path);
+                return new ImageDimensions(bitmap.Width, bitmap.Height);
             }
-            catch (FormatException skiaColorException)
+            catch (SvgRasterizationException svgException)
             {
-                // This exception is known to be thrown on vector images that define custom styles
-                // Skia SVG is not able to handle that and as the repository is quite stale and has not received updates we just catch them
-                _logger.LogDebug(skiaColorException, "There was a issue loading the requested svg file");
+                _logger.LogDebug(svgException, "Unable to determine image dimensions for SVG {FilePath}", path);
                 return default;
             }
         }
@@ -438,39 +431,112 @@ public class SkiaEncoder : IImageEncoder
         return Decode(path, false, orientation, out _);
     }
 
-    private SKBitmap? GetBitmapFromSvg(string path)
+    private SKBitmap GetBitmapFromSvg(string path)
     {
         if (!File.Exists(path))
         {
             throw new FileNotFoundException("File not found", path);
         }
 
-        using var svg = SKSvg.CreateFromFile(path);
-        if (svg.Drawable is null)
+        Directory.CreateDirectory(_appPaths.TempDirectory);
+        var outputPath = Path.Combine(_appPaths.TempDirectory, $"svg-rasterizer-{Guid.NewGuid():N}.png");
+        var executableName = OperatingSystem.IsWindows() ? "svg-rasterizer.exe" : "svg-rasterizer";
+        var executablePath = Path.Combine(AppContext.BaseDirectory, "svg-rasterizer", executableName);
+        var startInfo = new ProcessStartInfo(executablePath)
         {
-            return null;
-        }
+            UseShellExecute = false,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        startInfo.ArgumentList.Add(path);
+        startInfo.ArgumentList.Add(outputPath);
 
-        var width = (int)Math.Round(svg.Drawable.Bounds.Width);
-        var height = (int)Math.Round(svg.Drawable.Bounds.Height);
-
-        SKBitmap? bitmap = null;
         try
         {
-            bitmap = new SKBitmap(width, height);
-            using var canvas = new SKCanvas(bitmap);
-            canvas.DrawPicture(svg.Picture);
-            canvas.Flush();
-            canvas.Save();
+            using var process = new Process { StartInfo = startInfo };
+            if (!process.Start())
+            {
+                throw new InvalidOperationException($"Unable to start SVG rasterizer at {executablePath}.");
+            }
 
-            return bitmap!;
+            using var stderrCancellation = new CancellationTokenSource();
+            var stderrTask = process.StandardError.ReadToEndAsync(stderrCancellation.Token);
+            using var processTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+            bool timedOut = false;
+            try
+            {
+                process.WaitForExitAsync(processTimeout.Token).GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                timedOut = true;
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill(entireProcessTree: true);
+                    }
+                }
+                catch (Exception killException)
+                {
+                    _logger.LogError(killException, "Unable to stop timed-out SVG rasterizer process {ProcessId}", process.Id);
+                }
+
+                try
+                {
+                    process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                }
+                catch (Exception reapException)
+                {
+                    _logger.LogError(reapException, "Unable to reap timed-out SVG rasterizer process {ProcessId} within five seconds", process.Id);
+                }
+            }
+
+            string stderr;
+            try
+            {
+                stderr = stderrTask.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            }
+            catch (Exception stderrException)
+            {
+                stderrCancellation.Cancel();
+                _logger.LogWarning(stderrException, "Unable to collect SVG rasterizer stderr within five seconds");
+                stderr = "[renderer stderr collection failed: " + stderrException.Message + "]";
+            }
+
+            if (timedOut)
+            {
+                throw new SvgRasterizationException("svg_renderer_timeout", $"SVG rasterizer exceeded its 120-second limit. Renderer stderr: {FormatRendererError(stderr)}");
+            }
+
+            if (process.ExitCode != 0)
+            {
+                throw new SvgRasterizationException("svg_renderer_exit", $"SVG rasterizer exited with code {process.ExitCode}. Renderer stderr: {FormatRendererError(stderr)}");
+            }
+
+            return SKBitmap.Decode(outputPath)
+                ?? throw new SvgRasterizationException("svg_output_invalid", $"SVG rasterizer exited with code 0 but produced an unreadable PNG. Renderer stderr: {FormatRendererError(stderr)}");
         }
-        catch (Exception e)
+        finally
         {
-            _logger.LogError(e, "Detected intermediary error extracting image {0}", path);
-            bitmap?.Dispose();
-            throw;
+            try
+            {
+                if (File.Exists(outputPath))
+                {
+                    File.Delete(outputPath);
+                }
+            }
+            catch (Exception cleanupException)
+            {
+                _logger.LogError(cleanupException, "Unable to remove temporary SVG rasterization output {OutputPath}", outputPath);
+            }
         }
+    }
+
+    private static string FormatRendererError(string stderr)
+    {
+        var trimmed = stderr.Trim();
+        return trimmed.Length == 0 ? "[empty]" : trimmed;
     }
 
     private SKBitmap OrientImage(SKBitmap bitmap, SKEncodedOrigin origin)
@@ -818,5 +884,16 @@ public class SkiaEncoder : IImageEncoder
         }
 
         return null;
+    }
+
+    private sealed class SvgRasterizationException : IOException
+    {
+        public SvgRasterizationException(string code, string message)
+            : base(message)
+        {
+            Code = code;
+        }
+
+        public string Code { get; }
     }
 }

@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
 #nullable disable
 
 #pragma warning disable CS1591
@@ -14,6 +15,7 @@ using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Extensions;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
+using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Dto;
@@ -673,6 +675,19 @@ namespace MediaBrowser.Controller.Entities
                 video.OwnerId = Id;
                 LibraryManager.CreateItem(video, parentFolder);
                 newOptions.ForceSave = true;
+            }
+
+            if (!string.Equals(video.Path, path, StringComparison.Ordinal))
+            {
+                await PermalinkIdentityMutationAdapter.ExecuteAsync(
+                    [video],
+                    new PermalinkIdentityMutationRequest("scan-replacement", video.ProviderIds, video.GetBaseItemKind().ToString()),
+                    async (_, mutationToken) =>
+                    {
+                        video.Path = path;
+                        await video.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, mutationToken).ConfigureAwait(false);
+                    },
+                    cancellationToken).ConfigureAwait(false);
             }
 
             if (video.OwnerId.IsEmpty())

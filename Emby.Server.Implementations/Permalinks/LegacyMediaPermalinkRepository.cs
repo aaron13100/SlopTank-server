@@ -78,7 +78,9 @@ public sealed class LegacyMediaPermalinkRepository(IPermalinkAuthorityRootProvid
                 {
                     if (!Guid.TryParse(reader.GetString(0), out var itemId))
                     {
-                        throw new PermalinkException(PermalinkErrorKind.Corrupt, "legacy-item-id-invalid",
+                        throw new PermalinkException(
+                            PermalinkErrorKind.Corrupt,
+                            "legacy-item-id-invalid",
                             "A previously issued permalink has an invalid library item ID.");
                     }
 
@@ -104,7 +106,9 @@ public sealed class LegacyMediaPermalinkRepository(IPermalinkAuthorityRootProvid
             {
                 if (!Guid.TryParse(orphanReader.GetString(0), out var groupId))
                 {
-                    throw new PermalinkException(PermalinkErrorKind.Corrupt, "legacy-association-id-invalid",
+                    throw new PermalinkException(
+                        PermalinkErrorKind.Corrupt,
+                        "legacy-association-id-invalid",
                         "A previously issued permalink has an invalid association ID.");
                 }
 
@@ -118,7 +122,9 @@ public sealed class LegacyMediaPermalinkRepository(IPermalinkAuthorityRootProvid
                 {
                     if (!MediaContentIdentifier.IsPublicAlias(recordedAlias))
                     {
-                        throw new PermalinkException(PermalinkErrorKind.Corrupt, "legacy-alias-invalid",
+                        throw new PermalinkException(
+                            PermalinkErrorKind.Corrupt,
+                            "legacy-alias-invalid",
                             "A previously issued permalink contains an unsupported alias.");
                     }
 
@@ -159,8 +165,11 @@ public sealed class LegacyMediaPermalinkRepository(IPermalinkAuthorityRootProvid
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            throw new PermalinkException(PermalinkErrorKind.Unavailable, "legacy-alias-read-failed",
-                $"Cannot inspect previously issued permalink storage: {exception.Message}", exception);
+            throw new PermalinkException(
+                PermalinkErrorKind.Unavailable,
+                "legacy-alias-read-failed",
+                $"Cannot inspect previously issued permalink storage: {exception.Message}",
+                exception);
         }
 
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -200,22 +209,29 @@ public sealed class LegacyMediaPermalinkRepository(IPermalinkAuthorityRootProvid
 
         if (document.Version != 1)
         {
-            throw new PermalinkException(PermalinkErrorKind.VersionRefused, "legacy-event-version-unsupported",
+            throw new PermalinkException(
+                PermalinkErrorKind.VersionRefused,
+                "legacy-event-version-unsupported",
                 $"Saved alias metadata version {document.Version} is not supported.");
         }
 
         if (document.Type != "sloptank.permalink-event" || document.Ids is null
             || document.Ids.Any(value => value is null || string.IsNullOrEmpty(value.Id)) || document.ActiveExternalAliases is null)
         {
-            throw new PermalinkException(PermalinkErrorKind.Corrupt, "legacy-event-invalid",
+            throw new PermalinkException(
+                PermalinkErrorKind.Corrupt,
+                "legacy-event-invalid",
                 "The saved alias metadata has an unsupported format.");
         }
 
         return document;
     }
 
-    private static PermalinkException ReadFailure(SqliteException exception) => new(PermalinkErrorKind.Unavailable, "legacy-alias-read-failed",
-        $"Cannot read previously issued permalinks (SQLite {exception.SqliteErrorCode}: {exception.Message}).", exception);
+    private static PermalinkException ReadFailure(SqliteException exception) => new(
+        PermalinkErrorKind.Unavailable,
+        "legacy-alias-read-failed",
+        $"Cannot read previously issued permalinks (SQLite {exception.SqliteErrorCode}: {exception.Message}).",
+        exception);
 
     internal sealed record LegacyAssociation(Guid GroupId, Guid? ItemId, string Alias, string? Path, string? ItemKind);
 }

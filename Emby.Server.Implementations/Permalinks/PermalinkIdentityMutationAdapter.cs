@@ -225,9 +225,12 @@ internal sealed class PermalinkIdentityMutationAdapter : IPermalinkIdentityMutat
         var pending = await _pending.FindPendingAsync(item.Id, token).ConfigureAwait(false);
         if (pending is not null)
         {
-            throw new PermalinkException(PermalinkErrorKind.Conflict, "identity-mutation-pending",
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "identity-mutation-pending",
                 $"Item '{item.Id}' is fenced by unfinished durable operation '{pending.OperationId}'.",
-                operationId: pending.OperationId, itemId: item.Id);
+                operationId: pending.OperationId,
+                itemId: item.Id);
         }
     }
 

@@ -1,4 +1,4 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-07-22, 2026-09-09, 2026-10-10, 2026-10-14, 2026-10-31.
+# SlopTank modification notice: added or changed by SlopTank on 2026-07-22, 2026-09-09, 2026-10-10, 2026-10-14, 2026-10-31, 2026-11-03.
 .directory
 
 #################
@@ -352,7 +352,11 @@ id_ed25519.pub
 **/fixtures/private/
 *.expected.private.*
 # PB-009 Ops tools tree root
-/tools/
+!/tools/
+/tools/*
+# The standalone SVG converter is distributed as part of the server source.
+!/tools/svg-rasterizer/
+!/tools/svg-rasterizer/**
 # Allowlisted placeholders (must stay committable)
 !.env.example
 !.env.sample

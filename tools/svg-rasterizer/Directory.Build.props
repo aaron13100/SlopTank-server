@@ -1,0 +1,15 @@
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-11-03. -->
+<Project>
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Keep this standalone program's pinned dependencies independent of the server. -->
+    <ImportDirectoryPackagesProps>false</ImportDirectoryPackagesProps>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <AnalysisMode>AllEnabledByDefault</AnalysisMode>
+  </PropertyGroup>
+</Project>

@@ -273,8 +273,8 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
                 // Compatibility belongs to those bytes; it must not leave an old ID
                 // permanently pending after the canonical file completed preparation.
                 var preparedItem = item!;
-                var sameFileRecords = await db.BaseItems.Where(value => value.Id != preparedItem.Id && value.Path == preparedItem.Path
-                        && (value.PrimaryVersionId == preparedItem.Id || value.OwnerId == preparedItem.Id))
+                var sameFileRecords = await db.BaseItems.Where(value => !value.Id.Equals(preparedItem.Id) && value.Path == preparedItem.Path
+                        && (value.PrimaryVersionId.Equals(preparedItem.Id) || value.OwnerId.Equals(preparedItem.Id)))
                     .ToArrayAsync(cancellationToken).ConfigureAwait(false);
                 foreach (var alias in sameFileRecords)
                 {

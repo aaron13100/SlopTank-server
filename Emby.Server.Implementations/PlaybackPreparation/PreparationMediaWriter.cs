@@ -30,6 +30,8 @@ internal sealed class PreparationMediaWriter
     private string _identity;
     private bool _mediaInfoRefreshRequired;
 
+    internal sealed record PreparedMediaReplacement(string ItemId, string OriginalPath, string StagedPath, string? DestinationPath);
+
     public PreparationMediaWriter(
         IPlaybackPreparationService preparation,
         IPermalinkMutationCoordinator mutations,
@@ -52,7 +54,7 @@ internal sealed class PreparationMediaWriter
 
     public async Task<string> ReplaceAsync(PreparedMediaReplacement replacement, PlaybackPreparationRequest claim, CancellationToken token)
     {
-        if (!Guid.TryParse(replacement.ItemId, out var itemId) || itemId != _itemId
+        if (!Guid.TryParse(replacement.ItemId, out var itemId) || !itemId.Equals(_itemId)
             || !string.Equals(replacement.OriginalPath, _path, StringComparison.Ordinal))
         {
             throw Error("replacement-binding-mismatch", "The replacement does not belong to this job's current media record.");
@@ -247,6 +249,3 @@ internal sealed class PreparationMediaWriter
 
     private static PlaybackPreparationException Error(string code, string message) => new(409, code, message);
 }
-
-/// <summary>Prepared output submitted over a job's private pipe, without account credentials.</summary>
-internal sealed record PreparedMediaReplacement(string ItemId, string OriginalPath, string StagedPath, string? DestinationPath);

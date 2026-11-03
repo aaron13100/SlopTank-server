@@ -28,8 +28,12 @@ internal sealed class PreparationWorkerChannel
     private PlaybackPreparationRequest _claim;
     private WorkerStage _stage = WorkerStage.Classifying;
 
-    public PreparationWorkerChannel(IPlaybackPreparationService service, PreparationMediaWriter writer,
-        PlaybackPreparationRequest claim, Func<bool> isIdle, ILogger logger)
+    public PreparationWorkerChannel(
+        IPlaybackPreparationService service,
+        PreparationMediaWriter writer,
+        PlaybackPreparationRequest claim,
+        Func<bool> isIdle,
+        ILogger logger)
     {
         _service = service;
         _writer = writer;
@@ -45,6 +49,13 @@ internal sealed class PreparationWorkerChannel
             ["idle"] = IdleAsync,
             ["replace"] = ReplaceAsync
         };
+    }
+
+    private enum WorkerStage
+    {
+        Classifying,
+        Preparing,
+        Finished
     }
 
     public async Task RunAsync(StreamReader input, StreamWriter output, object runtime, CancellationToken token)
@@ -110,8 +121,23 @@ internal sealed class PreparationWorkerChannel
                 };
                 _logger.LogWarning(exception, "Preparation request {RequestId} RPC failed ({Code})", _requestId, code);
                 var detail = exception.Message.Length > 2048 ? exception.Message[..2048] : exception.Message;
-                await WriteAsync(output, new { protocol = Protocol, version = 1, type = "response", id, ok = false, payload = (object?)null,
-                    error = new { code, message = detail } }, token).ConfigureAwait(false);
+                await WriteAsync(
+                    output,
+                    new
+                    {
+                        protocol = Protocol,
+                        version = 1,
+                        type = "response",
+                        id,
+                        ok = false,
+                        payload = (object?)null,
+                        error = new
+                        {
+                            code,
+                            message = detail
+                        }
+                    },
+                    token).ConfigureAwait(false);
             }
         }
 
@@ -154,7 +180,7 @@ internal sealed class PreparationWorkerChannel
     private async Task<object> ReplaceAsync(JsonElement payload, CancellationToken token)
     {
         RequireStage(WorkerStage.Preparing);
-        var replacement = payload.Deserialize<PreparedMediaReplacement>(PayloadOptions)
+        var replacement = payload.Deserialize<PreparationMediaWriter.PreparedMediaReplacement>(PayloadOptions)
             ?? throw Error("ipc-invalid-payload", "A replacement object is required.");
         var path = await _writer.ReplaceAsync(replacement, _claim, token).ConfigureAwait(false);
         return new { path };
@@ -177,9 +203,11 @@ internal sealed class PreparationWorkerChannel
         }
     }
 
-    private static T Field<T>(JsonElement value, string name) where T : class => value.TryGetProperty(name, out var field)
-        ? field.Deserialize<T>() ?? throw Error("ipc-invalid-payload", $"Field '{name}' must be an object.")
-        : throw Error("ipc-invalid-payload", $"Field '{name}' is required.");
+    private static T Field<T>(JsonElement value, string name)
+        where T : class
+        => value.TryGetProperty(name, out var field)
+            ? field.Deserialize<T>() ?? throw Error("ipc-invalid-payload", $"Field '{name}' must be an object.")
+            : throw Error("ipc-invalid-payload", $"Field '{name}' is required.");
 
     private static string Text(JsonElement value, string name) => value.TryGetProperty(name, out var field) && field.ValueKind == JsonValueKind.String
         ? field.GetString()! : throw Error("ipc-invalid-frame", $"Field '{name}' must be a string.");
@@ -246,11 +274,4 @@ internal sealed class PreparationWorkerChannel
     }
 
     private static PlaybackPreparationException Error(string code, string message) => new(409, code, message);
-
-    private enum WorkerStage
-    {
-        Classifying,
-        Preparing,
-        Finished
-    }
 }

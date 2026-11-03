@@ -682,7 +682,7 @@ namespace MediaBrowser.Controller.Entities
 
             if (!string.Equals(video.Path, path, StringComparison.Ordinal))
             {
-                await PermalinkIdentityMutationAdapter.ExecuteAsync(
+                await Folder.PermalinkIdentityMutationAdapter.ExecuteAsync(
                     [video],
                     new PermalinkIdentityMutationRequest("scan-replacement", video.ProviderIds, video.GetBaseItemKind().ToString()),
                     async (_, mutationToken) =>

@@ -130,7 +130,12 @@ public sealed class PermalinkManager : IPermalinkManager
 
                 var current = await _repository.ReadForItemAsync(itemId, cancellationToken).ConfigureAwait(false);
                 var metadata = await ReadMetadataAsync(item, createSeriesIdentity: false, cancellationToken).ConfigureAwait(false);
-                if (current.ContentId != mapping.ContentId || metadata.Kind != mapping.Kind || IdentityChanged(current, metadata)
+                var canRetainUnidentifiedIdentity = await CanRetainUnidentifiedIdentityAsync(
+                    current,
+                    metadata,
+                    cancellationToken).ConfigureAwait(false);
+                if (current.ContentId != mapping.ContentId || metadata.Kind != mapping.Kind
+                    || (IdentityChanged(current, metadata) && !canRetainUnidentifiedIdentity)
                     || (MediaContentIdentifier.ParseProviderAlias(identifier) is not null && !metadata.PublicAliases.Contains(identifier, StringComparer.Ordinal)))
                 {
                     continue;
@@ -321,11 +326,16 @@ public sealed class PermalinkManager : IPermalinkManager
                 throw new PermalinkException(PermalinkErrorKind.Conflict, "metadata-identity-conflict", "The library metadata identifies more than one title. Correct its provider or episode metadata before associating this file.", itemId: item.Id);
             }
 
+            var canRetainUnidentifiedIdentity = await CanRetainUnidentifiedIdentityAsync(
+                current,
+                metadata,
+                token).ConfigureAwait(false);
             var contentId = primaryBinding?.ContentId ?? (matches.Count == 1 ? matches[0].ContentId
-                : current.ContentId.HasValue && !IdentityChanged(current, metadata) ? current.ContentId.Value
+                : current.ContentId.HasValue && (!IdentityChanged(current, metadata) || canRetainUnidentifiedIdentity) ? current.ContentId.Value
                 : _identifiers.CreateContentId());
             var inheritedContentId = current.ContentId.HasValue && current.ContentId != contentId
-                && MediaContentIdentifier.IsKindRefinement(current.Kind, metadata.Kind) && current.Keys.All(key => key.StartsWith("sk-", StringComparison.Ordinal))
+                && MediaContentIdentifier.IsKindRefinement(current.Kind, metadata.Kind)
+                && (current.Keys.All(key => key.StartsWith("sk-", StringComparison.Ordinal)) || canRetainUnidentifiedIdentity)
                 ? current.ContentId : null;
             var aliases = metadata.PublicAliases.Append(MediaContentIdentifier.OpaqueAlias(contentId))
                 .Concat(inheritedContentId.HasValue ? current.PublicAliases : Array.Empty<string>()).Distinct(StringComparer.Ordinal).ToArray();
@@ -497,6 +507,28 @@ public sealed class PermalinkManager : IPermalinkManager
         var oldCoordinates = previous.Keys.Where(value => value.StartsWith("metadata:v1:", StringComparison.Ordinal)).ToArray();
         return current.CoordinateKey is not null && oldCoordinates.Length > 0
             && !oldCoordinates.Contains(current.CoordinateKey, StringComparer.Ordinal);
+    }
+
+    private Task<bool> CanRetainUnidentifiedIdentityAsync(
+        PermalinkItemBinding current,
+        MediaContentIdentity metadata,
+        CancellationToken cancellationToken)
+    {
+        if (!current.ContentId.HasValue || current.Kind != metadata.Kind || metadata.CoordinateKey is null
+            || !current.Keys.Any(key => MediaContentIdentifier.TryGetChangedCoordinateParents(
+                key,
+                metadata.CoordinateKey,
+                out _,
+                out _)))
+        {
+            return Task.FromResult(false);
+        }
+
+        return _repository.CanRetainUnidentifiedIdentityAsync(
+            current.ContentId,
+            metadata.Kind,
+            metadata.CoordinateKey,
+            cancellationToken);
     }
 
     private static PermalinkException MappingChanged() => new(PermalinkErrorKind.Conflict,

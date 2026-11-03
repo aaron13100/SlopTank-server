@@ -33,6 +33,7 @@ using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
@@ -547,7 +548,7 @@ namespace Emby.Server.Implementations.Library
                         .ToArray();
                     var survivingIds = alternateVersions.Select(value => value.Id).ToHashSet();
                     newPrimary.LinkedAlternateVersions = video.LinkedAlternateVersions
-                        .Where(lc => !lc.ItemId.HasValue || (survivingIds.Contains(lc.ItemId.Value) && lc.ItemId.Value != newPrimary.Id))
+                        .Where(lc => !lc.ItemId.HasValue || (survivingIds.Contains(lc.ItemId.Value) && !lc.ItemId.Value.Equals(newPrimary.Id)))
                         .ToArray();
 
                     newPrimary.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).GetAwaiter().GetResult();
@@ -898,8 +899,11 @@ namespace Emby.Server.Implementations.Library
                 {
                     if (!visited.Add(primary.Id))
                     {
-                        throw new PermalinkException(PermalinkErrorKind.Conflict, "file-record-cycle",
-                            "The library's records for this filename contain a version cycle.", itemId: record.Id);
+                        throw new PermalinkException(
+                            PermalinkErrorKind.Conflict,
+                            "file-record-cycle",
+                            "The library's records for this filename contain a version cycle.",
+                            itemId: record.Id);
                     }
 
                     current = primary;
@@ -922,8 +926,11 @@ namespace Emby.Server.Implementations.Library
                     || !string.Equals(Path.ChangeExtension(item.Path, ".mp4"), currentPath, StringComparison.Ordinal)
                     || !MediaFileIsMissing(item.Path)))
             {
-                throw new PermalinkException(PermalinkErrorKind.Conflict, "media-location-changed",
-                    "Classification may only retain the filename or associate its completed MKV-to-MP4 conversion.", itemId: item.Id);
+                throw new PermalinkException(
+                    PermalinkErrorKind.Conflict,
+                    "media-location-changed",
+                    "Classification may only retain the filename or associate its completed MKV-to-MP4 conversion.",
+                    itemId: item.Id);
             }
 
             if (item.GetType() != typeof(Video))
@@ -933,15 +940,21 @@ namespace Emby.Server.Implementations.Library
                     return item;
                 }
 
-                throw new PermalinkException(PermalinkErrorKind.Conflict, "media-classification-changed",
-                    "Only a generic video can be refined to a concrete video kind.", itemId: item.Id);
+                throw new PermalinkException(
+                    PermalinkErrorKind.Conflict,
+                    "media-classification-changed",
+                    "Only a generic video can be refined to a concrete video kind.",
+                    itemId: item.Id);
             }
 
-            var existing = GetMediaFileRecords(currentPath).Where(value => value.Id != item.Id && !value.ExtraType.HasValue && value.GetType() == targetType).ToArray();
+            var existing = GetMediaFileRecords(currentPath).Where(value => !value.Id.Equals(item.Id) && !value.ExtraType.HasValue && value.GetType() == targetType).ToArray();
             if (existing.Length > 1)
             {
-                throw new PermalinkException(PermalinkErrorKind.Conflict, "library-path-ambiguous",
-                    "Several concrete media records already use this filename; resolve their metadata before refining another record.", itemId: item.Id);
+                throw new PermalinkException(
+                    PermalinkErrorKind.Conflict,
+                    "library-path-ambiguous",
+                    "Several concrete media records already use this filename; resolve their metadata before refining another record.",
+                    itemId: item.Id);
             }
 
             Video? refined = null;
@@ -953,8 +966,11 @@ namespace Emby.Server.Implementations.Library
                     await _persistenceService.RefineVideoKindAsync(item, targetType, currentPath, token, existing.FirstOrDefault()?.Id).ConfigureAwait(false);
                     _cache.TryRemove(item.Id, out _);
                     refined = RetrieveItem(item.Id) as Video
-                        ?? throw new PermalinkException(PermalinkErrorKind.Conflict, "media-record-missing",
-                            "The refined media record could not be loaded.", itemId: item.Id);
+                        ?? throw new PermalinkException(
+                            PermalinkErrorKind.Conflict,
+                            "media-record-missing",
+                            "The refined media record could not be loaded.",
+                            itemId: item.Id);
                     RegisterItem(refined);
                     if (existing.Length == 1)
                     {
@@ -964,14 +980,17 @@ namespace Emby.Server.Implementations.Library
                         refined.SetPrimaryVersionId(primary.Id);
                         refined.OwnerId = primary.Id;
                         await UpdateItemAsync(refined, refined.GetParent(), ItemUpdateType.MetadataEdit, token).ConfigureAwait(false);
-                        if (!primary.LinkedAlternateVersions.Any(link => link.ItemId == refined.Id))
+                        if (!primary.LinkedAlternateVersions.Any(link => link.ItemId.HasValue && link.ItemId.Value.Equals(refined.Id)))
                         {
-                            primary.LinkedAlternateVersions = [.. primary.LinkedAlternateVersions,
+                            primary.LinkedAlternateVersions =
+                            [
+                                .. primary.LinkedAlternateVersions,
                                 new MediaBrowser.Controller.Entities.LinkedChild
                                 {
-                                    ItemId = refined.Id, Path = refined.Path,
+                                    ItemId = refined.Id,
                                     Type = MediaBrowser.Controller.Entities.LinkedChildType.LinkedAlternateVersion
-                                }];
+                                }
+                            ];
                             await UpdateItemAsync(primary, primary.GetParent(), ItemUpdateType.MetadataEdit, token).ConfigureAwait(false);
                         }
 
@@ -981,7 +1000,8 @@ namespace Emby.Server.Implementations.Library
                     {
                         await UpdateItemAsync(refined, refined.GetParent(), ItemUpdateType.MetadataEdit, token).ConfigureAwait(false);
                     }
-                }, cancellationToken).ConfigureAwait(false);
+                },
+                cancellationToken).ConfigureAwait(false);
             return refined!;
         }
 
@@ -1057,7 +1077,9 @@ namespace Emby.Server.Implementations.Library
         {
             if (GetStoredMediaByPath(path, expectedVideoType).Length > 1)
             {
-                throw new PermalinkException(PermalinkErrorKind.Conflict, "library-path-ambiguous",
+                throw new PermalinkException(
+                    PermalinkErrorKind.Conflict,
+                    "library-path-ambiguous",
                     $"Several library records of type '{expectedVideoType.Name}' use '{path}'; resolve the duplicate before adding a version.");
             }
 
@@ -2890,7 +2912,7 @@ namespace Emby.Server.Implementations.Library
             foreach (var source in items.OfType<Video>())
             {
                 if (RetrieveItem(source.Id) is not Video stored || string.IsNullOrEmpty(stored.Path)
-                    || !GetMediaFileRecords(stored.Path).Any(record => record.Id == source.Id))
+                    || !GetMediaFileRecords(stored.Path).Any(record => record.Id.Equals(source.Id)))
                 {
                     continue;
                 }
@@ -2900,7 +2922,7 @@ namespace Emby.Server.Implementations.Library
                 {
                     Path = stored.Path, Recursive = true, IncludeOwnedItems = true,
                     GroupByPresentationUniqueKey = false, EnableTotalRecordCount = false
-                }).OfType<Video>().Where(record => record.Id != source.Id && versionIds.Contains(record.Id)).ToArray();
+                }).OfType<Video>().Where(record => !record.Id.Equals(source.Id) && versionIds.Contains(record.Id)).ToArray();
                 if (aliases.Length == 0)
                 {
                     continue;
@@ -2980,7 +3002,7 @@ namespace Emby.Server.Implementations.Library
             if (item is Video video)
             {
                 var primaryId = video.PrimaryVersionId ?? (!video.ExtraType.HasValue ? video.OwnerId : Guid.Empty);
-                if (primaryId != Guid.Empty && GetItemById<Video>(primaryId) is { } primary
+                if (!primaryId.Equals(Guid.Empty) && GetItemById<Video>(primaryId) is { } primary
                     && string.Equals(primary.Path, video.Path, StringComparison.Ordinal))
                 {
                     // A retained same-file ID has no separate physical NFO.

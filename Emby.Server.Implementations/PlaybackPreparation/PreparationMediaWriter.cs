@@ -30,8 +30,6 @@ internal sealed class PreparationMediaWriter
     private string _identity;
     private bool _mediaInfoRefreshRequired;
 
-    internal sealed record PreparedMediaReplacement(string ItemId, string OriginalPath, string StagedPath, string? DestinationPath);
-
     public PreparationMediaWriter(
         IPlaybackPreparationService preparation,
         IPermalinkMutationCoordinator mutations,
@@ -248,4 +246,6 @@ internal sealed class PreparationMediaWriter
         ?? throw Error("media-unavailable", "The installed media could not be read after the guarded operation completed.");
 
     private static PlaybackPreparationException Error(string code, string message) => new(409, code, message);
+
+    internal sealed record PreparedMediaReplacement(string ItemId, string OriginalPath, string StagedPath, string? DestinationPath);
 }

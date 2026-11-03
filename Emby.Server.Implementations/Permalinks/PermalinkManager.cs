@@ -288,7 +288,8 @@ public sealed class PermalinkManager : IPermalinkManager
                     continue;
                 }
 
-                await _repository.ImportAliasAsync(new PermalinkBindingRequest(item.Id, binding.ContentId,
+                await _repository.ImportAliasAsync(
+                    new PermalinkBindingRequest(item.Id, binding.ContentId,
                     binding.ContentId, binding.Kind, [alias], null, _clock.GetUtcNow().UtcDateTime), token).ConfigureAwait(false);
             }
         }
@@ -365,7 +366,8 @@ public sealed class PermalinkManager : IPermalinkManager
 
             try
             {
-                await _repository.BindAsync(new PermalinkBindingRequest(item.Id, current.ContentId, contentId,
+                await _repository.BindAsync(
+                    new PermalinkBindingRequest(item.Id, current.ContentId, contentId,
                     metadata.Kind, aliases, metadata.CoordinateKey, _clock.GetUtcNow().UtcDateTime,
                     inheritedContentId, legacyAliases, retiredAliases), token).ConfigureAwait(false);
                 var saved = await _repository.ReadForItemAsync(item.Id, token).ConfigureAwait(false);
@@ -531,7 +533,8 @@ public sealed class PermalinkManager : IPermalinkManager
             cancellationToken);
     }
 
-    private static PermalinkException MappingChanged() => new(PermalinkErrorKind.Conflict,
+    private static PermalinkException MappingChanged() => new(
+        PermalinkErrorKind.Conflict,
         "mapping-changed", "The media metadata changed while its permalink association was being saved.");
 
     /// <summary>A logical title and its current visible library versions.</summary>

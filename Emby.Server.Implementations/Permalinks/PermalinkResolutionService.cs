@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-03, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-16, 2026-10-14, 2026-10-31, 2026-11-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-03, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-16, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -179,7 +179,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         var document = await _leases.ReadAsync(credentials.Handle, token).ConfigureAwait(false);
         if (document is null || document.UserId != credentials.UserId || document.Kind != credentials.Purpose
             || document.DeletedAtUtc.HasValue || document.ExpiresAtUtc <= Now
-            || !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(document.SecretDigest),
+            || !CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(document.SecretDigest),
                 Encoding.UTF8.GetBytes(MediaPermalinkLeaseRepository.Digest(credentials.Secret))))
         {
             throw Conflict("lease-invalid", "The permalink lease is invalid or has expired.");
@@ -242,7 +243,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
     {
         var secret = MediaPermalinkLeaseRepository.NewSecret();
         var now = Now;
-        return new IssuedLease(new MediaPermalinkLease
+        return new IssuedLease(
+            new MediaPermalinkLease
         {
             Handle = MediaPermalinkLeaseRepository.NewSecret(),
             SecretDigest = MediaPermalinkLeaseRepository.Digest(secret),
@@ -261,7 +263,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
     private static BaseItem Representative(PermalinkManager.Candidate candidate) => candidate.Items
         .OrderBy(item => item is Video { PrimaryVersionId: not null } ? 1 : 0).ThenBy(item => item.Id).First();
 
-    private static PermalinkCandidateEnvelope Envelope(IssuedLease issued, int rank) => new(rank,
+    private static PermalinkCandidateEnvelope Envelope(IssuedLease issued, int rank) => new(
+        rank,
         issued.Document.Alias.StartsWith("sk-", StringComparison.Ordinal) ? "sloptank" : "external",
         issued.Document.Handle, issued.Secret);
 

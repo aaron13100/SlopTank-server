@@ -90,6 +90,21 @@ public sealed class PermalinkManager : IPermalinkManager
             return Array.Empty<Candidate>();
         }
 
+        // Complete a version/part association interrupted after its normal
+        // library relationship became durable. Lookup remains a database and
+        // metadata operation, including recovery of an older opaque link.
+        foreach (var mapped in await _repository.ReadByAliasesAsync([identifier], cancellationToken).ConfigureAwait(false))
+        {
+            foreach (var itemId in await _repository.ReadItemIdsAsync(mapped.ContentId, cancellationToken).ConfigureAwait(false))
+            {
+                if (_library.GetItemById<BaseItem>(itemId, user) is Video video
+                    && (video.PrimaryVersionId.HasValue || (!video.ExtraType.HasValue && video.OwnerId != Guid.Empty)))
+                {
+                    await BindMetadataAsync(video, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+
         var mappings = await _repository.ReadByAliasesAsync([identifier], cancellationToken).ConfigureAwait(false);
         var candidates = new List<Candidate>(mappings.Count);
         foreach (var mapping in mappings)
@@ -123,8 +138,29 @@ public sealed class PermalinkManager : IPermalinkManager
 
                 if (_library.GetItemById<BaseItem>(itemId, user) is not null)
                 {
-                    item.PermalinkContentId = mapping.ContentId;
-                    visible.Add(item);
+                    BaseItem physicalRecord = item;
+                    if (item is Video video && !string.IsNullOrEmpty(video.Path))
+                    {
+                        var fileRecords = _library.GetMediaFileRecords(video.Path);
+                        if (fileRecords.Count == 1)
+                        {
+                            physicalRecord = fileRecords[0];
+                        }
+
+                        if (!video.ExtraType.HasValue && video.OwnerId != Guid.Empty
+                            && _library.GetItemById<Video>(video.OwnerId) is { } owner
+                            && owner.AdditionalParts.Contains(video.Path, StringComparer.Ordinal))
+                        {
+                            physicalRecord = owner;
+                        }
+                    }
+
+                    if (_library.GetItemById<BaseItem>(physicalRecord.Id, user) is not null
+                        && !visible.Any(existing => existing.Id == physicalRecord.Id))
+                    {
+                        physicalRecord.PermalinkContentId = mapping.ContentId;
+                        visible.Add(physicalRecord);
+                    }
                 }
             }
 
@@ -260,14 +296,8 @@ public sealed class PermalinkManager : IPermalinkManager
             throw new PermalinkException(PermalinkErrorKind.Ineligible, "item-ineligible", "A persisted library title is required; extras and trailers do not have title permalinks.");
         }
 
-        var primary = FindTitleRecord(item, out var isMultipart);
+        var primary = FindTitleRecord(item, out _);
         var primaryBinding = primary is null ? null : await BindMetadataAsync(primary, token).ConfigureAwait(false);
-        if (isMultipart && primaryBinding is not null)
-        {
-            // Stacked parts are owned files of the title, not separate titles.
-            // The existing owner's AdditionalParts association supplies locators.
-            return primaryBinding;
-        }
 
         var metadata = await ReadMetadataAsync(item, createSeriesIdentity: true, token).ConfigureAwait(false);
         for (var attempt = 0; attempt < 3; attempt++)

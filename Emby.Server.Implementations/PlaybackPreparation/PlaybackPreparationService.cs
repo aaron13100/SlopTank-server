@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-03.
 // allow-no-test-found: private integration coverage is assigned to sloptank-tests/server/tests.
 #pragma warning disable CS1591
 #pragma warning disable SA1116
@@ -255,6 +255,20 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
             item.PlaybackReadyObjectIdentity = null;
             item.PlaybackReadyAlgorithmVersion = null;
             attempt.Phase = PlaybackPreparationAttemptPhase.Failed;
+        }
+
+        // Several retained record IDs can explicitly represent this same file.
+        // Compatibility belongs to those bytes; it must not leave an old ID
+        // permanently pending after the canonical file completed preparation.
+        var preparedItem = item!;
+        var sameFileRecords = await db.BaseItems.Where(value => value.Id != preparedItem.Id && value.Path == preparedItem.Path
+                && (value.PrimaryVersionId == preparedItem.Id || value.OwnerId == preparedItem.Id))
+            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var alias in sameFileRecords)
+        {
+            alias.PlaybackReadiness = preparedItem.PlaybackReadiness;
+            alias.PlaybackReadyObjectIdentity = preparedItem.PlaybackReadyObjectIdentity;
+            alias.PlaybackReadyAlgorithmVersion = preparedItem.PlaybackReadyAlgorithmVersion;
         }
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);

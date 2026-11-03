@@ -21,7 +21,7 @@ namespace Jellyfin.Api.Controllers;
 /// Exposes the authenticated durable mutation journal boundary.
 /// </summary>
 [Route("Permalinks/Rewrite")]
-[Authorize]
+[Authorize(Policy = Policies.RequiresElevation)]
 public sealed class PermalinkRewriteController : BaseJellyfinApiController
 {
     private readonly ILibraryManager _libraryManager;

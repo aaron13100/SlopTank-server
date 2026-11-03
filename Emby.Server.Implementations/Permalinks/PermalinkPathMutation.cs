@@ -1,12 +1,15 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09, 2026-10-14, 2026-10-31, 2026-11-03.
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Emby.Server.Implementations.MediaMutations;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
+using MediaBrowser.Controller.Persistence;
 
 namespace Emby.Server.Implementations.Permalinks;
 
@@ -18,27 +21,33 @@ internal sealed class PermalinkPathMutation
     private readonly ILibraryManager _libraryManager;
     private readonly PermalinkEvidence _evidence;
     private readonly PermalinkOperationJournal _journal;
-    private readonly PermalinkBindingIndex _bindings;
     private readonly PermalinkMutationClaimStore _claims;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly PermalinkCrossRootMutation _crossRoot;
+    private readonly PermalinkPathPublication _publication;
+    private readonly ProtectedMediaState _protection;
+    private readonly IMediaStreamRepository _mediaStreams;
 
     public PermalinkPathMutation(
         ILibraryManager libraryManager,
         PermalinkEvidence evidence,
         PermalinkOperationJournal journal,
-        PermalinkBindingIndex bindings,
         PermalinkMutationClaimStore claims,
         IPermalinkAtomicFileSystem fileSystem,
-        PermalinkCrossRootMutation crossRoot)
+        PermalinkCrossRootMutation crossRoot,
+        PermalinkPathPublication publication,
+        ProtectedMediaState protection,
+        IMediaStreamRepository mediaStreams)
     {
         _libraryManager = libraryManager;
         _evidence = evidence;
         _journal = journal;
-        _bindings = bindings;
         _claims = claims;
         _fileSystem = fileSystem;
         _crossRoot = crossRoot;
+        _publication = publication;
+        _protection = protection;
+        _mediaStreams = mediaStreams;
     }
 
     /// <summary>Commits the exact immutable path map without replacing any destination.</summary>
@@ -150,24 +159,84 @@ internal sealed class PermalinkPathMutation
             throw Conflict("destination-missing", "The prepared path bundle has no item destination.");
         }
 
-        item.Path = itemDestination;
-        if (item is Video video)
+        var updates = new Dictionary<Guid, BaseItem> { [item.Id] = item };
+        var tree = bundle.Parts.Count > 0 && bundle.Parts.All(part => part.Role.StartsWith("tree:", StringComparison.Ordinal));
+        if (tree)
         {
-            video.AdditionalParts = bundle.Parts
-                .Where(part => part.Role.StartsWith("additional:", StringComparison.Ordinal))
-                .Select(part => part.DestinationPath!)
-                .ToArray();
+            foreach (var child in _libraryManager.GetItemList(new InternalItemsQuery
+            {
+                AncestorIds = [item.Id], Recursive = true, IncludeOwnedItems = true,
+                GroupByPresentationUniqueKey = false, EnableTotalRecordCount = false
+            }))
+            {
+                updates.TryAdd(child.Id, child);
+            }
         }
 
-        await _libraryManager.UpdateItemAsync(
-            item,
-            item.GetParent()!,
-            ItemUpdateType.MetadataEdit,
-            cancellationToken).ConfigureAwait(false);
-        var anchor = _fileSystem.ReadAnchorToken(item.Path)
-            ?? throw Conflict("anchor-missing", "Moved item lost its stable anchor.");
-        await _bindings.UpdateCurrentPathAsync(anchor, item.Path, cancellationToken)
-            .ConfigureAwait(false);
+        var imagesMoved = new List<BaseItem>();
+        var movedMembers = new List<BaseItem>();
+        foreach (var changed in updates.Values)
+        {
+            var previousPath = changed.Id == item.Id ? operation.SourcePath : changed.Path;
+            changed.Path = MapPath(previousPath);
+            if (changed.Id != item.Id && changed.Path != previousPath)
+            {
+                movedMembers.Add(changed);
+            }
+
+            foreach (var image in changed.ImageInfos.Where(image => image.IsLocalFile))
+            {
+                var mapped = MapPath(image.Path);
+                if (mapped != image.Path)
+                {
+                    image.Path = mapped;
+                    imagesMoved.Add(changed);
+                }
+            }
+
+            if (changed is Video video)
+            {
+                video.AdditionalParts = video.AdditionalParts.Select(MapPath).ToArray();
+                video.LocalAlternateVersions = video.LocalAlternateVersions.Select(MapPath).ToArray();
+                video.SubtitleFiles = video.SubtitleFiles.Select(MapPath).ToArray();
+                video.AudioFiles = video.AudioFiles.Select(MapPath).ToArray();
+                foreach (var linked in video.LinkedAlternateVersions)
+                {
+                    if (!string.IsNullOrEmpty(linked.Path))
+                    {
+                        linked.Path = MapPath(linked.Path);
+                    }
+                }
+
+                var streams = _mediaStreams.GetMediaStreams(new MediaStreamQuery { ItemId = video.Id });
+                var externalPathsChanged = false;
+                foreach (var stream in streams.Where(stream => stream.IsExternal && !string.IsNullOrEmpty(stream.Path)))
+                {
+                    var mapped = MapPath(stream.Path);
+                    externalPathsChanged |= mapped != stream.Path;
+                    stream.Path = mapped;
+                }
+
+                if (externalPathsChanged)
+                {
+                    _mediaStreams.SaveMediaStreams(video.Id, streams, cancellationToken);
+                }
+            }
+        }
+
+        await _libraryManager.UpdateItemsAsync(updates.Values.ToArray(), item.GetParent()!,
+            ItemUpdateType.MetadataEdit, cancellationToken).ConfigureAwait(false);
+        foreach (var changed in imagesMoved.DistinctBy(changed => changed.Id))
+        {
+            await _libraryManager.UpdateImagesAsync(changed, forceUpdate: true).ConfigureAwait(false);
+        }
+
+        await _publication.PublishAsync(operation, item, bundle, cancellationToken).ConfigureAwait(false);
+        foreach (var member in movedMembers)
+        {
+            await _publication.PublishMemberLocationAsync(member, bundle, cancellationToken).ConfigureAwait(false);
+        }
+
         await _claims.FinalizeAsync(
             bundle,
             operation.OperationId,
@@ -175,6 +244,38 @@ internal sealed class PermalinkPathMutation
             cancellationToken).ConfigureAwait(false);
         await WriteTerminalPhasesAsync(operation, cancellationToken).ConfigureAwait(false);
         return new PermalinkMutationResult(operation.OperationId, PermalinkPhase.Committed.Name);
+
+        string MapPath(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return path;
+            }
+
+            var part = bundle.Parts.FirstOrDefault(part => string.Equals(part.SourcePath, path, StringComparison.Ordinal));
+            if (part?.DestinationPath is { } destination)
+            {
+                return destination;
+            }
+
+            if (string.Equals(path, operation.SourcePath, StringComparison.Ordinal))
+            {
+                return itemDestination;
+            }
+
+            if (tree)
+            {
+                var relative = Path.GetRelativePath(operation.SourcePath, path);
+                if (!Path.IsPathRooted(relative) && relative != ".."
+                    && !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                {
+                    return Path.Combine(itemDestination, relative);
+                }
+            }
+
+            return path;
+        }
+
     }
 
     private static void PublishSameRoot(PermalinkMutationBundle bundle)
@@ -220,9 +321,10 @@ internal sealed class PermalinkPathMutation
         BaseItem item,
         CancellationToken cancellationToken)
     {
-        var current = await _evidence.ComputeContentItemAsync(item, cancellationToken)
-            .ConfigureAwait(false);
-        if (!string.Equals(current.ContentRoot, operation.OldContentRoot, StringComparison.Ordinal))
+        var currentRoot = item is Video
+            ? (await _evidence.ComputeContentItemAsync(item, cancellationToken).ConfigureAwait(false)).ContentRoot
+            : (await _protection.EnsureAsync(item, cancellationToken).ConfigureAwait(false)).ContentRoot;
+        if (!string.Equals(currentRoot, operation.OldContentRoot, StringComparison.Ordinal))
         {
             throw Conflict(
                 "prepared-old-mismatch",

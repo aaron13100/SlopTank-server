@@ -19,7 +19,7 @@ namespace Emby.Server.Implementations.Permalinks;
 /// <summary>
 /// Implements Prepare, Commit, and deterministic recovery for protected item mutations.
 /// </summary>
-internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinator
+internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinator, IDisposable
 {
     private const int OperationGateCount = 64;
 
@@ -44,6 +44,7 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         "scan-replacement"
     };
 
+    private readonly SemaphoreSlim _preparationGate = new(1, 1);
     private readonly ILibraryManager _libraryManager;
     private readonly ProtectedMediaState _protection;
     private readonly PermalinkEvidence _evidence;
@@ -121,6 +122,34 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         PermalinkMutationPrepareRequest request,
         CancellationToken cancellationToken)
     {
+        // Scope inspection and durable prepare must be one admission step.
+        // Commit/recovery keep their existing per-operation serialization.
+        await _preparationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await PrepareCoreAsync(item, request, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _preparationGate.Release();
+        }
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        _preparationGate.Dispose();
+        foreach (var gate in _operationGates)
+        {
+            gate.Dispose();
+        }
+    }
+
+    private async Task<PermalinkMutationResult> PrepareCoreAsync(
+        BaseItem item,
+        PermalinkMutationPrepareRequest request,
+        CancellationToken cancellationToken)
+    {
         if (request.OperationId.Equals(Guid.Empty)
             || !request.ItemId.Equals(item.Id)
             || !_kinds.Contains(request.Kind))
@@ -135,6 +164,11 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
         {
             throw Conflict("media-location-changed", "The media record's filename changed after the replacement was selected. Resolve the current record before retrying.");
         }
+
+        await EnsureNoPendingPhysicalMutationInScopeAsync(
+            item,
+            request,
+            cancellationToken).ConfigureAwait(false);
 
         if (existing is null && request.Kind == "media")
         {
@@ -800,5 +834,63 @@ internal sealed class PermalinkMutationCoordinator : IPermalinkMutationCoordinat
     private static PermalinkException Conflict(string code, string message)
     {
         return new PermalinkException(PermalinkErrorKind.Conflict, code, message);
+    }
+
+    private async Task EnsureNoPendingPhysicalMutationInScopeAsync(
+        BaseItem item,
+        PermalinkMutationPrepareRequest request,
+        CancellationToken cancellationToken)
+    {
+        // Compound deletion/promotion batches already prepare their own member
+        // operations. Their pending rows still block intersecting media/path writes.
+        if (request.Kind is not ("media" or "path" or "cross-root" or "tree" or "multipart"))
+        {
+            return;
+        }
+
+        var itemIds = new HashSet<Guid> { item.Id };
+        foreach (var parent in item.GetParents())
+        {
+            itemIds.Add(parent.Id);
+        }
+
+        if (item is Video video)
+        {
+            foreach (var version in video.GetAllVersions())
+            {
+                if (string.Equals(version.Path, item.Path, StringComparison.Ordinal))
+                {
+                    itemIds.Add(version.Id);
+                }
+            }
+        }
+
+        if (item is Folder && request.Kind is ("path" or "tree" or "cross-root"))
+        {
+            foreach (var descendant in _libraryManager.GetItemList(new InternalItemsQuery
+            {
+                AncestorIds = [item.Id],
+                Recursive = true,
+                IncludeOwnedItems = true,
+                GroupByPresentationUniqueKey = false,
+                EnableTotalRecordCount = false
+            }))
+            {
+                itemIds.Add(descendant.Id);
+            }
+        }
+
+        foreach (var itemId in itemIds)
+        {
+            if (await _journal.HasPendingExceptAsync(
+                itemId,
+                request.OperationId,
+                cancellationToken).ConfigureAwait(false))
+            {
+                throw Conflict(
+                    "identity-mutation-pending",
+                    $"Item '{itemId}' already has a pending physical identity mutation; cannot prepare '{request.Kind}' for '{item.Id}'.");
+            }
+        }
     }
 }

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-02, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31, 2026-11-03.
 using System;
 using System.Globalization;
 using System.IO;
@@ -64,19 +64,26 @@ internal sealed class PermalinkCrossRootMutation
             var staged = Path.Combine(destinationStage, ordinal);
             var destination = part.DestinationPath!;
             var quarantine = Path.Combine(sourceQuarantine, ordinal);
-            if (!File.Exists(staged)
-                && !File.Exists(destination)
-                && File.Exists(part.SourcePath))
+            var reference = File.Exists(part.SourcePath) ? part.SourcePath : quarantine;
+            if (!File.Exists(staged) && !File.Exists(destination) && File.Exists(reference))
             {
-                await CopyExclusiveAsync(part.SourcePath, staged, cancellationToken)
-                    .ConfigureAwait(false);
+                await CopyExclusiveAsync(reference, staged, cancellationToken).ConfigureAwait(false);
             }
 
-            if (part.Role == "main" && File.Exists(staged))
+            if (File.Exists(staged) && File.Exists(reference))
             {
-                var anchor = _fileSystem.ReadAnchorToken(part.SourcePath)
-                    ?? throw Conflict("anchor-missing", "Cross-root source lost its stable anchor.");
-                _fileSystem.AssignAnchorToken(staged, anchor);
+                var expectedAnchor = _fileSystem.ReadAnchorToken(reference);
+                var stagedAnchor = _fileSystem.ReadAnchorToken(staged);
+                if (expectedAnchor is not null && stagedAnchor is null)
+                {
+                    // Complete a historical staged copy interrupted before its
+                    // source anchor was propagated. No fresh anchor is minted.
+                    _fileSystem.AssignAnchorToken(staged, expectedAnchor);
+                }
+                else if (!string.Equals(expectedAnchor, stagedAnchor, StringComparison.Ordinal))
+                {
+                    throw Conflict("anchor-mismatch", "Cross-root staging has a different anchor from its exact source evidence.");
+                }
             }
 
             _fileSystem.CreateDirectoryDurable(Path.GetDirectoryName(destination)!);
@@ -92,7 +99,6 @@ internal sealed class PermalinkCrossRootMutation
                 File.Move(staged, destination);
             }
 
-            var reference = File.Exists(part.SourcePath) ? part.SourcePath : quarantine;
             await VerifyEqualAsync(reference, destination, cancellationToken)
                 .ConfigureAwait(false);
             await WritePartPhaseAsync(
@@ -289,7 +295,14 @@ internal sealed class PermalinkCrossRootMutation
             _fileSystem,
             source,
             destination,
-            beforePublish: null,
+            beforePublish: staged =>
+            {
+                var anchorToken = _fileSystem.ReadAnchorToken(source);
+                if (anchorToken is not null)
+                {
+                    _fileSystem.AssignAnchorToken(staged, anchorToken);
+                }
+            },
             cancellationToken);
     }
 

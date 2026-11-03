@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-30, 2026-10-14, 2026-10-31, 2026-11-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-30, 2026-10-14, 2026-10-31, 2026-11-01, 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -92,21 +92,36 @@ internal sealed class PermalinkCapsuleStore
                 ".caller-temp-capsule-" + Guid.NewGuid().ToString("N"));
             try
             {
-                _fileSystem.CreateDirectoryDurable(Path.Combine(temporary, "events"));
-                await _fileSystem.PublishImmutableAsync(
-                    Path.Combine(temporary, "capsule.json"),
-                    reservation.HeaderJson,
-                    cancellationToken).ConfigureAwait(false);
-                var eventDocument = CanonicalJson.Deserialize<PermalinkEventDocument>(
-                    reservation.EventJson.Span,
-                    "authority genesis event");
-                await _fileSystem.PublishImmutableAsync(
-                    Path.Combine(
+                if (!string.Equals(
+                        Path.GetFullPath(capsulePath),
+                        Path.GetFullPath(reservation.CapsulePath),
+                        StringComparison.Ordinal)
+                    && Directory.Exists(reservation.CapsulePath))
+                {
+                    await CopyCapsuleDirectoryAsync(
+                        reservation.CapsulePath,
                         temporary,
-                        "events",
-                        eventDocument.EventId.ToString("D") + ".json"),
-                    reservation.EventJson,
-                    cancellationToken).ConfigureAwait(false);
+                        cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    _fileSystem.CreateDirectoryDurable(Path.Combine(temporary, "events"));
+                    await _fileSystem.PublishImmutableAsync(
+                        Path.Combine(temporary, "capsule.json"),
+                        reservation.HeaderJson,
+                        cancellationToken).ConfigureAwait(false);
+                    var eventDocument = CanonicalJson.Deserialize<PermalinkEventDocument>(
+                        reservation.EventJson.Span,
+                        "authority genesis event");
+                    await _fileSystem.PublishImmutableAsync(
+                        Path.Combine(
+                            temporary,
+                            "events",
+                            eventDocument.EventId.ToString("D") + ".json"),
+                        reservation.EventJson,
+                        cancellationToken).ConfigureAwait(false);
+                }
+
                 _fileSystem.PublishDirectoryImmutable(temporary, capsulePath);
             }
             finally
@@ -124,6 +139,54 @@ internal sealed class PermalinkCapsuleStore
             reservation.AnchorJson,
             cancellationToken).ConfigureAwait(false);
         return capsulePath;
+    }
+
+    private async Task CopyCapsuleDirectoryAsync(
+        string source,
+        string destination,
+        CancellationToken cancellationToken)
+    {
+        EnsureMetadataDirectory(source);
+        _fileSystem.CreateDirectoryDurable(destination);
+        foreach (var entry in Directory.EnumerateFileSystemEntries(source))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            EnsureMetadataEntry(entry);
+            var target = Path.Combine(destination, Path.GetFileName(entry));
+            if ((File.GetAttributes(entry) & FileAttributes.Directory) != 0)
+            {
+                await CopyCapsuleDirectoryAsync(entry, target, cancellationToken)
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            var bytes = await File.ReadAllBytesAsync(entry, cancellationToken).ConfigureAwait(false);
+            await _fileSystem.PublishImmutableAsync(target, bytes, cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static void EnsureMetadataDirectory(string path)
+    {
+        EnsureMetadataEntry(path);
+        if ((File.GetAttributes(path) & FileAttributes.Directory) == 0)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "capsule-metadata-invalid",
+                $"Capsule metadata path '{path}' is not a directory.");
+        }
+    }
+
+    private static void EnsureMetadataEntry(string path)
+    {
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "capsule-metadata-reparse-point",
+                $"Capsule metadata contains a symbolic link or reparse point at '{path}'.");
+        }
     }
 
     /// <summary>

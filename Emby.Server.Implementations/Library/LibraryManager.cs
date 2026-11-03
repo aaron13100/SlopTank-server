@@ -950,7 +950,7 @@ namespace Emby.Server.Implementations.Library
                 new PermalinkIdentityMutationRequest("kind-reclassification", DesiredItemKind: targetType.Name),
                 async (ambient, token) =>
                 {
-                    await _persistenceService.RefineVideoKindAsync(item, targetType, currentPath, token).ConfigureAwait(false);
+                    await _persistenceService.RefineVideoKindAsync(item, targetType, currentPath, token, existing.FirstOrDefault()?.Id).ConfigureAwait(false);
                     _cache.TryRemove(item.Id, out _);
                     refined = RetrieveItem(item.Id) as Video
                         ?? throw new PermalinkException(PermalinkErrorKind.Conflict, "media-record-missing",
@@ -2548,6 +2548,8 @@ namespace Emby.Server.Implementations.Library
         /// <inheritdoc />
         public void CreateItems(IReadOnlyList<BaseItem> items, BaseItem? parent, CancellationToken cancellationToken)
         {
+            items = IncludeSameFileRecords(items, cancellationToken);
+
             // Resolve and add any local alternate version items that don't exist yet
             // This ensures they exist in the database when LinkedChildren are processed
             var allItems = new List<BaseItem>(items);
@@ -2842,10 +2844,7 @@ namespace Emby.Server.Implementations.Library
 
             foreach (var item in allItems)
             {
-                if (!items.Contains(item))
-                {
-                    RegisterItem(item);
-                }
+                RegisterItem(item);
             }
 
             await AssociatePermalinksAsync(allItems, cancellationToken).ConfigureAwait(false);
@@ -2885,6 +2884,69 @@ namespace Emby.Server.Implementations.Library
             }
         }
 
+        private IReadOnlyList<BaseItem> IncludeSameFileRecords(IReadOnlyList<BaseItem> items, CancellationToken cancellationToken)
+        {
+            var updates = items.ToDictionary(item => item.Id);
+            foreach (var source in items.OfType<Video>())
+            {
+                if (RetrieveItem(source.Id) is not Video stored || string.IsNullOrEmpty(stored.Path)
+                    || !GetMediaFileRecords(stored.Path).Any(record => record.Id == source.Id))
+                {
+                    continue;
+                }
+
+                var versionIds = source.GetAllVersions().Select(version => version.Id).ToHashSet();
+                var aliases = _itemRepository.GetItemList(new InternalItemsQuery
+                {
+                    Path = stored.Path, Recursive = true, IncludeOwnedItems = true,
+                    GroupByPresentationUniqueKey = false, EnableTotalRecordCount = false
+                }).OfType<Video>().Where(record => record.Id != source.Id && versionIds.Contains(record.Id)).ToArray();
+                if (aliases.Length == 0)
+                {
+                    continue;
+                }
+
+                var streams = _mediaStreamRepository.GetMediaStreams(new MediaStreamQuery { ItemId = source.Id });
+                var attachments = _appHost.Resolve<IMediaAttachmentRepository>();
+                var sourceAttachments = attachments.GetMediaAttachments(new MediaAttachmentQuery { ItemId = source.Id });
+                foreach (var record in aliases)
+                {
+                    var alias = updates.TryGetValue(record.Id, out var pending) ? (Video)pending
+                        : GetItemById<Video>(record.Id) ?? record;
+                    // These records explicitly represent the same physical file.
+                    // Keep their IDs, title metadata and per-version user data,
+                    // while their filename and media probe describe that file.
+                    alias.Path = source.Path;
+                    alias.DateLastSaved = source.DateLastSaved;
+                    alias.AdditionalParts = source.AdditionalParts.ToArray();
+                    alias.Container = source.Container;
+                    alias.Size = source.Size;
+                    alias.TotalBitrate = source.TotalBitrate;
+                    alias.RunTimeTicks = source.RunTimeTicks;
+                    alias.Timestamp = source.Timestamp;
+                    alias.Width = source.Width;
+                    alias.Height = source.Height;
+                    alias.DefaultVideoStreamIndex = source.DefaultVideoStreamIndex;
+                    alias.HasSubtitles = source.HasSubtitles;
+                    alias.SubtitleFiles = source.SubtitleFiles.ToArray();
+                    alias.AudioFiles = source.AudioFiles.ToArray();
+                    alias.VideoType = source.VideoType;
+                    alias.Video3DFormat = source.Video3DFormat;
+                    alias.IsoType = source.IsoType;
+                    alias.AspectRatio = source.AspectRatio;
+                    alias.IngestState = source.IngestState;
+                    alias.PlaybackReadiness = source.PlaybackReadiness;
+                    alias.PlaybackReadyObjectIdentity = source.PlaybackReadyObjectIdentity;
+                    alias.PlaybackReadyAlgorithmVersion = source.PlaybackReadyAlgorithmVersion;
+                    _mediaStreamRepository.SaveMediaStreams(alias.Id, streams, cancellationToken);
+                    attachments.SaveMediaAttachments(alias.Id, sourceAttachments, cancellationToken);
+                    updates[alias.Id] = alias;
+                }
+            }
+
+            return updates.Values.ToArray();
+        }
+
         /// <inheritdoc />
         public Task UpdateItemAsync(BaseItem item, BaseItem parent, ItemUpdateType updateReason, CancellationToken cancellationToken)
             => UpdateItemsAsync([item], parent, updateReason, cancellationToken);
@@ -2915,6 +2977,18 @@ namespace Emby.Server.Implementations.Library
 
         public async Task RunMetadataSavers(BaseItem item, ItemUpdateType updateReason)
         {
+            if (item is Video video)
+            {
+                var primaryId = video.PrimaryVersionId ?? (!video.ExtraType.HasValue ? video.OwnerId : Guid.Empty);
+                if (primaryId != Guid.Empty && GetItemById<Video>(primaryId) is { } primary
+                    && string.Equals(primary.Path, video.Path, StringComparison.Ordinal))
+                {
+                    // A retained same-file ID has no separate physical NFO.
+                    // The canonical file record owns that shared sidecar.
+                    return;
+                }
+            }
+
             if (item.IsFileProtocol)
             {
                 await ProviderManager.SaveMetadataAsync(item, updateReason).ConfigureAwait(false);

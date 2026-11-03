@@ -177,9 +177,9 @@ internal sealed class PermalinkPathMutation
         var movedMembers = new List<BaseItem>();
         foreach (var changed in updates.Values)
         {
-            var previousPath = changed.Id == item.Id ? operation.SourcePath : changed.Path;
+            var previousPath = changed.Id.Equals(item.Id) ? operation.SourcePath : changed.Path;
             changed.Path = MapPath(previousPath);
-            if (changed.Id != item.Id && changed.Path != previousPath)
+            if (!changed.Id.Equals(item.Id) && changed.Path != previousPath)
             {
                 movedMembers.Add(changed);
             }
@@ -200,14 +200,6 @@ internal sealed class PermalinkPathMutation
                 video.LocalAlternateVersions = video.LocalAlternateVersions.Select(MapPath).ToArray();
                 video.SubtitleFiles = video.SubtitleFiles.Select(MapPath).ToArray();
                 video.AudioFiles = video.AudioFiles.Select(MapPath).ToArray();
-                foreach (var linked in video.LinkedAlternateVersions)
-                {
-                    if (!string.IsNullOrEmpty(linked.Path))
-                    {
-                        linked.Path = MapPath(linked.Path);
-                    }
-                }
-
                 var streams = _mediaStreams.GetMediaStreams(new MediaStreamQuery { ItemId = video.Id });
                 var externalPathsChanged = false;
                 foreach (var stream in streams.Where(stream => stream.IsExternal && !string.IsNullOrEmpty(stream.Path)))
@@ -224,8 +216,11 @@ internal sealed class PermalinkPathMutation
             }
         }
 
-        await _libraryManager.UpdateItemsAsync(updates.Values.ToArray(), item.GetParent()!,
-            ItemUpdateType.MetadataEdit, cancellationToken).ConfigureAwait(false);
+        await _libraryManager.UpdateItemsAsync(
+            updates.Values.ToArray(),
+            item.GetParent()!,
+            ItemUpdateType.MetadataEdit,
+            cancellationToken).ConfigureAwait(false);
         foreach (var changed in imagesMoved.DistinctBy(changed => changed.Id))
         {
             await _libraryManager.UpdateImagesAsync(changed, forceUpdate: true).ConfigureAwait(false);
@@ -275,7 +270,6 @@ internal sealed class PermalinkPathMutation
 
             return path;
         }
-
     }
 
     private static void PublishSameRoot(PermalinkMutationBundle bundle)

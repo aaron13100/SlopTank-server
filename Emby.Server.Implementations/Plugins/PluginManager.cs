@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -82,6 +83,11 @@ namespace Emby.Server.Implementations.Plugins
             _appHost = appHost;
             _minimumVersion = new Version(0, 0, 0, 1);
             _plugins = Directory.Exists(_pluginsPath) ? DiscoverPlugins().ToList() : new List<LocalPlugin>();
+            if (!_config.IsStartupWizardCompleted
+                && BundledIntroSkipper.InstallIfNeeded(_pluginsPath, _plugins, LoadManifest, _logger))
+            {
+                _plugins = DiscoverPlugins().ToList();
+            }
 
             _assemblyLoadContexts = new List<AssemblyLoadContext>();
         }

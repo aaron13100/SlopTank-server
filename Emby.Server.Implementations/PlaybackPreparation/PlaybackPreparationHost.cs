@@ -34,9 +34,17 @@ internal sealed class PlaybackPreparationHost : BackgroundService
     private readonly ILogger<PlaybackPreparationHost> _logger;
     private readonly string? _executable;
 
-    public PlaybackPreparationHost(IPlaybackPreparationService service, IApplicationPaths paths, IMediaEncoder encoder,
-        IServerApplicationHost appHost, ILibraryManager library, ISessionManager sessions,
-        IPermalinkMutationCoordinator mutations, IConfiguration configuration, TimeProvider clock, ILogger<PlaybackPreparationHost> logger)
+    public PlaybackPreparationHost(
+        IPlaybackPreparationService service,
+        IApplicationPaths paths,
+        IMediaEncoder encoder,
+        IServerApplicationHost appHost,
+        ILibraryManager library,
+        ISessionManager sessions,
+        IPermalinkMutationCoordinator mutations,
+        IConfiguration configuration,
+        TimeProvider clock,
+        ILogger<PlaybackPreparationHost> logger)
     {
         _service = service;
         _paths = paths;
@@ -142,14 +150,18 @@ internal sealed class PlaybackPreparationHost : BackgroundService
         Exception? primaryFailure = null;
         try
         {
-            await channel.RunAsync(process.StandardOutput, process.StandardInput, new
-            {
-                jobWorkspace = workspace,
-                profileRoot = _paths.ProgramDataPath,
-                mediaRoot = Path.GetDirectoryName(claim.Path!),
-                ffmpegPath = _encoder.EncoderPath,
-                ffprobePath = _encoder.ProbePath
-            }, token).ConfigureAwait(false);
+            await channel.RunAsync(
+                process.StandardOutput,
+                process.StandardInput,
+                new
+                {
+                    jobWorkspace = workspace,
+                    profileRoot = _paths.ProgramDataPath,
+                    mediaRoot = Path.GetDirectoryName(claim.Path!),
+                    ffmpegPath = _encoder.EncoderPath,
+                    ffprobePath = _encoder.ProbePath
+                },
+                token).ConfigureAwait(false);
             await process.WaitForExitAsync(token).WaitAsync(TimeSpan.FromSeconds(10), token).ConfigureAwait(false);
             if (process.ExitCode != 0)
             {

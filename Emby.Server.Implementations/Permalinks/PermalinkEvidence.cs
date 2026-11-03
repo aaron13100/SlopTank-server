@@ -65,7 +65,7 @@ public sealed class PermalinkEvidence
     {
     }
 
-    /// <summary>Initializes physical evidence with existing reservation metadata.</summary>
+    /// <summary>Initializes a new instance of the <see cref="PermalinkEvidence"/> class with existing reservation metadata.</summary>
     /// <param name="contentReads">Records each full media read.</param>
     /// <param name="digestCache">Remembers digests across process lifetimes.</param>
     /// <param name="authority">The existing physical write authority, when configured.</param>

@@ -48,7 +48,7 @@ namespace Emby.Server.Implementations.Plugins
 
             try
             {
-                if (plugins.Any(plugin => plugin.Id == Guid.Parse(PluginId)) || HasInstalledPlugin(pluginsPath, loadManifest))
+                if (plugins.Any(plugin => plugin.Id.Equals(Guid.Parse(PluginId))) || HasInstalledPlugin(pluginsPath, loadManifest))
                 {
                     return false;
                 }
@@ -111,12 +111,12 @@ namespace Emby.Server.Implementations.Plugins
             }
 
             return Directory.EnumerateDirectories(pluginsPath, "*", SearchOption.TopDirectoryOnly)
-                .Any(path => loadManifest(path).Id == Guid.Parse(PluginId));
+                .Any(path => loadManifest(path).Id.Equals(Guid.Parse(PluginId)));
         }
 
         private static void ValidateBundle(string sourcePath, LocalPlugin plugin)
         {
-            if (plugin.Id != Guid.Parse(PluginId))
+            if (!plugin.Id.Equals(Guid.Parse(PluginId)))
             {
                 throw new InvalidDataException($"Bundled plugin GUID is unexpected: {plugin.Id}");
             }

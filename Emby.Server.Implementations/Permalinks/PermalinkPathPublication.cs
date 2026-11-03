@@ -20,7 +20,7 @@ internal sealed class PermalinkPathPublication
     private readonly PermalinkBindingIndex _bindings;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
 
-    /// <summary>Initializes a path publication coordinator.</summary>
+    /// <summary>Initializes a new instance of the <see cref="PermalinkPathPublication"/> class.</summary>
     /// <param name="authority">The reservation authority.</param>
     /// <param name="capsules">The immutable capsule store.</param>
     /// <param name="transitions">The content-transition authority.</param>

@@ -30,8 +30,12 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
     private readonly IUserManager _users;
     private readonly TimeProvider _clock;
 
-    public PermalinkResolutionService(PermalinkManager manager, MediaPermalinkLeaseRepository leases,
-        ILibraryManager library, IUserManager users, TimeProvider clock)
+    public PermalinkResolutionService(
+        PermalinkManager manager,
+        MediaPermalinkLeaseRepository leases,
+        ILibraryManager library,
+        IUserManager users,
+        TimeProvider clock)
     {
         _manager = manager;
         _leases = leases;
@@ -188,7 +192,9 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
 
         if (document.RecordVersion != 1)
         {
-            throw new PermalinkException(PermalinkErrorKind.VersionRefused, "lease-version-unsupported",
+            throw new PermalinkException(
+                PermalinkErrorKind.VersionRefused,
+                "lease-version-unsupported",
                 $"Permalink lease format {document.RecordVersion} is not supported.");
         }
 
@@ -245,17 +251,18 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
         var now = Now;
         return new IssuedLease(
             new MediaPermalinkLease
-        {
-            Handle = MediaPermalinkLeaseRepository.NewSecret(),
-            SecretDigest = MediaPermalinkLeaseRepository.Digest(secret),
-            Alias = identity.Alias,
-            ContentId = identity.ContentId,
-            UserId = identity.UserId,
-            Kind = identity.Purpose,
-            ExpiresAtUtc = now.AddMinutes(5),
-            CreatedAtUtc = now,
-            UpdatedAtUtc = now
-        }, secret);
+            {
+                Handle = MediaPermalinkLeaseRepository.NewSecret(),
+                SecretDigest = MediaPermalinkLeaseRepository.Digest(secret),
+                Alias = identity.Alias,
+                ContentId = identity.ContentId,
+                UserId = identity.UserId,
+                Kind = identity.Purpose,
+                ExpiresAtUtc = now.AddMinutes(5),
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            },
+            secret);
     }
 
     private DateTime Now => _clock.GetUtcNow().UtcDateTime;
@@ -266,7 +273,8 @@ internal sealed class PermalinkResolutionService : IPermalinkResolutionService
     private static PermalinkCandidateEnvelope Envelope(IssuedLease issued, int rank) => new(
         rank,
         issued.Document.Alias.StartsWith("sk-", StringComparison.Ordinal) ? "sloptank" : "external",
-        issued.Document.Handle, issued.Secret);
+        issued.Document.Handle,
+        issued.Secret);
 
     private static bool IsToken(string value) => value is { Length: 64 } && value.AsSpan().IndexOfAnyExcept("0123456789abcdef") < 0;
 

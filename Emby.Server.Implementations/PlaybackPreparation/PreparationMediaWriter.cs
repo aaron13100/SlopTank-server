@@ -30,9 +30,14 @@ internal sealed class PreparationMediaWriter
     private string _identity;
     private bool _mediaInfoRefreshRequired;
 
-    public PreparationMediaWriter(IPlaybackPreparationService preparation, IPermalinkMutationCoordinator mutations,
-        ILibraryManager library, IServerApplicationHost appHost, Func<bool> isIdle,
-        PlaybackPreparationRequest claim, string workspace)
+    public PreparationMediaWriter(
+        IPlaybackPreparationService preparation,
+        IPermalinkMutationCoordinator mutations,
+        ILibraryManager library,
+        IServerApplicationHost appHost,
+        Func<bool> isIdle,
+        PlaybackPreparationRequest claim,
+        string workspace)
     {
         _preparation = preparation;
         _mutations = mutations;
@@ -167,8 +172,13 @@ internal sealed class PreparationMediaWriter
         }
     }
 
-    private async Task MutateAsync(Video item, string kind, string? destination, string? stagedPath,
-        PlaybackPreparationRequest claim, CancellationToken token)
+    private async Task MutateAsync(
+        Video item,
+        string kind,
+        string? destination,
+        string? stagedPath,
+        PlaybackPreparationRequest claim,
+        CancellationToken token)
     {
         var requestId = Guid.Parse(claim.RequestId!);
         await _preparation.RenewAsync(requestId, claim, token).ConfigureAwait(false);
@@ -211,7 +221,14 @@ internal sealed class PreparationMediaWriter
         {
             var prepared = await _mutations.PrepareAsync(
                 item,
-                new PermalinkMutationPrepareRequest(operationId, item.Id, kind, destination, null, item.Path), token).ConfigureAwait(false);
+                new PermalinkMutationPrepareRequest(
+                    operationId,
+                    item.Id,
+                    kind,
+                    destination,
+                    null,
+                    item.Path),
+                token).ConfigureAwait(false);
             if (prepared.State != "prepared")
             {
                 throw Error("replacement-not-prepared", $"Operation '{operationId}' returned '{prepared.State}' before installation.");

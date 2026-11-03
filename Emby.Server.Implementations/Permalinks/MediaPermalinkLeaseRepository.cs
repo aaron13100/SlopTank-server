@@ -62,8 +62,11 @@ internal sealed class MediaPermalinkLeaseRepository(IDbContextFactory<JellyfinDb
             }
             catch (DbUpdateConcurrencyException exception)
             {
-                throw new PermalinkException(PermalinkErrorKind.Conflict, "lease-consumed",
-                    "Another request already consumed or advanced this permalink lease.", exception);
+                throw new PermalinkException(
+                    PermalinkErrorKind.Conflict,
+                    "lease-consumed",
+                    "Another request already consumed or advanced this permalink lease.",
+                    exception);
             }
         }
     }

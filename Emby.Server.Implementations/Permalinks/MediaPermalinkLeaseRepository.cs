@@ -42,6 +42,10 @@ internal sealed class MediaPermalinkLeaseRepository(IDbContextFactory<JellyfinDb
     }
 
     /// <summary>Atomically consumes or advances a lease and optionally issues its successor.</summary>
+    /// <param name="lease">The lease being consumed or advanced.</param>
+    /// <param name="successor">An optional successor lease to insert in the same save.</param>
+    /// <param name="token">The cancellation token.</param>
+    /// <returns>A task that represents the asynchronous save operation.</returns>
     internal async Task SaveAsync(MediaPermalinkLease lease, MediaPermalinkLease? successor, CancellationToken token)
     {
         var context = await contexts.CreateDbContextAsync(token).ConfigureAwait(false);

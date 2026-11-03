@@ -16,22 +16,6 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Emby.Server.Implementations.Permalinks;
 
-internal sealed record PermalinkItemBinding(Guid? ContentId, string? Kind, IReadOnlyList<string> PublicAliases, IReadOnlyList<string> Keys);
-
-internal sealed record MediaPermalinkBinding(Guid ContentId, string Kind, IReadOnlyList<string> Ids, IReadOnlyList<string> Keys);
-
-internal sealed record PermalinkBindingRequest(
-    Guid ItemId,
-    Guid? ExpectedContentId,
-    Guid ContentId,
-    string Kind,
-    IReadOnlyList<string> PublicAliases,
-    string? CoordinateKey,
-    DateTime NowUtc,
-    Guid? InheritedContentId = null,
-    IReadOnlyList<string>? LegacyAliases = null,
-    IReadOnlyList<string>? RetiredAliases = null);
-
 /// <summary>
 /// Persists permalink identity mappings and immutable aliases in the application database.
 /// </summary>
@@ -44,7 +28,7 @@ public sealed class MediaPermalinkRepository
 
     private readonly IDbContextFactory<JellyfinDbContext> _dbContextFactory;
 
-    /// <summary>Initializes storage in the existing application database.</summary>
+    /// <summary>Initializes a new instance of the <see cref="MediaPermalinkRepository"/> class.</summary>
     /// <param name="dbContextFactory">The application's database context factory.</param>
     public MediaPermalinkRepository(IDbContextFactory<JellyfinDbContext> dbContextFactory)
     {
@@ -59,7 +43,7 @@ public sealed class MediaPermalinkRepository
             // Aliases are append-only. Reading the item association first identifies
             // a complete immutable alias set without taking a SQLite write lock.
             var contentId = await context.BaseItems
-                .Where(item => item.Id == itemId)
+                .Where(item => item.Id.Equals(itemId))
                 .Select(item => item.PermalinkContentId)
                 .SingleOrDefaultAsync(cancellationToken)
                 .ConfigureAwait(false);
@@ -70,7 +54,7 @@ public sealed class MediaPermalinkRepository
             }
 
             var rows = await context.MediaPermalinkAliases
-                .Where(alias => alias.ContentId == contentId.Value)
+                .Where(alias => alias.ContentId.Equals(contentId.Value))
                 .OrderBy(alias => alias.Ordinal)
                 .ToArrayAsync(cancellationToken)
                 .ConfigureAwait(false);
@@ -101,7 +85,7 @@ public sealed class MediaPermalinkRepository
         string? coordinateKey,
         CancellationToken cancellationToken)
     {
-        if (!contentId.HasValue || contentId.Value == Guid.Empty || coordinateKey is null)
+        if (!contentId.HasValue || contentId.Value.Equals(Guid.Empty) || coordinateKey is null)
         {
             return false;
         }
@@ -110,7 +94,7 @@ public sealed class MediaPermalinkRepository
         await using (context.ConfigureAwait(false))
         {
             var rows = await context.MediaPermalinkAliases
-                .Where(alias => alias.ContentId == contentId.Value)
+                .Where(alias => alias.ContentId.Equals(contentId.Value))
                 .ToArrayAsync(cancellationToken)
                 .ConfigureAwait(false);
             return await IsSafeUnidentifiedBindingAsync(
@@ -180,7 +164,7 @@ public sealed class MediaPermalinkRepository
         await using (context.ConfigureAwait(false))
         {
             return await context.BaseItems
-                .Where(item => item.PermalinkContentId == contentId)
+                .Where(item => item.PermalinkContentId.HasValue && item.PermalinkContentId.Value.Equals(contentId))
                 .Select(item => item.Id)
                 .ToArrayAsync(cancellationToken)
                 .ConfigureAwait(false);
@@ -188,6 +172,9 @@ public sealed class MediaPermalinkRepository
     }
 
     /// <summary>Preserves an already-issued legacy alias without merging distinct titles.</summary>
+    /// <param name="request">The validated alias import request.</param>
+    /// <param name="token">The cancellation token.</param>
+    /// <returns>A task that represents the asynchronous import operation.</returns>
     internal async Task ImportAliasAsync(PermalinkBindingRequest request, CancellationToken token)
     {
         ValidateRequest(request);
@@ -197,12 +184,16 @@ public sealed class MediaPermalinkRepository
             var transaction = await context.Database.BeginTransactionAsync(token).ConfigureAwait(false);
             await using (transaction.ConfigureAwait(false))
             {
-                if (!await context.BaseItems.AnyAsync(item => item.Id == request.ItemId && item.PermalinkContentId == request.ContentId, token).ConfigureAwait(false))
+                if (!await context.BaseItems.AnyAsync(
+                        item => item.Id.Equals(request.ItemId)
+                            && item.PermalinkContentId.HasValue
+                            && item.PermalinkContentId.Value.Equals(request.ContentId),
+                        token).ConfigureAwait(false))
                 {
                     throw MappingChanged();
                 }
 
-                var rows = await context.MediaPermalinkAliases.Where(alias => alias.ContentId == request.ContentId).ToArrayAsync(token).ConfigureAwait(false);
+                var rows = await context.MediaPermalinkAliases.Where(alias => alias.ContentId.Equals(request.ContentId)).ToArrayAsync(token).ConfigureAwait(false);
                 ValidateStoredRows(request.ContentId, rows);
                 if (rows.Length == 0 || rows.Any(row => row.Kind != request.Kind))
                 {
@@ -241,14 +232,14 @@ public sealed class MediaPermalinkRepository
             var transaction = await context.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using (transaction.ConfigureAwait(false))
             {
-                var item = await context.BaseItems.SingleOrDefaultAsync(row => row.Id == request.ItemId, cancellationToken).ConfigureAwait(false);
-                if (item is null || item.PermalinkContentId != request.ExpectedContentId)
+                var item = await context.BaseItems.SingleOrDefaultAsync(row => row.Id.Equals(request.ItemId), cancellationToken).ConfigureAwait(false);
+                if (item is null || !Nullable.Equals(item.PermalinkContentId, request.ExpectedContentId))
                 {
                     throw MappingChanged();
                 }
 
                 var contentRows = await context.MediaPermalinkAliases
-                    .Where(alias => alias.ContentId == request.ContentId)
+                    .Where(alias => alias.ContentId.Equals(request.ContentId))
                     .ToArrayAsync(cancellationToken)
                     .ConfigureAwait(false);
                 ValidateStoredRows(request.ContentId, contentRows);
@@ -266,7 +257,7 @@ public sealed class MediaPermalinkRepository
 
                 if (request.InheritedContentId.HasValue)
                 {
-                    var inherited = await context.MediaPermalinkAliases.Where(alias => alias.ContentId == request.InheritedContentId.Value)
+                    var inherited = await context.MediaPermalinkAliases.Where(alias => alias.ContentId.Equals(request.InheritedContentId.Value))
                         .ToArrayAsync(cancellationToken).ConfigureAwait(false);
                     if (!await IsSafeUnidentifiedBindingAsync(
                             context,
@@ -288,8 +279,10 @@ public sealed class MediaPermalinkRepository
 
                 var requestedAliases = request.PublicAliases.ToArray();
                 if (await context.MediaPermalinkAliases.AnyAsync(
-                        alias => !alias.DeletedAtUtc.HasValue && requestedAliases.Contains(alias.Alias) && alias.ContentId != request.ContentId
-                            && alias.ContentId != request.InheritedContentId,
+                        alias => !alias.DeletedAtUtc.HasValue
+                            && requestedAliases.Contains(alias.Alias)
+                            && !alias.ContentId.Equals(request.ContentId)
+                            && (!request.InheritedContentId.HasValue || !alias.ContentId.Equals(request.InheritedContentId.Value)),
                         cancellationToken).ConfigureAwait(false))
                 {
                     // The composite alias key preserves imported legacy ambiguities,
@@ -310,7 +303,7 @@ public sealed class MediaPermalinkRepository
                         .Where(alias => !alias.DeletedAtUtc.HasValue && alias.Alias == request.CoordinateKey)
                         .ToArrayAsync(cancellationToken)
                         .ConfigureAwait(false);
-                    if (privateKeyRows.Any(row => row.ContentId != request.ContentId || row.IsPublic))
+                    if (privateKeyRows.Any(row => !row.ContentId.Equals(request.ContentId) || row.IsPublic))
                     {
                         throw new PermalinkException(PermalinkErrorKind.Conflict, "coordinate-key-conflict", "The private coordinate key is already assigned to another alias binding.", itemId: request.ItemId);
                     }
@@ -382,7 +375,10 @@ public sealed class MediaPermalinkRepository
                     });
                 }
 
-                if (item.PermalinkContentId == request.ContentId && newRows.Count == 0 && !aliasStateChanged)
+                if (item.PermalinkContentId.HasValue
+                    && item.PermalinkContentId.Value.Equals(request.ContentId)
+                    && newRows.Count == 0
+                    && !aliasStateChanged)
                 {
                     // Metadata lookup is common during playback and must not rewrite
                     // an unchanged row or force a WAL flush for each resolution.
@@ -390,8 +386,12 @@ public sealed class MediaPermalinkRepository
                     return;
                 }
 
+                var expectedContentIdExists = request.ExpectedContentId.HasValue;
+                var expectedContentId = request.ExpectedContentId.GetValueOrDefault();
                 var changedRows = await context.BaseItems
-                    .Where(row => row.Id == request.ItemId && row.PermalinkContentId == request.ExpectedContentId)
+                    .Where(row => row.Id.Equals(request.ItemId)
+                        && row.PermalinkContentId.HasValue == expectedContentIdExists
+                        && (!expectedContentIdExists || row.PermalinkContentId!.Value.Equals(expectedContentId)))
                     .ExecuteUpdateAsync(update => update.SetProperty(row => row.PermalinkContentId, request.ContentId), cancellationToken)
                     .ConfigureAwait(false);
                 if (changedRows != 1)
@@ -404,7 +404,8 @@ public sealed class MediaPermalinkRepository
                     // Identification joins an initially unknown logical record to an
                     // already-known title. Preserve its issued URLs and versions in
                     // the same transaction, so a crash cannot strand the old link.
-                    await context.BaseItems.Where(row => row.PermalinkContentId == request.InheritedContentId.Value)
+                    await context.BaseItems.Where(row => row.PermalinkContentId.HasValue
+                            && row.PermalinkContentId.Value.Equals(request.InheritedContentId.Value))
                         .ExecuteUpdateAsync(update => update.SetProperty(row => row.PermalinkContentId, request.ContentId), cancellationToken).ConfigureAwait(false);
                 }
 
@@ -424,7 +425,7 @@ public sealed class MediaPermalinkRepository
 
     private static void ValidateRequest(PermalinkBindingRequest request)
     {
-        if (request.ItemId == Guid.Empty || request.ContentId == Guid.Empty ||
+        if (request.ItemId.Equals(Guid.Empty) || request.ContentId.Equals(Guid.Empty) ||
             !_allowedKinds.Contains(request.Kind) || request.NowUtc.Kind != DateTimeKind.Utc ||
             request.PublicAliases is null || request.PublicAliases.Count == 0 ||
             request.PublicAliases.Any(alias => !MediaContentIdentifier.IsPublicAlias(alias)) ||
@@ -434,7 +435,9 @@ public sealed class MediaPermalinkRepository
             request.LegacyAliases?.Any(alias => !MediaContentIdentifier.IsPublicAlias(alias)) == true ||
             request.RetiredAliases?.Any(alias => string.IsNullOrEmpty(alias) || alias.StartsWith("sk-", StringComparison.Ordinal)
                 || request.PublicAliases.Contains(alias, StringComparer.Ordinal) || request.CoordinateKey == alias) == true ||
-            (request.InheritedContentId.HasValue && (request.InheritedContentId != request.ExpectedContentId || request.InheritedContentId == request.ContentId)) ||
+            (request.InheritedContentId.HasValue
+                && (!Nullable.Equals(request.InheritedContentId, request.ExpectedContentId)
+                    || request.InheritedContentId.Value.Equals(request.ContentId))) ||
             (request.CoordinateKey is not null && request.PublicAliases.Contains(request.CoordinateKey, StringComparer.Ordinal)))
         {
             throw new PermalinkException(PermalinkErrorKind.Ineligible, "invalid-binding", "The permalink binding request is invalid.");
@@ -443,9 +446,9 @@ public sealed class MediaPermalinkRepository
 
     private static void ValidateStoredRows(Guid contentId, IReadOnlyCollection<MediaPermalinkAlias> rows)
     {
-        if (contentId == Guid.Empty ||
+        if (contentId.Equals(Guid.Empty) ||
             (rows.Count > 0 && !rows.Any(row => row.IsPublic)) ||
-            rows.Any(row => row.ContentId != contentId || row.RecordVersion != 1 || !_allowedKinds.Contains(row.Kind) ||
+            rows.Any(row => !row.ContentId.Equals(contentId) || row.RecordVersion != 1 || !_allowedKinds.Contains(row.Kind) ||
                 string.IsNullOrWhiteSpace(row.Alias) || row.Alias.Length > 512 ||
                 (row.IsPublic ? row.Ordinal is null or < 0 || !MediaContentIdentifier.IsPublicAlias(row.Alias) : row.Ordinal is not null)) ||
             rows.Select(row => row.Kind).Distinct(StringComparer.Ordinal).Count() > 1 ||
@@ -514,7 +517,9 @@ public sealed class MediaPermalinkRepository
         Guid currentParentId,
         CancellationToken cancellationToken)
     {
-        if (previousParentId == Guid.Empty || currentParentId == Guid.Empty || previousParentId == currentParentId)
+        if (previousParentId.Equals(Guid.Empty)
+            || currentParentId.Equals(Guid.Empty)
+            || previousParentId.Equals(currentParentId))
         {
             return false;
         }
@@ -556,13 +561,13 @@ public sealed class MediaPermalinkRepository
         }
 
         var itemBackedContentIds = itemBackedRows.Select(item => item.ContentId).Distinct().ToArray();
-        if (itemBackedContentIds.Length != 1 || itemBackedContentIds[0] != currentParentId)
+        if (itemBackedContentIds.Length != 1 || !itemBackedContentIds[0].Equals(currentParentId))
         {
             return false;
         }
 
         var currentRows = await context.MediaPermalinkAliases
-            .Where(alias => alias.ContentId == currentParentId)
+            .Where(alias => alias.ContentId.Equals(currentParentId))
             .ToArrayAsync(cancellationToken)
             .ConfigureAwait(false);
         ValidateStoredRows(currentParentId, currentRows);
@@ -603,4 +608,20 @@ public sealed class MediaPermalinkRepository
 
     private static PermalinkException MappingChanged() =>
         new(PermalinkErrorKind.Conflict, "mapping-changed", "The library item's permalink mapping changed before the update could be saved.");
+
+    internal sealed record PermalinkItemBinding(Guid? ContentId, string? Kind, IReadOnlyList<string> PublicAliases, IReadOnlyList<string> Keys);
+
+    internal sealed record MediaPermalinkBinding(Guid ContentId, string Kind, IReadOnlyList<string> Ids, IReadOnlyList<string> Keys);
+
+    internal sealed record PermalinkBindingRequest(
+        Guid ItemId,
+        Guid? ExpectedContentId,
+        Guid ContentId,
+        string Kind,
+        IReadOnlyList<string> PublicAliases,
+        string? CoordinateKey,
+        DateTime NowUtc,
+        Guid? InheritedContentId = null,
+        IReadOnlyList<string>? LegacyAliases = null,
+        IReadOnlyList<string>? RetiredAliases = null);
 }

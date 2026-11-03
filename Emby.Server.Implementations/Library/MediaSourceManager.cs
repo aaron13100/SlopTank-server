@@ -383,7 +383,7 @@ namespace Emby.Server.Implementations.Library
             {
                 // Source-list deduplication must not invalidate an issued source
                 // ID. Only an explicit version of this same file can use it.
-                var requested = video.GetAllVersions().FirstOrDefault(version => version.Id == requestedId);
+                var requested = video.GetAllVersions().FirstOrDefault(version => version.Id.Equals(requestedId));
                 if (requested is not null && !string.IsNullOrEmpty(requested.Path))
                 {
                     selected = sources.FirstOrDefault(source => source.Protocol == MediaProtocol.File

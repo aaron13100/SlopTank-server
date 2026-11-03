@@ -210,10 +210,12 @@ internal sealed class PermalinkBindingIndex
         PermalinkGenesisReservation location,
         CancellationToken cancellationToken)
     {
-        if (expected.AnchorToken != location.AnchorToken || expected.CapsuleId != location.CapsuleId
-            || expected.BindingId != location.BindingId)
+        if (expected.AnchorToken != location.AnchorToken || !expected.CapsuleId.Equals(location.CapsuleId)
+            || !expected.BindingId.Equals(location.BindingId))
         {
-            throw new PermalinkException(PermalinkErrorKind.Conflict, "anchor-location-mismatch",
+            throw new PermalinkException(
+                PermalinkErrorKind.Conflict,
+                "anchor-location-mismatch",
                 "A location update cannot change the physical binding identity.");
         }
 

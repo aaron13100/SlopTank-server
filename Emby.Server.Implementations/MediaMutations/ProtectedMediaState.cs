@@ -50,8 +50,12 @@ internal sealed class ProtectedMediaState
     public Task<PermalinkStoredState> EnsureAsync(BaseItem item, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(item);
-        return EnsureCoreAsync(item, publishAlias: true, preferredAlias: null,
-            new HashSet<Guid>(), cancellationToken);
+        return EnsureCoreAsync(
+            item,
+            publishAlias: true,
+            preferredAlias: null,
+            new HashSet<Guid>(),
+            cancellationToken);
     }
 
     private async Task<PermalinkStoredState> EnsureCoreAsync(

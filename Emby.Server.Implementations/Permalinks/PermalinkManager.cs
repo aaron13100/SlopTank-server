@@ -30,6 +30,7 @@ public sealed class PermalinkManager : IPermalinkManager
     private readonly ILibraryManager _library;
     private readonly IUserManager _users;
     private readonly TimeProvider _clock;
+    private readonly Lazy<IPermalinkIdentityMutationAdapter> _identityMutations;
 
     /// <summary>Initializes a new instance of the <see cref="PermalinkManager"/> class.</summary>
     /// <param name="repository">The application database repository for logical title mappings.</param>
@@ -38,13 +39,15 @@ public sealed class PermalinkManager : IPermalinkManager
     /// <param name="library">The existing library metadata and visibility service.</param>
     /// <param name="users">The existing user lookup service.</param>
     /// <param name="clock">The clock used for persisted timestamps.</param>
+    /// <param name="identityMutations">The existing guard for unfinished legacy identity operations.</param>
     public PermalinkManager(
         MediaPermalinkRepository repository,
         MediaContentIdentifier identifiers,
         LegacyMediaPermalinkRepository legacy,
         ILibraryManager library,
         IUserManager users,
-        TimeProvider clock)
+        TimeProvider clock,
+        Lazy<IPermalinkIdentityMutationAdapter> identityMutations)
     {
         _repository = repository;
         _identifiers = identifiers;
@@ -52,6 +55,7 @@ public sealed class PermalinkManager : IPermalinkManager
         _library = library;
         _users = users;
         _clock = clock;
+        _identityMutations = identityMutations;
     }
 
     /// <summary>Gets the identifier for this movie, series, season or specific episode.</summary>
@@ -141,6 +145,13 @@ public sealed class PermalinkManager : IPermalinkManager
                 if (item is null)
                 {
                     continue;
+                }
+
+                if ((await _legacy.ReadItemAliasesAsync(itemId, cancellationToken).ConfigureAwait(false)).Count > 0)
+                {
+                    // Only real legacy bindings have an old operation to settle.
+                    // New logical mappings never initialize this physical service.
+                    await _identityMutations.Value.EnsureNoPendingMutationAsync(itemId, cancellationToken).ConfigureAwait(false);
                 }
 
                 var current = await _repository.ReadForItemAsync(itemId, cancellationToken).ConfigureAwait(false);

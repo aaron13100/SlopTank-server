@@ -453,7 +453,7 @@ namespace MediaBrowser.Controller.Entities
                     {
                         var genericId = LibraryManager.GetNewItemId(child.Path, typeof(Video));
                         if (currentChildren.TryGetValue(genericId, out var generic) && generic.GetType() == typeof(Video)
-                            && !generic.ExtraType.HasValue && (generic.OwnerId == Guid.Empty || ((Video)generic).PrimaryVersionId.HasValue))
+                            && !generic.ExtraType.HasValue && (generic.OwnerId.IsEmpty() || ((Video)generic).PrimaryVersionId.HasValue))
                         {
                             var oldPath = generic.Path;
                             var refinement = await TryExecutePermalinkChildMutationAsync(generic, async () =>
@@ -466,7 +466,7 @@ namespace MediaBrowser.Controller.Entities
                                 // remain its primary. Keep the former generic ID
                                 // as an owned version so its user data survives.
                                 child.Id = LibraryManager.GetNewItemId(child.Path, child.GetType());
-                                if (child.Id != refined.Id)
+                                if (!child.Id.Equals(refined.Id))
                                 {
                                     validChildren.Add(refined);
                                 }
@@ -496,8 +496,10 @@ namespace MediaBrowser.Controller.Entities
                         }
                         else if (sameRecord.Length > 1)
                         {
-                            Logger.LogWarning("Several stored {ItemType} items use {Path}; retaining their metadata until the duplicate is resolved",
-                                child.GetType().Name, child.Path);
+                            Logger.LogWarning(
+                                "Several stored {ItemType} items use {Path}; retaining their metadata until the duplicate is resolved",
+                                child.GetType().Name,
+                                child.Path);
                             foreach (var duplicate in sameRecord)
                             {
                                 validChildren.Add(duplicate);

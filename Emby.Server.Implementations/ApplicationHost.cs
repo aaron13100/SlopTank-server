@@ -566,6 +566,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddTransient(provider => new Lazy<IProviderManager>(provider.GetRequiredService<IProviderManager>));
             serviceCollection.AddTransient(provider => new Lazy<IUserViewManager>(provider.GetRequiredService<IUserViewManager>));
             serviceCollection.AddTransient(provider => new Lazy<IExternalDataManager>(provider.GetRequiredService<IExternalDataManager>));
+            serviceCollection.AddTransient(provider => new Lazy<ILibraryManager>(provider.GetRequiredService<ILibraryManager>));
             serviceCollection.AddTransient(provider => new Lazy<IPermalinkIdentityMutationAdapter>(
                 provider.GetRequiredService<IPermalinkIdentityMutationAdapter>));
             serviceCollection.AddSingleton<ILibraryManager, LibraryManager>();
@@ -610,6 +611,7 @@ namespace Emby.Server.Implementations
                 provider.GetRequiredService<PermalinkAuthorityStore>(),
                 provider.GetRequiredService<IPermalinkAtomicFileSystem>()));
             serviceCollection.AddSingleton<IPermalinkStore, PermalinkStore>();
+            serviceCollection.AddSingleton<Emby.Server.Implementations.MediaMutations.MediaWriteRoots>();
             serviceCollection.AddSingleton<Emby.Server.Implementations.MediaMutations.ProtectedMediaState>();
             serviceCollection.AddSingleton<MediaContentIdentifier>();
             serviceCollection.AddSingleton<MediaPermalinkRepository>();

@@ -1,10 +1,11 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-03, 2026-09-07, 2026-09-09, 2026-09-30, 2026-10-14, 2026-10-31, 2026-11-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-03, 2026-09-07, 2026-09-09, 2026-09-30, 2026-10-14, 2026-10-31, 2026-11-01, 2026-11-03.
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Emby.Server.Implementations.MediaMutations;
 using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
@@ -24,26 +25,21 @@ internal sealed class PermalinkMutationBundleFactory
     private readonly PermalinkAuthorityStore _authority;
     private readonly PermalinkCapsuleStore _capsules;
     private readonly IPermalinkAtomicFileSystem _fileSystem;
-    private readonly string[] _contentRoots;
+    private readonly MediaWriteRoots _mediaWriteRoots;
 
     public PermalinkMutationBundleFactory(
         ILibraryManager libraryManager,
         PermalinkAuthorityStore authority,
         PermalinkCapsuleStore capsules,
         IPermalinkAtomicFileSystem fileSystem,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        MediaWriteRoots? mediaWriteRoots = null)
     {
         _libraryManager = libraryManager;
         _authority = authority;
         _capsules = capsules;
         _fileSystem = fileSystem;
-        _contentRoots = configuration.GetSection("Permalinks:ContentRoots")
-            .GetChildren()
-            .Select(section => section.Value)
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(value => Path.GetFullPath(value!))
-            .OrderByDescending(value => value.Length)
-            .ToArray();
+        _mediaWriteRoots = mediaWriteRoots ?? new MediaWriteRoots(configuration);
     }
 
     /// <summary>
@@ -257,7 +253,7 @@ internal sealed class PermalinkMutationBundleFactory
     private string ResolveRoot(string path)
     {
         var fullPath = Path.GetFullPath(path);
-        foreach (var root in _contentRoots)
+        foreach (var root in _mediaWriteRoots.ReadRoots())
         {
             var relative = Path.GetRelativePath(root, fullPath);
             if (relative != ".."

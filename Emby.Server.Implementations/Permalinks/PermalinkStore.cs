@@ -2,9 +2,9 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Emby.Server.Implementations.MediaMutations;
 using MediaBrowser.Controller.Permalinks;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -25,7 +25,7 @@ internal sealed class PermalinkStore : IPermalinkStore
     private readonly IPermalinkAtomicFileSystem _fileSystem;
     private readonly PermalinkPathLeaseFactory _leases;
     private readonly ILogger<PermalinkStore> _logger;
-    private readonly string[] _contentRoots;
+    private readonly MediaWriteRoots _mediaWriteRoots;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PermalinkStore"/> class.
@@ -40,6 +40,7 @@ internal sealed class PermalinkStore : IPermalinkStore
     /// <param name="leases">The path lease factory.</param>
     /// <param name="logger">The logger, used for the per-step ensure timing.</param>
     /// <param name="configuration">The server configuration.</param>
+    /// <param name="mediaWriteRoots">The shared media-write root reader.</param>
     public PermalinkStore(
         PermalinkAuthorityStore authority,
         PermalinkTransitionStore transitions,
@@ -50,7 +51,8 @@ internal sealed class PermalinkStore : IPermalinkStore
         IPermalinkAtomicFileSystem fileSystem,
         PermalinkPathLeaseFactory leases,
         ILogger<PermalinkStore> logger,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        MediaWriteRoots? mediaWriteRoots = null)
     {
         _authority = authority;
         _transitions = transitions;
@@ -61,13 +63,7 @@ internal sealed class PermalinkStore : IPermalinkStore
         _fileSystem = fileSystem;
         _leases = leases;
         _logger = logger;
-        _contentRoots = configuration.GetSection("Permalinks:ContentRoots")
-            .GetChildren()
-            .Select(section => section.Value)
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(value => Path.GetFullPath(value!))
-            .OrderByDescending(value => value.Length)
-            .ToArray();
+        _mediaWriteRoots = mediaWriteRoots ?? new MediaWriteRoots(configuration);
     }
 
     /// <inheritdoc />
@@ -299,7 +295,7 @@ internal sealed class PermalinkStore : IPermalinkStore
     private string ResolveRoot(string path)
     {
         var fullPath = Path.GetFullPath(path);
-        foreach (var root in _contentRoots)
+        foreach (var root in _mediaWriteRoots.ReadRoots())
         {
             var relative = Path.GetRelativePath(root, fullPath);
             if (relative != ".."

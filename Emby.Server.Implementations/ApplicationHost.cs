@@ -633,6 +633,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IPermalinkRemovalCoordinator, PermalinkRemovalCoordinator>();
             serviceCollection.AddSingleton<IPermalinkIdentityMutationAdapter, PermalinkIdentityMutationAdapter>();
             serviceCollection.AddSingleton<IPlaybackPreparationService, PlaybackPreparationService>();
+            serviceCollection.AddSingleton<IHostedService, PlaybackPreparationHost>();
             serviceCollection.AddSingleton<IWatchlistManager, WatchlistManager>();
             serviceCollection.AddSingleton<PermalinkLeaseStore>();
             serviceCollection.AddSingleton<PermalinkPlaybackDocumentStore>();

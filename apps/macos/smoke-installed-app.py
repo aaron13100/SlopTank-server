@@ -475,6 +475,11 @@ def main() -> int:
         info = public_info(base, operations, process)
         if info.get("StartupWizardCompleted") is not False:
             raise SmokeError(f"Fresh fixture should require setup, PublicInfo said: {info!r}")
+        # The wizard initializes its first user through this endpoint before updating it.
+        initial_user = json_api(base, "GET", "/Startup/User", operations, timeout=60)
+        if not isinstance(initial_user.get("Name"), str) or not initial_user["Name"]:
+            raise SmokeError(f"Startup did not initialize its first user: {initial_user!r}")
+        receipt["initial_user_initialized"] = True
         for path, body in (
             ("/Startup/Configuration", {"UICulture": "en-US", "MetadataCountryCode": "US", "PreferredMetadataLanguage": "en"}),
             ("/Startup/User", {"Name": ADMIN_NAME, "Password": ADMIN_PASSWORD}),

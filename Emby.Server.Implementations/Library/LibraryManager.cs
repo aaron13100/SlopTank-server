@@ -2886,8 +2886,11 @@ namespace Emby.Server.Implementations.Library
                 var versionIds = source.GetAllVersions().Select(version => version.Id).ToHashSet();
                 var aliases = _itemRepository.GetItemList(new InternalItemsQuery
                 {
-                    Path = stored.Path, Recursive = true, IncludeOwnedItems = true,
-                    GroupByPresentationUniqueKey = false, EnableTotalRecordCount = false
+                    Path = stored.Path,
+                    Recursive = true,
+                    IncludeOwnedItems = true,
+                    GroupByPresentationUniqueKey = false,
+                    EnableTotalRecordCount = false
                 }).OfType<Video>().Where(record => !record.Id.Equals(source.Id) && versionIds.Contains(record.Id)).ToArray();
                 if (aliases.Length == 0)
                 {

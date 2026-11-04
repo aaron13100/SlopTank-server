@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05.
 """Run the isolated installed-app acceptance journey against a SlopTank DMG.
 
 Usage: python3 apps/macos/smoke-installed-app.py --dmg SlopTank.dmg \
@@ -46,6 +46,7 @@ PROFILE_RELATIVE = Path("Library/Application Support/SlopTank")
 ADMIN_NAME = "smoke-admin"
 ADMIN_PASSWORD = "Smoke-only-password-4917!"
 MEDIA_NAME = "SlopTank Installed App Smoke.mp4"
+UNREADY_NAME = "SlopTank Preparation Smoke.mkv"
 POLL_SECONDS = 0.5
 EXITING_WAIT_SECONDS = 5
 CLEANUP_RESERVE_SECONDS = 75
@@ -440,10 +441,13 @@ def main() -> int:
         run(["/usr/bin/ditto", str(source_app), str(copied_app)], "Copy app to isolated Applications", operations, timeout=480)
         executable = copied_app / "Contents/MacOS/SlopTank"
         ffmpeg = copied_app / "Contents/Resources/ffmpeg/ffmpeg"
+        ffprobe = copied_app / "Contents/Resources/ffmpeg/ffprobe"
         if not executable.is_file() or not os.access(executable, os.X_OK):
             raise SmokeError(f"Installed bundle has no executable launcher: {executable}")
         if not ffmpeg.is_file() or not os.access(ffmpeg, os.X_OK):
             raise SmokeError(f"Installed bundle has no executable bundled ffmpeg: {ffmpeg}")
+        if not ffprobe.is_file() or not os.access(ffprobe, os.X_OK):
+            raise SmokeError(f"Installed bundle has no executable bundled ffprobe: {ffprobe}")
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.bind(("0.0.0.0", 0))
@@ -505,6 +509,14 @@ def main() -> int:
         receipt["media"] = {"path": str(media), "size_bytes": media.stat().st_size,
                             "sha256": hashlib.sha256(media.read_bytes()).hexdigest()}
 
+        unready = media_dir / UNREADY_NAME
+        run([str(ffmpeg), "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "color=c=black:s=320x180:r=24",
+             "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000",
+             "-t", "3", "-c:v", "mpeg4", "-c:a", "aac", "-shortest", str(unready)],
+            "Generate unready MPEG-4/AAC MKV with bundled ffmpeg", operations, timeout=90)
+        original_hash = hashlib.sha256(unready.read_bytes()).hexdigest()
+
         process = launch_app(executable, environment, app_log)
         receipt["app_pid"] = process.pid
         child = server_child(process.pid, copied_app, data_path, expected_rid, operations)
@@ -539,6 +551,28 @@ def main() -> int:
             raise SmokeError(f"Refreshing scratch Movies library: HTTP {status}: {body[:2000].decode(errors='replace')}")
         item = wait_movie(base, token, media, operations)
         stream = direct_range(base, token, str(item["Id"]), media, operations)
+        prepared = unready.with_suffix(".mp4")
+        prepared_item = wait_movie(base, token, prepared, operations)
+        probe_result = run([str(ffprobe), "-v", "error", "-show_entries",
+                            "stream=codec_type,codec_name,sample_rate", "-of", "json", str(prepared)],
+                           "Probe prepared media with bundled ffprobe", operations, timeout=90)
+        try:
+            streams = json.loads(probe_result.stdout)["streams"]
+        except (ValueError, KeyError, TypeError) as error:
+            raise SmokeError(f"Prepared media probe returned invalid streams: {probe_result.stdout!r}") from error
+        if (not any(s.get("codec_type") == "video" and s.get("codec_name") == "h264" for s in streams)
+                or not any(s.get("codec_type") == "audio" and s.get("codec_name") == "aac"
+                           and str(s.get("sample_rate")) == "48000" for s in streams)):
+            raise SmokeError(f"Prepared media is not H.264 with AAC 48 kHz: {streams!r}")
+        prepared_stream = direct_range(base, token, str(prepared_item["Id"]), prepared, operations)
+        retired_dir = data_path / "retired-media"
+        retired = [path for path in retired_dir.glob("*-" + UNREADY_NAME) if path.is_file()
+                   and hashlib.sha256(path.read_bytes()).hexdigest() == original_hash]
+        if unready.exists() or not retired or retired_dir.resolve().is_relative_to(media_dir.resolve()):
+            raise SmokeError(f"Original was not retained outside the library: source={unready.exists()}, retired={retired!r}")
+        receipt["preparation"] = {"item_id": str(prepared_item["Id"]), "path": str(prepared),
+                                  "streams": streams, "range": prepared_stream,
+                                  "original_sha256": original_hash, "retired_original": str(retired[0])}
         plugin_lines = [line for line in server_log.read_text(errors="replace").splitlines() if "Intro Skipper" in line]
         plugin_loaded = any("Loaded plugin: Intro Skipper" in line for line in plugin_lines)
         if not plugin_loaded:

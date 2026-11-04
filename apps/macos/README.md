@@ -93,7 +93,9 @@ runner types. Push the pinned public web commit first; pushing the server's
 `release-universal` branch then starts the workflow automatically. Manual dispatch
 is available after the workflow reaches the default branch. The smoke uses an isolated
 profile/port and a clip generated with the bundled FFmpeg, then checks setup,
-HTTP 206 bytes, normal Quit, retained-profile relaunch and removal. It bypasses
+HTTP 206 bytes, installed SVG conversion and preparation-worker startup, normal
+Quit, retained-profile relaunch and removal. The worker probe checks its expected
+end-of-input response; it does not run a preparation job. The smoke bypasses
 the welcome-window interaction using a ready-profile fixture. Outputs are workflow
 artifacts only, with no release or tag. Ad-hoc signing permits native execution;
 Developer ID signing, notarization and exact-component source/licence clearance

@@ -63,10 +63,11 @@ class Deadline:
 
 
 def run(argv: list[str], label: str, deadline: Deadline, timeout: float = 60,
-        *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        *, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """Run a bounded command and retain diagnostics only when it fails."""
     try:
-        result = subprocess.run(argv, text=True, capture_output=True, timeout=deadline.timeout(timeout, label), check=False)
+        result = subprocess.run(argv, text=True, capture_output=True, stdin=subprocess.DEVNULL, env=env,
+                                timeout=deadline.timeout(timeout, label), check=False)
     except subprocess.TimeoutExpired as error:
         stderr = error.stderr.decode(errors="replace") if isinstance(error.stderr, bytes) else error.stderr or ""
         raise SmokeError(f"{label} timed out: {stderr[-1500:]}") from error
@@ -417,6 +418,36 @@ def main() -> int:
                                 "port": port, "system_path": SYSTEM_PATH,
                                 "removed_environment_prefixes": ["JELLYFIN_", "SLOPTANK_", "DOTNET_"],
                                 "profile_id": profile["profile_id"], "runtime_expected": expected_rid}
+
+        runtime = copied_app / "Contents/Resources/Runtimes" / expected_rid
+        converter = runtime / "Server/svg-rasterizer/svg-rasterizer"
+        worker = runtime / "Preparation/sloptank-prepare"
+        svg = work / "helper-probe.svg"
+        png = work / "helper-probe.png"
+        svg.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="3">'
+                       '<rect width="4" height="3" fill="red"/></svg>', encoding="utf-8")
+        run([str(converter), str(svg), str(png)], "Run installed SVG converter", operations,
+            timeout=90, env=environment)
+        header = png.read_bytes()[:24]
+        expected_header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x04\x00\x00\x00\x03"
+        if header != expected_header:
+            raise SmokeError(f"Installed SVG converter produced an invalid 4x3 PNG header: {header!r}")
+        worker_result = run([str(worker)], "Probe installed preparation worker", operations,
+                            timeout=90, check=False, env=environment)
+        try:
+            event = json.loads(worker_result.stdout)
+        except ValueError as error:
+            raise SmokeError(f"Preparation worker returned invalid JSON: {worker_result.stdout!r}; "
+                             f"stderr: {worker_result.stderr!r}") from error
+        if (worker_result.returncode != 2 or not isinstance(event, dict)
+                or event.get("type") != "fatal" or not isinstance(event.get("error"), dict)
+                or event["error"].get("code") != "ipc-unexpected-eof"):
+            raise SmokeError(f"Unexpected preparation worker probe: exit={worker_result.returncode}, "
+                             f"event={event!r}, stderr={worker_result.stderr!r}")
+        receipt["native_helpers"] = {"runtime_id": expected_rid,
+                                     "svg": {"executable": str(converter), "width": 4, "height": 3},
+                                     "preparation": {"executable": str(worker), "exit": worker_result.returncode,
+                                                     "type": event["type"], "error_code": event["error"]["code"]}}
 
         media = media_dir / MEDIA_NAME
         run([str(ffmpeg), "-nostdin", "-hide_banner", "-loglevel", "error", "-y",

@@ -1,0 +1,5 @@
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
+# Scope: exact same-directory paths only.
+# Columns: path<TAB>change-dates<TAB>git-mode<TAB>sha256
+Info.plist	2026-11-04	100644	cfff66e241d696656293babcc79a10ceaae7453a1fa9c88992d57c56fd45a925
+Package.swift	2026-11-04	100644	b76dabdd9214be3a90363f2c15d896f7f50eae5a49f71e475c31d326162bc81b

@@ -120,12 +120,19 @@ namespace Jellyfin.LiveTv.IO
             onStarted();
 
             // Important - don't await the log task or we won't be able to kill ffmpeg when the user stops playback
-            _ = StartStreamingLog(_process.StandardError.BaseStream, _logFileStream);
+            var logTask = StartStreamingLog(_process.StandardError.BaseStream, _logFileStream);
 
             _logger.LogInformation("ffmpeg recording process started for {Path}", _targetPath);
 
             // Block until ffmpeg exits
-            await _taskCompletionSource.Task.ConfigureAwait(false);
+            try
+            {
+                await _taskCompletionSource.Task.ConfigureAwait(false);
+            }
+            finally
+            {
+                await logTask.ConfigureAwait(false);
+            }
         }
 
         private string GetCommandLineArgs(MediaSourceInfo mediaSource, string inputTempFile, string targetFile)
@@ -266,9 +273,6 @@ namespace Jellyfin.LiveTv.IO
         private void OnFfMpegProcessExited(Process process)
         {
             _hasExited = true;
-
-            _logFileStream?.Dispose();
-            _logFileStream = null;
 
             var exitCode = process.ExitCode;
 

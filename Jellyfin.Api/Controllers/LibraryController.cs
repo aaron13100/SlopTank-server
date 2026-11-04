@@ -159,7 +159,7 @@ public class LibraryController : BaseJellyfinApiController
         userId = RequestHelpers.GetUserId(User, userId);
         var user = userId.IsNullOrEmpty()
             ? null
-            : _userManager.GetUserById(userId.Value);
+            : _userManager.GetUserOrDefault(userId.Value);
 
         var item = itemId.IsEmpty()
             ? (userId.IsNullOrEmpty()
@@ -233,7 +233,7 @@ public class LibraryController : BaseJellyfinApiController
         userId = RequestHelpers.GetUserId(User, userId);
         var user = userId.IsNullOrEmpty()
             ? null
-            : _userManager.GetUserById(userId.Value);
+            : _userManager.GetUserOrDefault(userId.Value);
         var item = itemId.IsEmpty()
             ? (userId.IsNullOrEmpty()
                 ? _libraryManager.RootFolder
@@ -369,18 +369,8 @@ public class LibraryController : BaseJellyfinApiController
     {
         var userId = User.GetUserId();
         var isApiKey = User.GetIsApiKey();
-        // The remaining branch (userId.IsEmpty() && !isApiKey) looks unguarded but is unreachable:
-        // this action uses plain [Authorize], which maps to the default authorization policy's sole
-        // DefaultAuthorizationRequirement. DefaultAuthorizationHandler.HandleRequirementAsync returns
-        // without calling context.Succeed() whenever "!isApiKey && userId.IsEmpty()", so that exact
-        // combination never satisfies the policy and the request is rejected before this action runs.
-        // Verified live: a request with no token, or a token that resolves to no device/api key (so
-        // isApiKey stays false and userId resolves empty), gets 401/403 upstream; a real caller (device
-        // token or api key) always yields either a non-empty userId or isApiKey == true by the time
-        // this line runs. See Jellyfin.Api/Auth/DefaultAuthorizationPolicy/DefaultAuthorizationHandler.cs.
-        var user = userId.IsEmpty() && isApiKey
-            ? null
-            : _userManager.GetUserById(userId);
+        // API keys can be userless.
+        var user = _userManager.GetUserOrDefault(userId);
 
         if (user is null && !isApiKey)
         {
@@ -423,7 +413,7 @@ public class LibraryController : BaseJellyfinApiController
         var isApiKey = User.GetIsApiKey();
         var userId = User.GetUserId();
         var user = !isApiKey && !userId.IsEmpty()
-            ? _userManager.GetUserById(userId) ?? throw new ResourceNotFoundException()
+            ? _userManager.GetUserOrDefault(userId) ?? throw new ResourceNotFoundException()
             : null;
 
         if (!isApiKey && user is null)
@@ -476,7 +466,7 @@ public class LibraryController : BaseJellyfinApiController
         userId = RequestHelpers.GetUserId(User, userId);
         var user = userId.IsNullOrEmpty()
             ? null
-            : _userManager.GetUserById(userId.Value);
+            : _userManager.GetUserOrDefault(userId.Value);
 
         var query = new InternalItemsQuery(user)
         {
@@ -509,7 +499,7 @@ public class LibraryController : BaseJellyfinApiController
         userId = RequestHelpers.GetUserId(User, userId);
         var user = userId.IsNullOrEmpty()
             ? null
-            : _userManager.GetUserById(userId.Value);
+            : _userManager.GetUserOrDefault(userId.Value);
         var item = _libraryManager.GetItemById<BaseItem>(itemId, user);
         if (item is null)
         {
@@ -690,9 +680,7 @@ public class LibraryController : BaseJellyfinApiController
     public async Task<ActionResult> GetDownload([FromRoute, Required] Guid itemId)
     {
         var userId = User.GetUserId();
-        var user = userId.IsEmpty()
-            ? null
-            : _userManager.GetUserById(userId);
+        var user = _userManager.GetUserOrDefault(userId);
         var item = _libraryManager.GetItemById<BaseItem>(itemId, user);
         if (item is null)
         {
@@ -762,7 +750,7 @@ public class LibraryController : BaseJellyfinApiController
         userId = RequestHelpers.GetUserId(User, userId);
         var user = userId.IsNullOrEmpty()
             ? null
-            : _userManager.GetUserById(userId.Value);
+            : _userManager.GetUserOrDefault(userId.Value);
 
         if (user is null)
         {
@@ -832,7 +820,7 @@ public class LibraryController : BaseJellyfinApiController
         userId = RequestHelpers.GetUserId(User, userId);
         var user = userId.IsNullOrEmpty()
             ? null
-            : _userManager.GetUserById(userId.Value);
+            : _userManager.GetUserOrDefault(userId.Value);
         var item = itemId.IsEmpty()
             ? (user is null
                 ? _libraryManager.RootFolder

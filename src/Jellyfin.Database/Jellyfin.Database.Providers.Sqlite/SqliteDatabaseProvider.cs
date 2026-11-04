@@ -62,9 +62,11 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
             Mode = SqliteOpenMode.ReadWrite,
             Pooling = false
         }.ToString();
-        await using var connection = new SqliteConnection(connectionString);
+        var connection = new SqliteConnection(connectionString);
+        await using var connectionLifetime = connection.ConfigureAwait(false);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
+        var command = connection.CreateCommand();
+        await using var commandLifetime = command.ConfigureAwait(false);
         command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '__EFMigrationsLock';";
         if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
         {

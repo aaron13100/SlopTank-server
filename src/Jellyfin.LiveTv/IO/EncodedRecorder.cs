@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
 #nullable disable
 
 #pragma warning disable CS1591
@@ -264,31 +265,28 @@ namespace Jellyfin.LiveTv.IO
         /// </summary>
         private void OnFfMpegProcessExited(Process process)
         {
-            using (process)
+            _hasExited = true;
+
+            _logFileStream?.Dispose();
+            _logFileStream = null;
+
+            var exitCode = process.ExitCode;
+
+            _logger.LogInformation("FFMpeg recording exited with code {ExitCode} for {Path}", exitCode, _targetPath);
+
+            if (exitCode == 0)
             {
-                _hasExited = true;
-
-                _logFileStream?.Dispose();
-                _logFileStream = null;
-
-                var exitCode = process.ExitCode;
-
-                _logger.LogInformation("FFMpeg recording exited with code {ExitCode} for {Path}", exitCode, _targetPath);
-
-                if (exitCode == 0)
-                {
-                    _taskCompletionSource.TrySetResult(true);
-                }
-                else
-                {
-                    _taskCompletionSource.TrySetException(
-                        new FfmpegException(
-                            string.Format(
-                                CultureInfo.InvariantCulture,
-                                "Recording for {0} failed. Exit code {1}",
-                                _targetPath,
-                                exitCode)));
-                }
+                _taskCompletionSource.TrySetResult(true);
+            }
+            else
+            {
+                _taskCompletionSource.TrySetException(
+                    new FfmpegException(
+                        string.Format(
+                            CultureInfo.InvariantCulture,
+                            "Recording for {0} failed. Exit code {1}",
+                            _targetPath,
+                            exitCode)));
             }
         }
 

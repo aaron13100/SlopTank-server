@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09, 2026-10-04, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09, 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-04.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -569,7 +569,15 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         }
 
         // Important - don't await the log task or we won't be able to kill FFmpeg when the user stops playback
-        _ = new JobLogger(_logger).StartStreamingLog(state, process.StandardError, logStream);
+        try
+        {
+            _ = new JobLogger(_logger).StartStreamingLog(state, process.StandardError, logStream);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ObjectDisposedException)
+        {
+            _logger.LogWarning(exception, "FFmpeg exited with code {ExitCode} before its standard error could be read", transcodingJob.ExitCode);
+            await logStream.DisposeAsync().ConfigureAwait(false);
+        }
 
         // Wait for the file to exist before proceeding
         var ffmpegTargetFile = state.WaitForPath ?? outputPath;

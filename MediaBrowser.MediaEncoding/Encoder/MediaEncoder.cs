@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
 #nullable disable
 #pragma warning disable CS1591
 
@@ -167,6 +168,12 @@ namespace MediaBrowser.MediaEncoding.Encoder
         public bool IsVaapiDeviceSupportVulkanDrmInterop => _isVaapiDeviceSupportVulkanDrmInterop;
 
         public bool IsVideoToolboxAv1DecodeAvailable => _isVideoToolboxAv1DecodeAvailable;
+
+        /// <summary>
+        /// Gets a value indicating whether child processes are still lowered to <see cref="ProcessPriorityClass.BelowNormal"/>.
+        /// It turns false once the platform refuses to set the priority of a running process.
+        /// </summary>
+        internal bool CanSetProcessPriority => _canSetProcessPriority;
 
         [GeneratedRegex(@"[^\/\\]+?(\.[^\/\\\n.]+)?$")]
         private static partial Regex FfprobePathRegex();
@@ -1123,26 +1130,34 @@ namespace MediaBrowser.MediaEncoding.Encoder
             return time.ToString(@"hh\:mm\:ss\.fff", CultureInfo.InvariantCulture);
         }
 
-        private void StartProcess(ProcessWrapper process)
+        internal void StartProcess(ProcessWrapper process)
         {
-            process.Process.Start();
+            lock (_runningProcessesLock)
+            {
+                process.Process.Start();
+                _runningProcesses.Add(process);
+            }
 
+            TrySetProcessPriority(process);
+        }
+
+        internal void TrySetProcessPriority(ProcessWrapper process)
+        {
             if (_canSetProcessPriority)
             {
                 try
                 {
                     process.Process.PriorityClass = ProcessPriorityClass.BelowNormal;
                 }
+                catch (Exception ex) when (process.Process.HasExited)
+                {
+                    _logger.LogDebug(ex, "Process exited before its priority could be lowered");
+                }
                 catch (Exception ex)
                 {
                     _canSetProcessPriority = false;
                     _logger.LogWarning(ex, "Unable to set process priority to BelowNormal for {ProcessFileName}. Further attempts will be skipped.", process.Process.StartInfo.FileName);
                 }
-            }
-
-            lock (_runningProcessesLock)
-            {
-                _runningProcesses.Add(process);
             }
         }
 
@@ -1342,7 +1357,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
             return _configurationManager.GetEncodingOptions().EnableSubtitleExtraction;
         }
 
-        private sealed class ProcessWrapper : IDisposable
+        internal sealed class ProcessWrapper : IDisposable
         {
             private readonly MediaEncoder _mediaEncoder;
 
@@ -1371,35 +1386,30 @@ namespace MediaBrowser.MediaEncoding.Encoder
                 {
                     ExitCode = process.ExitCode;
                 }
-                catch
+                catch (InvalidOperationException ex)
                 {
+                    _mediaEncoder._logger.LogDebug(ex, "Unable to read the exited process code");
                 }
 
-                DisposeProcess(process);
-            }
-
-            private void DisposeProcess(Process process)
-            {
                 lock (_mediaEncoder._runningProcessesLock)
                 {
                     _mediaEncoder._runningProcesses.Remove(this);
                 }
-
-                process.Dispose();
             }
 
             public void Dispose()
             {
                 if (!_disposed)
                 {
-                    if (Process is not null)
+                    _disposed = true;
+                    Process.Exited -= OnProcessExited;
+                    lock (_mediaEncoder._runningProcessesLock)
                     {
-                        Process.Exited -= OnProcessExited;
-                        DisposeProcess(Process);
+                        _mediaEncoder._runningProcesses.Remove(this);
                     }
-                }
 
-                _disposed = true;
+                    Process.Dispose();
+                }
             }
         }
     }

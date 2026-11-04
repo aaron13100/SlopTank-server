@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03, 2026-11-04.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -60,6 +60,26 @@ namespace Emby.Server.Implementations.Plugins
             ServerConfiguration config,
             string pluginsPath,
             Version appVersion)
+            : this(logger, appHost, config, pluginsPath, appVersion, null)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="PluginManager"/> class with a bundled plugin path.
+        /// </summary>
+        /// <param name="logger">The <see cref="ILogger{PluginManager}"/>.</param>
+        /// <param name="appHost">The <see cref="IServerApplicationHost"/>.</param>
+        /// <param name="config">The <see cref="ServerConfiguration"/>.</param>
+        /// <param name="pluginsPath">The plugin path.</param>
+        /// <param name="appVersion">The application version.</param>
+        /// <param name="bundledIntroSkipperPath">The optional fully qualified bundled plugin path.</param>
+        internal PluginManager(
+            ILogger<PluginManager> logger,
+            IServerApplicationHost appHost,
+            ServerConfiguration config,
+            string pluginsPath,
+            Version appVersion,
+            string? bundledIntroSkipperPath)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _pluginsPath = pluginsPath;
@@ -79,12 +99,12 @@ namespace Emby.Server.Implementations.Plugins
                 }
             }
 
-            _config = config;
+            _config = config ?? throw new ArgumentNullException(nameof(config));
             _appHost = appHost;
             _minimumVersion = new Version(0, 0, 0, 1);
             _plugins = Directory.Exists(_pluginsPath) ? DiscoverPlugins().ToList() : new List<LocalPlugin>();
             if (!_config.IsStartupWizardCompleted
-                && BundledIntroSkipper.InstallIfNeeded(_pluginsPath, _plugins, LoadManifest, _logger))
+                && BundledIntroSkipper.InstallIfNeeded(_pluginsPath, _plugins, LoadManifest, _logger, bundledIntroSkipperPath))
             {
                 _plugins = DiscoverPlugins().ToList();
             }

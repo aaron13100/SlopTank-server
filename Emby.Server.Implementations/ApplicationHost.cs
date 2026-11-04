@@ -183,7 +183,8 @@ namespace Emby.Server.Implementations
                 this,
                 ConfigurationManager.Configuration,
                 ApplicationPaths.PluginsPath,
-                ApplicationVersion);
+                ApplicationVersion,
+                startupConfig["BundledIntroSkipper:Path"]);
         }
 
         /// <summary>

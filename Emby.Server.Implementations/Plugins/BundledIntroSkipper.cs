@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03, 2026-11-04.
 using System;
 using System.IO;
 using System.Linq;
@@ -33,16 +33,28 @@ namespace Emby.Server.Implementations.Plugins
         /// <param name="plugins">The plugins discovered during startup.</param>
         /// <param name="loadManifest">The server's standard plugin manifest loader.</param>
         /// <param name="logger">The plugin manager logger.</param>
+        /// <param name="sourcePathOverride">An optional fully qualified bundled plugin path.</param>
         /// <returns><c>true</c> when a new plugin directory was published.</returns>
         internal static bool InstallIfNeeded(
             string pluginsPath,
             System.Collections.Generic.IReadOnlyCollection<LocalPlugin> plugins,
             Func<string, LocalPlugin> loadManifest,
-            ILogger logger)
+            ILogger logger,
+            string? sourcePathOverride = null)
         {
-            var sourcePath = Path.Combine(AppContext.BaseDirectory, "defaults", "intro-skipper");
+            if (sourcePathOverride is not null && !Path.IsPathFullyQualified(sourcePathOverride))
+            {
+                throw new InvalidDataException($"Bundled plugin path must be fully qualified: {sourcePathOverride}");
+            }
+
+            var sourcePath = sourcePathOverride ?? Path.Combine(AppContext.BaseDirectory, "defaults", "intro-skipper");
             if (!Directory.Exists(sourcePath))
             {
+                if (sourcePathOverride is not null)
+                {
+                    throw new DirectoryNotFoundException($"Bundled plugin directory was not found: {sourcePath}");
+                }
+
                 return false;
             }
 

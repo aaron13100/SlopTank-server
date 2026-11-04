@@ -109,6 +109,7 @@ def make_profile(home: Path, port: int) -> dict[str, Path | str]:
         '<NetworkConfiguration>\n'
         f"  <InternalHttpPort>{port}</InternalHttpPort>\n"
         f"  <PublicHttpPort>{port}</PublicHttpPort>\n"
+        "  <AutoDiscovery>false</AutoDiscovery>\n"
         "</NetworkConfiguration>\n",
         encoding="utf-8",
     )
@@ -124,14 +125,13 @@ def api(
     *,
     body: dict[str, Any] | None = None,
     token: str | None = None,
-    timeout: float = 8,
+    timeout: float = 30,
 ) -> tuple[int, bytes, dict[str, str]]:
     headers = {"Accept": "application/json"}
     payload = json.dumps(body).encode() if body is not None else None
     if payload is not None:
         headers["Content-Type"] = "application/json"
     if token:
-        headers["X-Emby-Token"] = token
         headers["Authorization"] = (
             'MediaBrowser Client="SlopTank Installed App Smoke", Device="Smoke", '
             f'DeviceId="installed-app-smoke", Version="1.0", Token="{token}"'
@@ -148,7 +148,7 @@ def api(
 
 def json_api(base: str, method: str, path: str, deadline: Deadline, *,
              body: dict[str, Any] | None = None, token: str | None = None,
-             timeout: float = 8) -> dict[str, Any]:
+             timeout: float = 30) -> dict[str, Any]:
     status, data, _ = api(base, method, path, deadline, body=body, token=token, timeout=timeout)
     if not 200 <= status < 300:
         raise SmokeError(f"{method} {path}: HTTP {status}: {data[:2000].decode(errors='replace')}")
@@ -167,7 +167,7 @@ def public_info(base: str, deadline: Deadline, app: subprocess.Popen[bytes]) -> 
         if app.poll() is not None:
             raise SmokeError(f"Native app exited {app.returncode} before its server became ready.")
         try:
-            value = json_api(base, "GET", "/System/Info/Public", deadline, timeout=5)
+            value = json_api(base, "GET", "/System/Info/Public", deadline, timeout=30)
             if value.get("Id"):
                 return value
             last = f"PublicInfo has no server Id: {value!r}"
@@ -205,7 +205,7 @@ def direct_range(base: str, token: str, item_id: str, media: Path, deadline: Dea
     count = 1024
     path = f"/Videos/{urllib.parse.quote(item_id, safe='')}/stream.mp4?Static=true"
     request = urllib.request.Request(base.rstrip("/") + path, headers={
-        "Range": f"bytes=0-{count - 1}", "X-Emby-Token": token,
+        "Range": f"bytes=0-{count - 1}",
         "Authorization": f'MediaBrowser Client="Smoke", Device="Smoke", DeviceId="smoke", Version="1", Token="{token}"',
     })
     try:
@@ -292,19 +292,28 @@ def log_tail(path: Path, limit: int = 20000) -> str:
         return stream.read().decode("utf-8", errors="replace")
 
 
-def wait_process_group(pgid: int, seconds: float, deadline: Deadline) -> bool:
-    end = min(deadline.at, time.monotonic() + seconds)
-    while time.monotonic() < end:
+def owned_server_alive(child: dict[str, Any], profile_data: Path, deadline: Deadline) -> bool:
+    """Check the recorded PID and its executable/profile before signalling it."""
+    pid = str(child["pid"])
+    result = run(["/bin/ps", "-ww", "-p", pid, "-o", "stat=", "-o", "command="],
+                 "Inspect owned server before cleanup", deadline, timeout=5, check=False)
+    if result.returncode == 1 and not result.stdout.strip():
         try:
-            os.killpg(pgid, 0)
+            os.kill(int(pid), 0)
         except ProcessLookupError:
-            return True
-        time.sleep(min(0.2, max(0, end - time.monotonic())))
-    try:
-        os.killpg(pgid, 0)
+            return False
+        raise SmokeError(f"Could not inspect still-present server PID {pid}: {result.stderr!r}")
+    if result.returncode:
+        raise SmokeError(f"Could not inspect owned server PID {pid}: {result.stderr!r}")
+    parts = result.stdout.strip().split(None, 1)
+    if not parts:
+        raise SmokeError(f"No process state returned for owned server PID {pid}.")
+    if parts[0].startswith("Z"):
         return False
-    except ProcessLookupError:
-        return True
+    if len(parts) != 2 or not parts[1].startswith(str(child["executable"]) + " ") \
+            or "--datadir " + str(profile_data) not in parts[1]:
+        raise SmokeError(f"Owned server PID {pid} no longer matches its executable and profile: {result.stdout!r}")
+    return True
 
 
 def launch_app(executable: Path, environment: dict[str, str], log_path: Path) -> subprocess.Popen[bytes]:
@@ -363,7 +372,7 @@ def main() -> int:
     profile: dict[str, Path | str] | None = None
     media: Path | None = None
     result_code = 1
-    process_group_stopped = True
+    owned_processes_stopped = True
     app_log = work / "native-app.log"
     server_log: Path | None = None
     environment = {key: value for key, value in os.environ.items()
@@ -461,17 +470,18 @@ def main() -> int:
 
         process = launch_app(executable, environment, app_log)
         receipt["app_pid"] = process.pid
+        child = server_child(process.pid, copied_app, data_path, expected_rid, operations)
+        receipt["server_process"] = child
         info = public_info(base, operations, process)
         if info.get("StartupWizardCompleted") is not False:
             raise SmokeError(f"Fresh fixture should require setup, PublicInfo said: {info!r}")
-        child = server_child(process.pid, copied_app, data_path, expected_rid, operations)
         for path, body in (
             ("/Startup/Configuration", {"UICulture": "en-US", "MetadataCountryCode": "US", "PreferredMetadataLanguage": "en"}),
             ("/Startup/User", {"Name": ADMIN_NAME, "Password": ADMIN_PASSWORD}),
             ("/Startup/RemoteAccess", {"EnableRemoteAccess": False, "EnableAutomaticPortMapping": False}),
             ("/Startup/Complete", {}),
         ):
-            status, body_data, _ = api(base, "POST", path, operations, body=body)
+            status, body_data, _ = api(base, "POST", path, operations, body=body, timeout=60)
             if not 200 <= status < 300:
                 raise SmokeError(f"Setup {path}: HTTP {status}: {body_data[:2000].decode(errors='replace')}")
         token, user_id = authenticate(base, operations)
@@ -499,9 +509,12 @@ def main() -> int:
 
         quit_app(process, work, port, operations)
         receipt["quit"] = {"app_exit": process.returncode, "server_stopped": True}
+        child = None
 
         process = launch_app(executable, environment, app_log)
         receipt["relaunch_pid"] = process.pid
+        child = server_child(process.pid, copied_app, data_path, expected_rid, operations)
+        receipt["relaunch_server_process"] = child
         relaunched = public_info(base, operations, process)
         if relaunched.get("Id") != info.get("Id"):
             raise SmokeError(f"Server identity changed on relaunch: {info.get('Id')!r} -> {relaunched.get('Id')!r}")
@@ -512,7 +525,6 @@ def main() -> int:
         retained = json_api(base, "GET", "/Items?" + retained_query, operations, token=new_token).get("Items", [])
         if new_user_id != user_id or not any(str(row.get("Id")) == str(item["Id"]) for row in retained if isinstance(row, dict)):
             raise SmokeError(f"Relaunch changed the admin or library item: user={new_user_id}, items={retained[:10]!r}")
-        child = server_child(process.pid, copied_app, data_path, expected_rid, operations)
         quit_app(process, work, port, operations)
         receipt["relaunch"] = {"server_id": relaunched["Id"], "setup_complete": True,
                                "user_id": new_user_id, "item_id": str(item["Id"]),
@@ -535,23 +547,46 @@ def main() -> int:
         receipt["traceback"] = traceback.format_exc()
     finally:
         if process is not None and receipt["status"] != "passed":
-            # Emergency cleanup is scoped to the new process session created above.
-            for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
-                try:
-                    os.killpg(process.pid, sig)
-                    receipt.setdefault("cleanup", []).append({"process_group_signal": sig.name, "pgid": process.pid})
-                except ProcessLookupError:
-                    break
-                if wait_process_group(process.pid, grace, deadline):
-                    break
+            owned_processes_stopped = False
             try:
-                os.killpg(process.pid, 0)
-                process_group_stopped = False
-                receipt["cleanup_errors"].append(f"Owned app process group {process.pid} remained after SIGKILL.")
-            except ProcessLookupError:
-                process_group_stopped = True
-            process.poll()
-        if copied_app is not None and copied_app.exists() and process_group_stopped and (process is None or process.poll() is not None):
+                for sig in (signal.SIGTERM, signal.SIGKILL):
+                    if child is not None:
+                        try:
+                            if owned_server_alive(child, data_path, deadline):
+                                os.kill(child["pid"], sig)
+                                receipt.setdefault("cleanup", []).append({"server_pid": child["pid"], "signal": sig.name})
+                        except ProcessLookupError:
+                            receipt.setdefault("cleanup", []).append({"server_pid": child["pid"], "already_stopped": True})
+                        except (OSError, SmokeError) as error:
+                            receipt["cleanup_errors"].append(f"Could not inspect or signal server PID {child['pid']}: {error}")
+                    if process.poll() is None:
+                        try:
+                            process.send_signal(sig)
+                            receipt.setdefault("cleanup", []).append({"app_pid": process.pid, "signal": sig.name})
+                        except ProcessLookupError:
+                            receipt.setdefault("cleanup", []).append({"app_pid": process.pid, "already_stopped": True})
+                        except OSError as error:
+                            receipt["cleanup_errors"].append(f"Could not signal app PID {process.pid}: {error}")
+                    try:
+                        end = min(deadline.at, time.monotonic() + 5)
+                        while time.monotonic() < end:
+                            if process.poll() is not None and child is not None and not owned_server_alive(child, data_path, deadline):
+                                break
+                            time.sleep(min(0.2, max(0, end - time.monotonic())))
+                        if process.poll() is not None and child is not None and not owned_server_alive(child, data_path, deadline):
+                            owned_processes_stopped = True
+                            break
+                    except (OSError, SmokeError) as error:
+                        receipt["cleanup_errors"].append(f"Could not verify server shutdown after {sig.name}: {error}")
+                if not owned_processes_stopped:
+                    receipt["cleanup_errors"].append("Could not confirm that the owned app and recorded server stopped; retained app.")
+            except Exception as error:
+                receipt["cleanup_errors"].append(f"Could not verify owned process cleanup: {error}")
+            try:
+                process.poll()  # Reap the launcher even when it has already become a zombie.
+            except OSError as error:
+                receipt["cleanup_errors"].append(f"Could not reap app PID {process.pid}: {error}")
+        if copied_app is not None and copied_app.exists() and owned_processes_stopped and (process is None or process.poll() is not None):
             try:
                 run([sys.executable, "-c", "import shutil,sys; shutil.rmtree(sys.argv[1])", str(copied_app)],
                     "Remove only the copied app after failure", deadline, timeout=30)
@@ -566,9 +601,12 @@ def main() -> int:
                 receipt["cleanup_errors"].append(str(error))
                 receipt["status"] = "failed"
                 result_code = 1
-        receipt["logs"] = {"native_app": str(app_log), "native_app_tail": log_tail(app_log),
-                           "server": str(server_log) if server_log else None,
-                           "server_tail": log_tail(server_log) if server_log else ""}
+        try:
+            receipt["logs"] = {"native_app": str(app_log), "native_app_tail": log_tail(app_log),
+                               "server": str(server_log) if server_log else None,
+                               "server_tail": log_tail(server_log) if server_log else ""}
+        except OSError as error:
+            receipt["cleanup_errors"].append(f"Could not collect log tails: {error}")
         receipt["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
         receipt["duration_seconds"] = round(time.monotonic() - started, 2)
         receipt["mounted_volume"] = str(mounted) if mounted else None

@@ -51,6 +51,7 @@ final class ServerProcessController {
         var environment = ProcessInfo.processInfo.environment.filter {
             !$0.key.hasPrefix("JELLYFIN_") && !$0.key.hasPrefix("SLOPTANK_")
         }
+        environment["PATH"] = ffmpeg.deletingLastPathComponent().path + ":" + (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
         environment["TMPDIR"] = paths.cache.path
         environment["JELLYFIN_Permalinks__AuthorityRoot"] = paths.authority.path
         environment["JELLYFIN_PlaybackPreparation__WorkerPath"] = preparationWorker.path

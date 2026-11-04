@@ -1,0 +1,180 @@
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
+name: Universal Mac artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      web_ref:
+        description: Exact public SlopTank web commit (push it before running)
+        required: true
+        default: cf47118556c3fee098332fcad2b5f1b85355de97
+      version:
+        description: Candidate version
+        required: true
+        default: 0.1.0
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            rid: osx-x64
+            machine: x86_64
+          - runner: macos-15
+            rid: osx-arm64
+            machine: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Confirm native runner and install preparation build tools
+        env:
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+        run: |
+          test "$(uname -m)" = "$EXPECTED_MACHINE"
+          sw_vers
+          python -m pip install --disable-pip-version-check pyinstaller==6.22.3 guessit==3.8.0 charset-normalizer==3.4.4
+      - name: Build native components (normal priority, bounded commands)
+        env:
+          TARGET_RID: ${{ matrix.rid }}
+        run: python apps/macos/build-native.py --rid "$TARGET_RID" --output "$RUNNER_TEMP/native"
+      - name: Preserve executable modes and runtime symlinks
+        run: tar -C "$RUNNER_TEMP/native" -cf "$RUNNER_TEMP/native.tar" Server Preparation SlopTank upstream
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.rid }}
+          path: ${{ runner.temp }}/native.tar
+          retention-days: 7
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Require an exact public web source commit
+        env:
+          WEB_REF: ${{ inputs.web_ref }}
+        run: '[[ "$WEB_REF" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@v4
+        with:
+          repository: aaron13100/SlopTank
+          ref: ${{ inputs.web_ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: node
+          cache: npm
+      - run: npm ci
+      - run: npm run build:production
+      - run: git archive HEAD -o dist/web-source.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: dist
+          retention-days: 7
+
+  assemble:
+    needs: [native, web]
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: components
+      - uses: actions/download-artifact@v4
+        with:
+          name: web
+          path: web
+      - name: Merge launcher and static FFmpeg slices, then assemble one app
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          WEB_REF: ${{ inputs.web_ref }}
+        run: |
+          mkdir -p components/osx-x64 components/osx-arm64 universal/ffmpeg universal/materials
+          tar -xf components/native-osx-x64/native.tar -C components/osx-x64
+          tar -xf components/native-osx-arm64/native.tar -C components/osx-arm64
+          lipo -create components/osx-x64/SlopTank components/osx-arm64/SlopTank -output universal/SlopTank
+          for tool in ffmpeg ffprobe; do
+            lipo -create "components/osx-x64/upstream/ffmpeg/$tool" "components/osx-arm64/upstream/ffmpeg/$tool" -output "universal/ffmpeg/$tool"
+            lipo -verify_arch x86_64 arm64 "universal/ffmpeg/$tool"
+            codesign --force --sign - "universal/ffmpeg/$tool"
+          done
+          lipo -verify_arch x86_64 arm64 universal/SlopTank
+          git archive HEAD -o universal/materials/server-and-installer-source.tar
+          mv web/web-source.tar universal/materials/
+          cp LICENSE* universal/materials/
+          cp components/osx-x64/upstream/components.json universal/materials/components-osx-x64.json
+          cp components/osx-arm64/upstream/components.json universal/materials/components-osx-arm64.json
+          python apps/macos/release-materials.py --output universal/materials --web-ref "$WEB_REF"
+          python apps/macos/assemble-app.py --launcher-binary universal/SlopTank --runtime osx-x64=components/osx-x64 --runtime osx-arm64=components/osx-arm64 --web-dir web --ffmpeg-dir universal/ffmpeg --intro-skipper-plugin components/osx-x64/upstream/IntroSkipper --release-materials-dir universal/materials --version "$RELEASE_VERSION" --build-number "$GITHUB_RUN_NUMBER" --output universal/SlopTank.app
+          codesign --force --sign - universal/SlopTank.app
+          python apps/macos/package-dmg.py --app universal/SlopTank.app --output universal/SlopTank.dmg --timeout-seconds 1200
+          shasum -a 256 universal/SlopTank.dmg > universal/SlopTank.dmg.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candidate-dmg
+          path: |
+            universal/SlopTank.dmg
+            universal/SlopTank.dmg.sha256
+          retention-days: 7
+
+  installed-smoke:
+    needs: assemble
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-dmg
+          path: candidate
+      - name: Install, set up, direct play, quit, relaunch and remove
+        env:
+          RUNNER_LABEL: ${{ matrix.runner }}
+        run: |
+          if [ "$RUNNER_LABEL" = macos-15-intel ]; then expected=x86_64; else expected=arm64; fi
+          test "$(python -c 'import platform; print(platform.machine())')" = "$expected"
+          sw_vers
+          python apps/macos/smoke-installed-app.py --dmg candidate/SlopTank.dmg --work-dir "$RUNNER_TEMP/installed-smoke" --timeout-seconds 1800
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-${{ matrix.runner }}
+          path: ${{ runner.temp }}/installed-smoke
+          retention-days: 7
+
+  artifact:
+    needs: installed-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-dmg
+          path: candidate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SlopTank-universal-macos
+          path: candidate
+          retention-days: 14

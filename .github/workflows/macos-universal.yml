@@ -2,16 +2,13 @@
 name: Universal Mac artifact
 
 on:
+  push:
+    branches: [release-universal]
   workflow_dispatch:
-    inputs:
-      web_ref:
-        description: Exact public SlopTank web commit (push it before running)
-        required: true
-        default: cf47118556c3fee098332fcad2b5f1b85355de97
-      version:
-        description: Candidate version
-        required: true
-        default: 0.1.0
+
+env:
+  WEB_REF: cf47118556c3fee098332fcad2b5f1b85355de97
+  RELEASE_VERSION: 0.1.0
 
 permissions:
   contents: read
@@ -62,13 +59,11 @@ jobs:
     timeout-minutes: 40
     steps:
       - name: Require an exact public web source commit
-        env:
-          WEB_REF: ${{ inputs.web_ref }}
         run: '[[ "$WEB_REF" =~ ^[0-9a-f]{40}$ ]]'
       - uses: actions/checkout@v4
         with:
           repository: aaron13100/SlopTank
-          ref: ${{ inputs.web_ref }}
+          ref: ${{ env.WEB_REF }}
       - uses: actions/setup-node@v4
         with:
           node-version: node
@@ -100,9 +95,6 @@ jobs:
           name: web
           path: web
       - name: Merge launcher and static FFmpeg slices, then assemble one app
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          WEB_REF: ${{ inputs.web_ref }}
         run: |
           mkdir -p components/osx-x64 components/osx-arm64 universal/ffmpeg universal/materials
           tar -xf components/native-osx-x64/native.tar -C components/osx-x64

@@ -89,8 +89,9 @@ override. An Intel Mac cannot execute the arm64 worker.
 `.github/workflows/macos-universal.yml` in SlopTank-server builds native components
 on `macos-15-intel` and `macos-15` (Apple chip), builds the pinned public SlopTank
 web source, assembles one app/DMG and smokes that same installed image on both
-runner types. Dispatch it manually after pushing the reviewed source branches;
-`web_ref` must identify the exact public web commit. The smoke uses an isolated
+runner types. Push the pinned public web commit first; pushing the server's
+`release-universal` branch then starts the workflow automatically. Manual dispatch
+is available after the workflow reaches the default branch. The smoke uses an isolated
 profile/port and a clip generated with the bundled FFmpeg, then checks setup,
 HTTP 206 bytes, normal Quit, retained-profile relaunch and removal. It bypasses
 the welcome-window interaction using a ready-profile fixture. Outputs are workflow

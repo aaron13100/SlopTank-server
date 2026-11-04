@@ -1,4 +1,4 @@
-<!-- SlopTank modification notice: added or changed by SlopTank on 2026-11-04. -->
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05. -->
 # SlopTank for macOS
 
 SlopTank uses one Mac download for Intel and Apple chips (M1 or later), targeting
@@ -96,7 +96,8 @@ is available after the workflow reaches the default branch. The smoke uses an is
 profile/port and a clip generated with the bundled FFmpeg, then checks setup,
 HTTP 206 bytes, installed SVG conversion and preparation-worker startup, normal
 Quit, retained-profile relaunch and removal. The worker probe checks its expected
-end-of-input response; it does not run a preparation job. The smoke bypasses
+end-of-input response; a separate smoke step converts an incompatible clip and checks
+playback bytes and the retained original. The smoke bypasses
 the welcome-window interaction using a ready-profile fixture. Outputs are workflow
 artifacts only, with no release or tag. Ad-hoc signing permits native execution;
 Developer ID signing, notarization and exact-component source/licence clearance

@@ -1,8 +1,9 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-12, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-12, 2026-10-14, 2026-10-31, 2026-11-04.
 using System;
 using System.IO;
 using System.Runtime.ExceptionServices;
 using System.Threading.Tasks;
+using Jellyfin.Api.Helpers;
 using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller.Entities;
@@ -62,7 +63,7 @@ internal sealed class UserImageUploadCoordinator
 
         for (int attempt = 0; attempt < 2; attempt++)
         {
-            var freshUser = _userManager.GetUserById(userId);
+            var freshUser = _userManager.GetUserOrDefault(userId);
             if (freshUser is null)
             {
                 DeleteOwnedArtifact(ownedPath);
@@ -101,7 +102,7 @@ internal sealed class UserImageUploadCoordinator
                 User? selectedUser;
                 try
                 {
-                    selectedUser = _userManager.GetUserById(userId);
+                    selectedUser = _userManager.GetUserOrDefault(userId);
                 }
                 catch (Exception reconciliationException)
                 {

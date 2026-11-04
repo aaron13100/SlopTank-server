@@ -1,9 +1,10 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-06, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-06, 2026-10-14, 2026-10-31, 2026-11-04.
 using System;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Threading.Tasks;
 using Jellyfin.Api.Extensions;
+using Jellyfin.Api.Helpers;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Dto;
@@ -73,7 +74,7 @@ public class WatchlistController : BaseJellyfinApiController
             return StatusCode(StatusCodes.Status403Forbidden, "A watchlist is only reachable by its owner.");
         }
 
-        var user = _userManager.GetUserById(userId);
+        var user = _userManager.GetUserOrDefault(userId);
         if (user is null)
         {
             return NotFound();
@@ -140,7 +141,7 @@ public class WatchlistController : BaseJellyfinApiController
             return StatusCode(StatusCodes.Status403Forbidden, "A watchlist is only reachable by its owner.");
         }
 
-        var user = _userManager.GetUserById(userId);
+        var user = _userManager.GetUserOrDefault(userId);
         if (user is null)
         {
             return NotFound();
@@ -182,6 +183,6 @@ public class WatchlistController : BaseJellyfinApiController
 
     private bool IsOwnUser(Guid userId)
     {
-        return userId.Equals(User.GetUserId());
+        return !userId.Equals(Guid.Empty) && userId.Equals(User.GetUserId());
     }
 }

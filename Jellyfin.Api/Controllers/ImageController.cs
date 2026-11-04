@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-12, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-12, 2026-10-14, 2026-10-31, 2026-11-04.
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -1489,7 +1489,7 @@ public class ImageController : BaseJellyfinApiController
             return BadRequest("UserId is required if unauthenticated");
         }
 
-        var user = _userManager.GetUserById(requestUserId);
+        var user = _userManager.GetUserOrDefault(requestUserId);
         if (user?.ProfileImage is null)
         {
             return NotFound();

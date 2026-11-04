@@ -100,7 +100,7 @@ public class VideosController : BaseJellyfinApiController
         userId = RequestHelpers.GetUserId(User, userId);
         var user = userId.IsNullOrEmpty()
             ? null
-            : _userManager.GetUserById(userId.Value);
+            : _userManager.GetUserOrDefault(userId.Value);
 
         var item = itemId.IsEmpty()
             ? (userId.IsNullOrEmpty()

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-06, 2026-10-14, 2026-10-31, 2026-11-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-06, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-04.
 using System;
 using System.Data.Common;
 using System.Linq;
@@ -123,9 +123,6 @@ public class JellyfinDbContext(DbContextOptions<JellyfinDbContext> options, ILog
     /// Gets the logical content aliases used to resolve permalinks.
     /// </summary>
     public DbSet<MediaPermalinkAlias> MediaPermalinkAliases => Set<MediaPermalinkAlias>();
-
-    /// <summary>Gets the user-bound compatibility leases for permalink resolution.</summary>
-    public DbSet<MediaPermalinkLease> MediaPermalinkLeases => Set<MediaPermalinkLease>();
 
     /// <summary>Gets the playback preparation attempts.</summary>
     public DbSet<PlaybackPreparationAttemptEntity> PlaybackPreparationAttempts => Set<PlaybackPreparationAttemptEntity>();

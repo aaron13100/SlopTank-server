@@ -1,9 +1,0 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-10-14, 2026-10-31.
-using System;
-
-namespace MediaBrowser.Controller.Permalinks;
-
-/// <summary>Public folded state of a durable mutation operation.</summary>
-/// <param name="OperationId">The durable operation identifier.</param>
-/// <param name="State">The current folded state.</param>
-public sealed record PermalinkMutationResult(Guid OperationId, string State);

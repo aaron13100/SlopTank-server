@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-03, 2026-11-04.
 // allow-no-test-found: private integration coverage is assigned to sloptank-tests/server/tests.
 #pragma warning disable CS1591
 using System;
@@ -9,7 +9,6 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Emby.Server.Implementations.Permalinks;
 using Jellyfin.Database.Implementations;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
@@ -97,7 +96,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
                 }
 
                 var path = _appHost.ExpandVirtualPath(item.Path);
-                var identity = PermalinkObjectIdentity.Read(path);
+                var identity = MediaFileFingerprint.Read(path);
                 if (identity is null)
                 {
                     item.PlaybackReadiness = PlaybackReadiness.Failed;
@@ -213,7 +212,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
                 }
 
                 var item = await db.BaseItems.SingleOrDefaultAsync(value => value.Id.Equals(attempt.ItemId), cancellationToken).ConfigureAwait(false);
-                var currentIdentity = item?.Path is null ? null : PermalinkObjectIdentity.Read(_appHost.ExpandVirtualPath(item.Path));
+                var currentIdentity = item?.Path is null ? null : MediaFileFingerprint.Read(_appHost.ExpandVirtualPath(item.Path));
                 if (item is null || !string.Equals(currentIdentity, attempt.RequestedObjectIdentity, StringComparison.Ordinal))
                 {
                     if (item is not null)
@@ -304,7 +303,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
 
         var currentIdentity = item.Path is null
             ? null
-            : PermalinkObjectIdentity.Read(_appHost.ExpandVirtualPath(item.Path));
+            : MediaFileFingerprint.Read(_appHost.ExpandVirtualPath(item.Path));
         var valid = string.Equals(
                 item.PlaybackReadyAlgorithmVersion,
                 PlaybackPreparationContract.PlannerAlgorithmVersion,
@@ -357,7 +356,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
                     continue;
                 }
 
-                var current = PermalinkObjectIdentity.Read(_appHost.ExpandVirtualPath(item.Path));
+                var current = MediaFileFingerprint.Read(_appHost.ExpandVirtualPath(item.Path));
                 if (!string.Equals(item.PlaybackReadyAlgorithmVersion, PlaybackPreparationContract.PlannerAlgorithmVersion, StringComparison.Ordinal)
                     || !string.Equals(current, item.PlaybackReadyObjectIdentity, StringComparison.Ordinal))
                 {
@@ -392,7 +391,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
                     && candidate.Path is not null
                     && (!string.Equals(persisted.PlaybackReadyAlgorithmVersion, PlaybackPreparationContract.PlannerAlgorithmVersion, StringComparison.Ordinal)
                         || !string.Equals(
-                            PermalinkObjectIdentity.Read(_appHost.ExpandVirtualPath(candidate.Path!)),
+                            MediaFileFingerprint.Read(_appHost.ExpandVirtualPath(candidate.Path!)),
                             persisted.PlaybackReadyObjectIdentity,
                             StringComparison.Ordinal)))
                 .Select(item => item.Id)
@@ -458,7 +457,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
                     var attempt = await LoadBoundPreparingAttemptAsync(db, requestId, request, now, cancellationToken).ConfigureAwait(false);
                     var item = await db.BaseItems.SingleOrDefaultAsync(value => value.Id.Equals(attempt.ItemId), cancellationToken).ConfigureAwait(false);
                     var path = item?.Path is null ? null : _appHost.ExpandVirtualPath(item.Path);
-                    var identity = path is null ? null : PermalinkObjectIdentity.Read(path);
+                    var identity = path is null ? null : MediaFileFingerprint.Read(path);
                     if (item is null || path is null || identity is null)
                     {
                         if (item is not null)

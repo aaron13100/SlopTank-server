@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03, 2026-11-04.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -6,7 +6,6 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.PlaybackPreparation;
 using MediaBrowser.Model.PlaybackPreparation;
 using Microsoft.Extensions.Logging;
@@ -116,7 +115,6 @@ internal sealed class PreparationWorkerChannel
                 var code = exception switch
                 {
                     PlaybackPreparationException preparation => preparation.Code,
-                    PermalinkException mutation => mutation.Code,
                     _ => exception.GetType().Name
                 };
                 _logger.LogWarning(exception, "Preparation request {RequestId} RPC failed ({Code})", _requestId, code);

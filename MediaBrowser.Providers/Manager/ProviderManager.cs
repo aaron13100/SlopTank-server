@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-19, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-19, 2026-10-14, 2026-10-31, 2026-11-04.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -27,7 +27,6 @@ using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Lyrics;
 using MediaBrowser.Controller.MediaSegments;
-using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Subtitles;
 using MediaBrowser.Model.Configuration;
@@ -70,7 +69,6 @@ namespace MediaBrowser.Providers.Manager
         private readonly IMemoryCache _memoryCache;
         private readonly IMediaSegmentManager _mediaSegmentManager;
         private readonly ISimilarItemsManager _similarItemsManager;
-        private readonly IPermalinkIdentityMutationAdapter _identityMutationAdapter;
         private readonly AsyncKeyedLocker<string> _imageSaveLock = new(o =>
         {
             o.PoolSize = 20;
@@ -109,7 +107,6 @@ namespace MediaBrowser.Providers.Manager
         /// <param name="memoryCache">The memory cache.</param>
         /// <param name="mediaSegmentManager">The media segment manager.</param>
         /// <param name="similarItemsManager">The similar items manager.</param>
-        /// <param name="identityMutationAdapter">Durable identity mutation adapter.</param>
         public ProviderManager(
             IHttpClientFactory httpClientFactory,
             ISubtitleManager subtitleManager,
@@ -123,8 +120,7 @@ namespace MediaBrowser.Providers.Manager
             ILyricManager lyricManager,
             IMemoryCache memoryCache,
             IMediaSegmentManager mediaSegmentManager,
-            ISimilarItemsManager similarItemsManager,
-            IPermalinkIdentityMutationAdapter identityMutationAdapter)
+            ISimilarItemsManager similarItemsManager)
         {
             _logger = logger;
             _httpClientFactory = httpClientFactory;
@@ -139,7 +135,6 @@ namespace MediaBrowser.Providers.Manager
             _memoryCache = memoryCache;
             _mediaSegmentManager = mediaSegmentManager;
             _similarItemsManager = similarItemsManager;
-            _identityMutationAdapter = identityMutationAdapter;
 
             CollectionFolder.LibraryOptionsUpdated += OnLibraryOptionsUpdated;
         }
@@ -185,64 +180,7 @@ namespace MediaBrowser.Providers.Manager
                 return ItemUpdateType.None;
             }
 
-            var updateType = ItemUpdateType.None;
-            try
-            {
-                await _identityMutationAdapter.ExecuteAsync(
-                    [item],
-                    new PermalinkIdentityMutationRequest(
-                        ClassifyIdentityMutation(item, options),
-                        options.SearchResult?.ProviderIds),
-                    async (_, ambientCancellationToken) =>
-                    {
-                        updateType = await service.RefreshMetadata(
-                            item,
-                            options,
-                            ambientCancellationToken).ConfigureAwait(false);
-                    },
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch (PermalinkException exception)
-            {
-                // Sibling of the delete-endpoint fix (2026-09-11 F1 incident):
-                // this call site had no guard at all, so a metadata refresh of
-                // a fenced item (a scheduled task, an on-demand Person
-                // refresh on item view, or a queued "Refresh Metadata" click)
-                // threw unhandled. A refresh does not need a verified content
-                // head either: skip it the same way a fenced scan child is
-                // skipped, and let the next successful reconciliation pick it
-                // back up.
-                _logger.LogWarning(
-                    exception,
-                    "Skipping metadata refresh for {ItemId} ({ItemName}) at {ItemPath} because permalink operation {OperationId} fenced it with {PermalinkCode}",
-                    item.Id,
-                    item.Name,
-                    item.Path,
-                    exception.OperationId,
-                    exception.Code);
-                return ItemUpdateType.None;
-            }
-
-            return updateType;
-        }
-
-        private string ClassifyIdentityMutation(
-            BaseItem item,
-            MetadataRefreshOptions options)
-        {
-            if (options.SearchResult is not null)
-            {
-                return "identify";
-            }
-
-            var nfoPath = string.IsNullOrEmpty(item.Path)
-                ? string.Empty
-                : item is Series
-                ? Path.Combine(item.Path, "tvshow.nfo")
-                : Path.ChangeExtension(item.Path, ".nfo");
-            return _fileSystem.FileExists(nfoPath)
-                ? "nfo-refresh"
-                : "automatic-refresh";
+            return await service.RefreshMetadata(item, options, cancellationToken).ConfigureAwait(false);
         }
 
         /// <inheritdoc/>

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-09-27, 2026-09-28, 2026-10-01, 2026-10-02, 2026-10-04, 2026-10-06, 2026-10-07, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-08-29, 2026-08-30, 2026-09-02, 2026-09-08, 2026-09-09, 2026-09-14, 2026-09-19, 2026-09-27, 2026-09-28, 2026-10-01, 2026-10-02, 2026-10-04, 2026-10-06, 2026-10-07, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03, 2026-11-04.
 #nullable disable
 
 #pragma warning disable CS1591
@@ -567,87 +567,19 @@ namespace Emby.Server.Implementations
             serviceCollection.AddTransient(provider => new Lazy<IUserViewManager>(provider.GetRequiredService<IUserViewManager>));
             serviceCollection.AddTransient(provider => new Lazy<IExternalDataManager>(provider.GetRequiredService<IExternalDataManager>));
             serviceCollection.AddTransient(provider => new Lazy<ILibraryManager>(provider.GetRequiredService<ILibraryManager>));
-            serviceCollection.AddTransient(provider => new Lazy<IPermalinkIdentityMutationAdapter>(
-                provider.GetRequiredService<IPermalinkIdentityMutationAdapter>));
             serviceCollection.AddTransient(provider => new Lazy<IPermalinkManager>(
                 provider.GetRequiredService<IPermalinkManager>));
             serviceCollection.AddSingleton<ILibraryManager, LibraryManager>();
             serviceCollection.AddSingleton(TimeProvider.System);
-            serviceCollection.AddSingleton<MacPermalinkMountPolicy>();
-            serviceCollection.AddSingleton<IPermalinkAtomicFileSystem, MacPermalinkAtomicFileSystem>();
-            serviceCollection.AddSingleton<IPermalinkAuthorityRootProvider, ConfigurationPermalinkAuthorityRootProvider>();
-            serviceCollection.AddSingleton<PermalinkAuthorityStore>();
-            serviceCollection.AddSingleton<IPermalinkPathObjects, MacPermalinkPathObjects>();
-            serviceCollection.AddSingleton<PermalinkRootIdentityStore>();
-            serviceCollection.AddSingleton<PermalinkRootIdentityRegistry>();
-            serviceCollection.AddSingleton<PermalinkPathLocks>();
-            serviceCollection.AddSingleton<PermalinkPathEvidenceStore>();
-            serviceCollection.AddSingleton<PermalinkPathLeaseFactory>();
-            serviceCollection.AddSingleton<PermalinkAuthoritySnapshotPublisher>();
-            serviceCollection.AddSingleton<IPermalinkAuthorityGenerationOracle>(provider =>
-                provider.GetRequiredService<PermalinkAuthoritySnapshotPublisher>());
-            serviceCollection.AddSingleton<PermalinkWriterAdmissionService>();
-            serviceCollection.AddSingleton<IPermalinkWriterAdmissionService>(provider =>
-                provider.GetRequiredService<PermalinkWriterAdmissionService>());
-            serviceCollection.AddSingleton<PermalinkTransitionStore>();
-            serviceCollection.AddSingleton<PermalinkBindingIndex>();
-            serviceCollection.AddSingleton<PermalinkCapsuleStore>();
-            serviceCollection.AddSingleton<PermalinkDocumentFactory>();
-            serviceCollection.AddSingleton<PermalinkTransitionPublisher>();
-            serviceCollection.AddSingleton<PermalinkContentReadMeter>();
-
-            // Both are built by hand rather than by convention: the digest
-            // cache resolves the authority root through the provider seam so
-            // it follows an authority scope switch rather than the store, and
-            // an unconfigured authority has to disable persistence instead of
-            // throwing on the way up.
-            serviceCollection.AddSingleton(provider =>
-            {
-                return new PermalinkContentDigestCache(
-                    provider.GetRequiredService<IPermalinkAuthorityRootProvider>(),
-                    provider.GetRequiredService<ILogger<PermalinkContentDigestCache>>());
-            });
-            serviceCollection.AddSingleton(provider => new PermalinkEvidence(
-                provider.GetRequiredService<PermalinkContentReadMeter>(),
-                provider.GetRequiredService<PermalinkContentDigestCache>(),
-                provider.GetRequiredService<PermalinkAuthorityStore>(),
-                provider.GetRequiredService<IPermalinkAtomicFileSystem>()));
-            serviceCollection.AddSingleton<IPermalinkStore, PermalinkStore>();
-            serviceCollection.AddSingleton<Emby.Server.Implementations.MediaMutations.MediaWriteRoots>();
-            serviceCollection.AddSingleton<Emby.Server.Implementations.MediaMutations.ProtectedMediaState>();
             serviceCollection.AddSingleton<MediaContentIdentifier>();
             serviceCollection.AddSingleton<MediaPermalinkRepository>();
             serviceCollection.AddSingleton<LegacyMediaPermalinkRepository>();
-            serviceCollection.AddSingleton<MediaPermalinkLeaseRepository>();
             serviceCollection.AddSingleton<PermalinkManager>();
             serviceCollection.AddSingleton<IPermalinkManager>(provider => provider.GetRequiredService<PermalinkManager>());
-            serviceCollection.AddSingleton<PermalinkOperationJournal>();
-            serviceCollection.AddSingleton<PermalinkItemStateMutation>();
-            serviceCollection.AddSingleton<IHostedService, PermalinkOperationReconciler>();
-            serviceCollection.AddSingleton<IHostedService, PermalinkAnchorIntentRecovery>();
-            serviceCollection.AddSingleton<IHostedService, PermalinkOperationArchiver>();
-            serviceCollection.AddSingleton<PermalinkPendingIdentityMutation>();
-            serviceCollection.AddSingleton<PermalinkMutationBundleFactory>();
-            serviceCollection.AddSingleton<PermalinkMutationClaimStore>();
-            serviceCollection.AddSingleton<PermalinkPathPublication>();
-            serviceCollection.AddSingleton<PermalinkContentAdoption>();
-            serviceCollection.AddSingleton<PermalinkMediaMutation>();
-            serviceCollection.AddSingleton<PermalinkMediaRecovery>();
-            serviceCollection.AddSingleton<PermalinkCrossRootMutation>();
-            serviceCollection.AddSingleton<PermalinkPathMutation>();
-            serviceCollection.AddSingleton<IPermalinkMutationCoordinator, PermalinkMutationCoordinator>();
-            serviceCollection.AddSingleton<PermalinkRemovalEvidenceVerifier>();
-            serviceCollection.AddSingleton<IPermalinkRemovalCoordinator, PermalinkRemovalCoordinator>();
-            serviceCollection.AddSingleton<IPermalinkIdentityMutationAdapter, PermalinkIdentityMutationAdapter>();
+            serviceCollection.AddSingleton<LegacyPermalinkImport>();
             serviceCollection.AddSingleton<IPlaybackPreparationService, PlaybackPreparationService>();
             serviceCollection.AddSingleton<IHostedService, PlaybackPreparationHost>();
             serviceCollection.AddSingleton<IWatchlistManager, WatchlistManager>();
-            serviceCollection.AddSingleton<PermalinkLeaseStore>();
-            serviceCollection.AddSingleton<PermalinkPlaybackDocumentStore>();
-            serviceCollection.AddSingleton<PermalinkPlaybackPlanStore>();
-            serviceCollection.AddSingleton<PermalinkPlaybackRecovery>();
-            serviceCollection.AddSingleton<PermalinkPlaybackStateStore>();
-            serviceCollection.AddSingleton<IPermalinkResolutionService, PermalinkResolutionService>();
             serviceCollection.AddSingleton<NamingOptions>();
             serviceCollection.AddSingleton<VideoListResolver>();
 
@@ -782,7 +714,6 @@ namespace Emby.Server.Implementations
             Folder.UserViewManager = Resolve<IUserViewManager>();
             Folder.CollectionManager = Resolve<ICollectionManager>();
             Folder.LimitedConcurrencyLibraryScheduler = Resolve<ILimitedConcurrencyLibraryScheduler>();
-            Folder.PermalinkIdentityMutationAdapter = Resolve<IPermalinkIdentityMutationAdapter>();
             Episode.MediaEncoder = Resolve<IMediaEncoder>();
             UserView.TVSeriesManager = Resolve<ITVSeriesManager>();
             Video.RecordingsManager = Resolve<IRecordingsManager>();

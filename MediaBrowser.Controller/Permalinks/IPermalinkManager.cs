@@ -1,4 +1,6 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-10-14, 2026-10-31, 2026-11-04.
+using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
@@ -19,4 +21,11 @@ public interface IPermalinkManager
     Task<PermalinkResponse> EnsurePermalinkIdsAsync(
         BaseItem item,
         CancellationToken cancellationToken);
+
+    /// <summary>Resolves an alias through current library metadata and ordinary user authorization.</summary>
+    /// <param name="identifier">The public alias.</param>
+    /// <param name="userId">The authenticated library user.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>One visible current record per matching logical title.</returns>
+    Task<IReadOnlyList<BaseItem>> GetVideoFileAsync(string identifier, Guid userId, CancellationToken cancellationToken);
 }

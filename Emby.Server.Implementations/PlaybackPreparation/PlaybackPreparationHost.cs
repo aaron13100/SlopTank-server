@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03, 2026-11-04.
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -10,7 +10,6 @@ using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
-using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.PlaybackPreparation;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Model.PlaybackPreparation;
@@ -29,10 +28,10 @@ internal sealed class PlaybackPreparationHost : BackgroundService
     private readonly IServerApplicationHost _appHost;
     private readonly ILibraryManager _library;
     private readonly ISessionManager _sessions;
-    private readonly IPermalinkMutationCoordinator _mutations;
     private readonly TimeProvider _clock;
     private readonly ILogger<PlaybackPreparationHost> _logger;
     private readonly string? _executable;
+    private readonly string _retiredDirectory;
 
     public PlaybackPreparationHost(
         IPlaybackPreparationService service,
@@ -41,7 +40,6 @@ internal sealed class PlaybackPreparationHost : BackgroundService
         IServerApplicationHost appHost,
         ILibraryManager library,
         ISessionManager sessions,
-        IPermalinkMutationCoordinator mutations,
         IConfiguration configuration,
         TimeProvider clock,
         ILogger<PlaybackPreparationHost> logger)
@@ -52,10 +50,13 @@ internal sealed class PlaybackPreparationHost : BackgroundService
         _appHost = appHost;
         _library = library;
         _sessions = sessions;
-        _mutations = mutations;
         _clock = clock;
         _logger = logger;
         _executable = configuration["PlaybackPreparation:WorkerPath"];
+        var retiredDirectory = configuration["PlaybackPreparation:RetiredDirectory"];
+        _retiredDirectory = Path.GetFullPath(string.IsNullOrWhiteSpace(retiredDirectory)
+            ? Path.Combine(paths.ProgramDataPath, "retired-media")
+            : retiredDirectory);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -145,7 +146,7 @@ internal sealed class PlaybackPreparationHost : BackgroundService
 
         process.StandardInput.NewLine = "\n";
         var stderr = DrainErrorsAsync(process.StandardError, claim.RequestId!, CancellationToken.None);
-        var writer = new PreparationMediaWriter(_service, _mutations, _library, _appHost, IsIdle, claim, workspace);
+        var writer = new PreparationMediaWriter(_service, _library, _appHost, _retiredDirectory, IsIdle, claim, workspace);
         var channel = new PreparationWorkerChannel(_service, writer, claim, IsIdle, _logger);
         Exception? primaryFailure = null;
         try

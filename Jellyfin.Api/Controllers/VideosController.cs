@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-18, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-18, 2026-10-14, 2026-10-31, 2026-11-04.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -20,7 +20,6 @@ using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
-using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Streaming;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
@@ -49,7 +48,6 @@ public class VideosController : BaseJellyfinApiController
     private readonly ITranscodeManager _transcodeManager;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly EncodingHelper _encodingHelper;
-    private readonly IPermalinkIdentityMutationAdapter _identityMutationAdapter;
 
     private readonly TranscodingJobType _transcodingJobType = TranscodingJobType.Progressive;
 
@@ -65,7 +63,6 @@ public class VideosController : BaseJellyfinApiController
     /// <param name="transcodeManager">Instance of the <see cref="ITranscodeManager"/> interface.</param>
     /// <param name="httpClientFactory">Instance of the <see cref="IHttpClientFactory"/> interface.</param>
     /// <param name="encodingHelper">Instance of <see cref="EncodingHelper"/>.</param>
-    /// <param name="identityMutationAdapter">Durable identity mutation adapter.</param>
     public VideosController(
         ILibraryManager libraryManager,
         IUserManager userManager,
@@ -75,8 +72,7 @@ public class VideosController : BaseJellyfinApiController
         IMediaEncoder mediaEncoder,
         ITranscodeManager transcodeManager,
         IHttpClientFactory httpClientFactory,
-        EncodingHelper encodingHelper,
-        IPermalinkIdentityMutationAdapter identityMutationAdapter)
+        EncodingHelper encodingHelper)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
@@ -87,7 +83,6 @@ public class VideosController : BaseJellyfinApiController
         _transcodeManager = transcodeManager;
         _httpClientFactory = httpClientFactory;
         _encodingHelper = encodingHelper;
-        _identityMutationAdapter = identityMutationAdapter;
     }
 
     /// <summary>
@@ -221,62 +216,42 @@ public class VideosController : BaseJellyfinApiController
                 .First();
         }
 
-        try
+        var alternateVersionsOfPrimary = primaryVersion.LinkedAlternateVersions.ToList();
+
+        foreach (var item in items.Where(i => !i.Id.Equals(primaryVersion.Id)))
         {
-            await _identityMutationAdapter.ExecuteAsync(
-                items,
-                new PermalinkIdentityMutationRequest("grouping"),
-                async (_, _) =>
+            item.SetPrimaryVersionId(primaryVersion.Id);
+            await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
+            await _libraryManager.RerouteLinkedChildReferencesAsync(item.Id, primaryVersion.Id).ConfigureAwait(false);
+
+            if (!alternateVersionsOfPrimary.Any(i => i.ItemId.HasValue && i.ItemId.Value.Equals(item.Id)))
+            {
+                alternateVersionsOfPrimary.Add(new LinkedChild
                 {
-                    var alternateVersionsOfPrimary = primaryVersion.LinkedAlternateVersions.ToList();
+                    ItemId = item.Id,
+                    Type = LinkedChildType.LinkedAlternateVersion
+                });
+            }
 
-                    foreach (var item in items.Where(i => !i.Id.Equals(primaryVersion.Id)))
-                    {
-                        item.SetPrimaryVersionId(primaryVersion.Id);
-                        await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
-                        await _libraryManager.RerouteLinkedChildReferencesAsync(item.Id, primaryVersion.Id).ConfigureAwait(false);
+            foreach (var linkedItem in item.LinkedAlternateVersions)
+            {
+                if (linkedItem.ItemId.HasValue
+                    && !alternateVersionsOfPrimary.Any(i => i.ItemId.HasValue
+                        && i.ItemId.Value.Equals(linkedItem.ItemId.Value)))
+                {
+                    alternateVersionsOfPrimary.Add(linkedItem);
+                }
+            }
 
-                        if (!alternateVersionsOfPrimary.Any(i => i.ItemId.HasValue && i.ItemId.Value.Equals(item.Id)))
-                        {
-                            alternateVersionsOfPrimary.Add(new LinkedChild
-                            {
-                                ItemId = item.Id,
-                                Type = LinkedChildType.LinkedAlternateVersion
-                            });
-                        }
-
-                        foreach (var linkedItem in item.LinkedAlternateVersions)
-                        {
-                            if (linkedItem.ItemId.HasValue
-                                && !alternateVersionsOfPrimary.Any(i => i.ItemId.HasValue
-                                    && i.ItemId.Value.Equals(linkedItem.ItemId.Value)))
-                            {
-                                alternateVersionsOfPrimary.Add(linkedItem);
-                            }
-                        }
-
-                        if (item.LinkedAlternateVersions.Length > 0)
-                        {
-                            item.LinkedAlternateVersions = Array.Empty<LinkedChild>();
-                            await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
-                        }
-                    }
-
-                    primaryVersion.LinkedAlternateVersions = alternateVersionsOfPrimary.ToArray();
-                    await primaryVersion.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
-                },
-                CancellationToken.None).ConfigureAwait(false);
+            if (item.LinkedAlternateVersions.Length > 0)
+            {
+                item.LinkedAlternateVersions = Array.Empty<LinkedChild>();
+                await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
+            }
         }
-        catch (PermalinkException exception)
-        {
-            // Same typed boundary as ItemUpdateController and the delete
-            // endpoints: the fence reason reaches the caller instead of a
-            // bare 500.
-            return Problem(
-                detail: exception.Message,
-                statusCode: StatusCodes.Status409Conflict,
-                title: exception.Code);
-        }
+
+        primaryVersion.LinkedAlternateVersions = alternateVersionsOfPrimary.ToArray();
+        await primaryVersion.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
 
         return NoContent();
     }

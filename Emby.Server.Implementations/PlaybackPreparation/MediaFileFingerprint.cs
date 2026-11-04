@@ -16,18 +16,6 @@ internal static class MediaFileFingerprint
     /// <returns>A stable fingerprint for the observed generation, or null.</returns>
     public static string? Read(string path)
     {
-        if (MacMediaFileFingerprint.TryRead(path) is { } token)
-        {
-            return string.Join(
-                ":",
-                "object",
-                token.Device,
-                token.Inode,
-                token.ChangeTimeSeconds,
-                token.ChangeTimeNanoseconds,
-                token.Length);
-        }
-
         if (File.Exists(path))
         {
             var info = new FileInfo(path);

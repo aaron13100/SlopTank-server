@@ -1,0 +1,4 @@
+# SlopTank modification notice: added or changed by SlopTank on 2026-09-09, 2026-10-31, 2026-11-03, 2026-11-04.
+# Scope: exact same-directory paths only.
+# Columns: path<TAB>change-dates<TAB>git-mode<TAB>sha256
+playback-preparation.spec	2026-11-04	100644	4fc56a89dfae298ac4ac17a0b61b030b35a6e11613159f83b7240f654be00677

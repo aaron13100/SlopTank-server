@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-01, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-01, 2026-10-31, 2026-11-04.
 using System;
 using System.Globalization;
 using System.IO;
@@ -81,7 +81,9 @@ internal sealed class PermalinkAuthoritySnapshotPublisher : IPermalinkAuthorityG
             // Serializable, which Microsoft.Data.Sqlite maps to BEGIN IMMEDIATE, a write
             // transaction; SQLite's online backup returns SQLITE_BUSY ("database is locked") at
             // once when its source connection is in a write transaction.
+#pragma warning disable CA1849 // Microsoft.Data.Sqlite has no async deferred transaction overload; BeginTransactionAsync uses BEGIN IMMEDIATE and breaks online backup.
             await using var pinned = source.BeginTransaction(deferred: true);
+#pragma warning restore CA1849
             await PinGenerationAsync(source, pinned, metadata, cancellationToken)
                 .ConfigureAwait(false);
             var directoryName = $"g-{metadata.Generation.ToString(CultureInfo.InvariantCulture)}-{Guid.NewGuid():N}";

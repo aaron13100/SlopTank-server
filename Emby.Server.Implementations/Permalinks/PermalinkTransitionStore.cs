@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-10, 2026-10-03, 2026-10-14, 2026-10-31, 2026-11-01.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-09-09, 2026-09-10, 2026-10-03, 2026-10-14, 2026-10-31, 2026-11-01, 2026-11-04.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -311,7 +311,7 @@ internal sealed class PermalinkTransitionStore
                 if (reader.GetString(0) != successor.OperationId.ToString("D")
                     || reader.GetString(1) != successor.EventId.ToString("D")
                     || reader.GetString(2) != digest
-                    || reader.IsDBNull(3) || reader.GetString(3) != "ready")
+                    || await reader.IsDBNullAsync(3, cancellationToken).ConfigureAwait(false) || reader.GetString(3) != "ready")
                 {
                     throw new PermalinkException(
                         PermalinkErrorKind.Conflict,

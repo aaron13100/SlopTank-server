@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-20, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-20, 2026-10-14, 2026-10-31, 2026-11-04.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -326,7 +326,7 @@ namespace Jellyfin.Server
 
                     var databaseProvider = appHost.ServiceProvider.GetRequiredService<IJellyfinDatabaseProvider>();
                     using var shutdownSource = new CancellationTokenSource();
-                    shutdownSource.CancelAfter((int)TimeSpan.FromSeconds(60).TotalMicroseconds);
+                    shutdownSource.CancelAfter(TimeSpan.FromSeconds(60));
                     await databaseProvider.RunShutdownTask(shutdownSource.Token).ConfigureAwait(false);
                 }
 

@@ -32,6 +32,14 @@ from pathlib import Path
 from typing import Any
 
 
+# The same portable helper lives under tools in the operations checkout.
+preparation_source = Path(__file__).resolve().parents[1] / "preparation"
+if not preparation_source.is_dir():
+    preparation_source = Path(__file__).resolve().parents[2] / "tools"
+sys.path.insert(0, str(preparation_source))
+from lib.load_scaled_timeout import load_scaled_timeout
+
+
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 APP_NAME = "SlopTank.app"
 PROFILE_RELATIVE = Path("Library/Application Support/SlopTank")
@@ -59,7 +67,7 @@ class Deadline:
         remaining = self.remaining()
         if remaining <= 0:
             raise SmokeError(f"Overall smoke deadline expired before {label}.")
-        return min(maximum, remaining)
+        return min(load_scaled_timeout(maximum), remaining)
 
 
 def run(argv: list[str], label: str, deadline: Deadline, timeout: float = 60,

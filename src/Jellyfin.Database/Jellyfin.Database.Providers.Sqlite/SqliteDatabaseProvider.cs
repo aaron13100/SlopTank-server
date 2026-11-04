@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-24, 2026-10-06, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-24, 2026-10-06, 2026-10-14, 2026-10-31, 2026-11-04.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -40,6 +40,44 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
 
     /// <inheritdoc/>
     public IDbContextFactory<JellyfinDbContext>? DbContextFactory { get; set; }
+
+    /// <summary>
+    /// Clears a migration lock left by an interrupted server, before any startup migrations run.
+    /// </summary>
+    /// <remarks>The caller must exclusively own the data directory for the server's entire lifetime.</remarks>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the recovery.</returns>
+    public async Task ClearAbandonedMigrationLockAsync(CancellationToken cancellationToken)
+    {
+        var databasePath = GetDatabasePath();
+        if (!File.Exists(databasePath))
+        {
+            return;
+        }
+
+        // ReadWrite refuses to create a database. A fresh profile is initialized by the normal migration service.
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadWrite,
+            Pooling = false
+        }.ToString();
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '__EFMigrationsLock';";
+        if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            return;
+        }
+
+        command.CommandText = "DELETE FROM \"__EFMigrationsLock\";";
+        var removed = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        if (removed > 0)
+        {
+            _logger.LogWarning("Cleared {LockCount} abandoned EF migration lock(s) from {DatabasePath} while exclusively owning the server data directory", removed, databasePath);
+        }
+    }
 
     /// <inheritdoc/>
     public void Initialise(DbContextOptionsBuilder options, DatabaseConfigurationOptions databaseConfiguration)

@@ -1,0 +1,16 @@
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-11-04. -->
+<Project>
+  <!-- Self-contained output includes runtime binaries but the SDK leaves their notices in the NuGet packs. -->
+  <Target Name="PublishRuntimePackNotices" AfterTargets="Publish"
+          DependsOnTargets="ResolveFrameworkReferences" Condition="'$(SelfContained)' == 'true'">
+    <ItemGroup>
+      <_RuntimePackNotice Include="%(ResolvedRuntimePack.PackageDirectory)/LICENSE*;%(ResolvedRuntimePack.PackageDirectory)/THIRD-PARTY-NOTICES*">
+        <RuntimePackage>%(ResolvedRuntimePack.NuGetPackageId)</RuntimePackage>
+      </_RuntimePackNotice>
+    </ItemGroup>
+    <Error Condition="'@(_RuntimePackNotice)' == ''" Text="Self-contained publishing requires the resolved runtime pack licence and third-party notices." />
+    <Copy SourceFiles="@(_RuntimePackNotice)"
+          DestinationFiles="@(_RuntimePackNotice->'$(PublishDir)licenses/%(RuntimePackage)/%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+</Project>

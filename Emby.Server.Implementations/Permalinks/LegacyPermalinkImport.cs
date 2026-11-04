@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -34,12 +34,12 @@ public sealed class LegacyPermalinkImport(
     IConfiguration configuration,
     IApplicationPaths paths,
     TimeProvider clock,
-    ILogger<LegacyPermalinkImport> logger)
+    ILogger<LegacyPermalinkImport> logger) : ILegacyPermalinkImporter
 {
     /// <summary>Imports aliases and writes unmappable aliases and missing library records to a report.</summary>
-    /// <param name="token">The startup cancellation token.</param>
+    /// <param name="cancellationToken">The startup cancellation token.</param>
     /// <returns>The asynchronous migration operation.</returns>
-    public async Task RunAsync(CancellationToken token)
+    public async Task RunAsync(CancellationToken cancellationToken)
     {
         var root = configuration["Permalinks:AuthorityRoot"];
         if (string.IsNullOrWhiteSpace(root))
@@ -59,7 +59,7 @@ public sealed class LegacyPermalinkImport(
         IReadOnlyList<LegacyMediaPermalinkRepository.LegacyAlias> aliases;
         try
         {
-            aliases = await legacy.ReadAsync(databasePath, token).ConfigureAwait(false);
+            aliases = await legacy.ReadAsync(databasePath, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is SqliteException or IOException or UnauthorizedAccessException)
         {
@@ -80,7 +80,7 @@ public sealed class LegacyPermalinkImport(
         {
             try
             {
-                var identity = await manager.ReadMetadataAsync(item, createSeriesIdentity: false, token).ConfigureAwait(false);
+                var identity = await manager.ReadMetadataAsync(item, createSeriesIdentity: false, cancellationToken).ConfigureAwait(false);
                 // This is a migration diagnostic only. A locator's existence does
                 // not supply identity and is never consulted by permalink lookup.
                 var missing = item is Video && item.IsFileProtocol && !item.IsVirtualItem && !string.IsNullOrEmpty(item.Path) && !File.Exists(item.Path);
@@ -103,7 +103,7 @@ public sealed class LegacyPermalinkImport(
         var casualties = 0;
         foreach (var plan in Plan(aliases, snapshot))
         {
-            token.ThrowIfCancellationRequested();
+            cancellationToken.ThrowIfCancellationRequested();
             if (plan.Error is not null)
             {
                 casualties++;
@@ -115,8 +115,8 @@ public sealed class LegacyPermalinkImport(
             {
                 foreach (var itemId in plan.ItemIds)
                 {
-                    await manager.EnsurePermalinkIdsAsync(byId[itemId], token).ConfigureAwait(false);
-                    var binding = await repository.ReadForItemAsync(itemId, token).ConfigureAwait(false);
+                    await manager.EnsurePermalinkIdsAsync(byId[itemId], cancellationToken).ConfigureAwait(false);
+                    var binding = await repository.ReadForItemAsync(itemId, cancellationToken).ConfigureAwait(false);
                     await repository.ImportAliasAsync(
                         new MediaPermalinkRepository.PermalinkBindingRequest(
                             itemId,
@@ -126,7 +126,7 @@ public sealed class LegacyPermalinkImport(
                             [plan.Alias],
                             null,
                             clock.GetUtcNow().UtcDateTime),
-                        token).ConfigureAwait(false);
+                        cancellationToken).ConfigureAwait(false);
                 }
 
                 imported++;

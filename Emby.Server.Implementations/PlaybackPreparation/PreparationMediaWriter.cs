@@ -2,6 +2,8 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Database.Implementations.Enums;
@@ -11,6 +13,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.PlaybackPreparation;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.PlaybackPreparation;
+using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.PlaybackPreparation;
 
@@ -24,6 +27,8 @@ internal sealed class PreparationMediaWriter
     private readonly Guid _itemId;
     private readonly string _workspace;
     private readonly string _retiredDirectory;
+    private readonly TimeProvider _clock;
+    private readonly ILogger _logger;
     private string _path;
     private string _identity;
     private bool _mediaInfoRefreshRequired;
@@ -33,6 +38,8 @@ internal sealed class PreparationMediaWriter
         ILibraryManager library,
         IServerApplicationHost appHost,
         string retiredDirectory,
+        TimeProvider clock,
+        ILogger logger,
         Func<bool> isIdle,
         PlaybackPreparationRequest claim,
         string workspace)
@@ -40,6 +47,8 @@ internal sealed class PreparationMediaWriter
         _preparation = preparation;
         _library = library;
         _appHost = appHost;
+        _clock = clock;
+        _logger = logger;
         _isIdle = isIdle;
         _itemId = Guid.Parse(claim.ItemId!);
         _path = claim.Path!;
@@ -250,6 +259,7 @@ internal sealed class PreparationMediaWriter
             }
 
             File.Move(temporaryPath, backupPath);
+            await AppendRetirementLedgerRecordAsync(backupPath, sourcePath, source.Length).ConfigureAwait(false);
             return backupPath;
         }
         catch (Exception exception)
@@ -262,6 +272,45 @@ internal sealed class PreparationMediaWriter
             }
 
             throw Error("retirement-backup-failed", $"Could not preserve the original media at '{sourcePath}': {exception.Message}");
+        }
+    }
+
+    private async Task AppendRetirementLedgerRecordAsync(string slotPath, string sourcePath, long sizeBytes)
+    {
+        var slotName = Path.GetFileName(slotPath);
+        var ledgerPath = Path.Combine(_retiredDirectory, ".retirement-ledger.jsonl");
+        var record = new
+        {
+            kind = "retirement",
+            version = 1,
+            slot_name = slotName,
+            source_path = sourcePath,
+            retired_at = _clock.GetUtcNow().ToUnixTimeMilliseconds() / 1000d,
+            size_bytes = sizeBytes,
+            retired_at_source = "observed"
+        };
+
+        try
+        {
+            var line = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(record) + "\n");
+            await using var stream = new FileStream(
+                ledgerPath,
+                FileMode.Append,
+                FileAccess.Write,
+                FileShare.Read,
+                4096,
+                useAsync: true);
+            await stream.WriteAsync(line).ConfigureAwait(false);
+            await stream.FlushAsync().ConfigureAwait(false);
+            await Task.Run(() => stream.Flush(flushToDisk: true)).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "Could not append a retirement ledger record for {SlotName} in {RetiredDirectory}; the replacement is unaffected, but this file's undo window can no longer be dated precisely",
+                slotName,
+                _retiredDirectory);
         }
     }
 

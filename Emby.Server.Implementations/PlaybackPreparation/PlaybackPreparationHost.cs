@@ -146,7 +146,7 @@ internal sealed class PlaybackPreparationHost : BackgroundService
 
         process.StandardInput.NewLine = "\n";
         var stderr = DrainErrorsAsync(process.StandardError, claim.RequestId!, CancellationToken.None);
-        var writer = new PreparationMediaWriter(_service, _library, _appHost, _retiredDirectory, IsIdle, claim, workspace);
+        var writer = new PreparationMediaWriter(_service, _library, _appHost, _retiredDirectory, _clock, _logger, IsIdle, claim, workspace);
         var channel = new PreparationWorkerChannel(_service, writer, claim, IsIdle, _logger);
         Exception? primaryFailure = null;
         try

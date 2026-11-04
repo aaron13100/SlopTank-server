@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  WEB_REF: cf47118556c3fee098332fcad2b5f1b85355de97
+  WEB_REF: 34c6f82583e0c07704a8b3be494e209b90bbd5ed
   RELEASE_VERSION: 0.1.0
 
 permissions:

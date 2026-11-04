@@ -1,4 +1,4 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-09-09, 2026-10-14, 2026-10-31, 2026-11-03.
+# SlopTank modification notice: added or changed by SlopTank on 2026-09-09, 2026-10-31, 2026-11-03, 2026-11-04.
 # Scope: exact same-directory paths only.
 # Columns: path<TAB>change-dates<TAB>git-mode<TAB>sha256
 LICENSE	2026-11-03	100644	50c738992d78e37f12579ba89888591250158741abfe3efb51702afd905cfa9e

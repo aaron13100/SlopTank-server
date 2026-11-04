@@ -3,10 +3,11 @@
 
 SlopTank uses one Mac download for Intel and Apple chips (M1 or later), targeting
 macOS 14 or later. This matches [.NET 10's supported macOS range](https://learn.microsoft.com/en-us/dotnet/core/install/macos#supported-versions).
-The Swift launcher targets macOS 12. An earlier installed-app smoke passed on
-Intel macOS 12.7.6; that observation does not establish vendor support for macOS
-12 or 13. Native Apple-chip and supported-platform execution must pass the
-GitHub workflow before a public release. Local candidates are not public downloads.
+The Swift launcher targets macOS 12. The universal candidate also passed its
+installed-app smoke on an Intel Mac running macOS 12.7.6. That is a tested
+configuration; the vendor-supported baseline remains macOS 14. Native Apple-chip
+and macOS 15 execution must pass the GitHub workflow before a public release.
+Local candidates are not public downloads.
 
 Install by opening the DMG, dragging SlopTank to Applications, opening it and
 choosing Start SlopTank. Browser setup creates the administrator and library.

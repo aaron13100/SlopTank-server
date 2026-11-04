@@ -495,7 +495,7 @@ def main() -> int:
             raise SmokeError("Startup wizard did not report completion after setup.")
         query = urllib.parse.urlencode({"name": "Smoke Movies", "collectionType": "movies",
                                         "paths": str(media_dir), "refreshLibrary": "true"})
-        status, body, _ = api(base, "POST", "/Library/VirtualFolders?" + query, operations, token=token, timeout=20)
+        status, body, _ = api(base, "POST", "/Library/VirtualFolders?" + query, operations, body={}, token=token, timeout=60)
         if not 200 <= status < 300:
             raise SmokeError(f"Adding scratch Movies library: HTTP {status}: {body[:2000].decode(errors='replace')}")
         status, body, _ = api(base, "POST", "/Library/Refresh", operations, token=token, timeout=20)

@@ -66,7 +66,7 @@ jobs:
           ref: ${{ env.WEB_REF }}
       - uses: actions/setup-node@v4
         with:
-          node-version: node
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - run: npm run build:production

@@ -127,15 +127,16 @@ def api(
     token: str | None = None,
     timeout: float = 30,
 ) -> tuple[int, bytes, dict[str, str]]:
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "Authorization": ('MediaBrowser Client="SlopTank Installed App Smoke", Device="Smoke", '
+                          'DeviceId="installed-app-smoke", Version="1.0"'),
+    }
     payload = json.dumps(body).encode() if body is not None else None
     if payload is not None:
         headers["Content-Type"] = "application/json"
     if token:
-        headers["Authorization"] = (
-            'MediaBrowser Client="SlopTank Installed App Smoke", Device="Smoke", '
-            f'DeviceId="installed-app-smoke", Version="1.0", Token="{token}"'
-        )
+        headers["Authorization"] += f', Token="{token}"'
     request = urllib.request.Request(base.rstrip("/") + path, data=payload, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=deadline.timeout(timeout, f"{method} {path}")) as response:

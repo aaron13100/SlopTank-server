@@ -59,8 +59,8 @@ def build(output: Path, rid: str) -> None:
     run([sys.executable, "apps/macos/fetch-components.py", "--rid", rid,
          "--output", str(output / "upstream")], root, 600)
     for component in ("jellyfin", "svg-rasterizer/svg-rasterizer"):
-        run(["lipo", "-verify_arch", expected_machine, str(output / "Server" / component)], root, 30)
-    run(["lipo", "-verify_arch", expected_machine, str(output / "Preparation/sloptank-prepare")], root, 30)
+        run(["lipo", str(output / "Server" / component), "-verify_arch", expected_machine], root, 30)
+    run(["lipo", str(output / "Preparation/sloptank-prepare"), "-verify_arch", expected_machine], root, 30)
 
 
 def main() -> None:

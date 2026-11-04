@@ -102,10 +102,10 @@ jobs:
           lipo -create components/osx-x64/SlopTank components/osx-arm64/SlopTank -output universal/SlopTank
           for tool in ffmpeg ffprobe; do
             lipo -create "components/osx-x64/upstream/ffmpeg/$tool" "components/osx-arm64/upstream/ffmpeg/$tool" -output "universal/ffmpeg/$tool"
-            lipo -verify_arch x86_64 arm64 "universal/ffmpeg/$tool"
+            lipo "universal/ffmpeg/$tool" -verify_arch x86_64 arm64
             codesign --force --sign - "universal/ffmpeg/$tool"
           done
-          lipo -verify_arch x86_64 arm64 universal/SlopTank
+          lipo universal/SlopTank -verify_arch x86_64 arm64
           git archive HEAD -o universal/materials/server-and-installer-source.tar
           mv web/web-source.tar universal/materials/
           cp LICENSE* universal/materials/

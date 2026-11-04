@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -26,6 +27,28 @@ namespace Jellyfin.Server.Helpers;
 public static class StartupHelpers
 {
     private static readonly string[] _relevantEnvVarPrefixes = { "JELLYFIN_", "DOTNET_", "ASPNETCORE_" };
+
+    /// <summary>
+    /// Exclusively owns the data directory until the returned stream is disposed or the process exits.
+    /// </summary>
+    /// <param name="appPaths">The selected server paths.</param>
+    /// <returns>The process-lifetime lease. The lock file must never be deleted while a server is running.</returns>
+    public static FileStream AcquireDataDirectoryLock(IApplicationPaths appPaths)
+    {
+        var lockPath = Path.Combine(appPaths.ProgramDataPath, ".sloptank-server.lock");
+        try
+        {
+            // Keep the same inode across starts; deleting a lock file could let two processes own different files.
+            return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        }
+        catch (IOException ex)
+        {
+            throw new IOException(
+                $"Cannot exclusively open server data directory '{appPaths.ProgramDataPath}'. "
+                + $"Another server may already be using this directory. Lock file: '{lockPath}'. {ex.Message}",
+                ex);
+        }
+    }
 
     /// <summary>
     /// Logs relevant environment variables and information about the host.

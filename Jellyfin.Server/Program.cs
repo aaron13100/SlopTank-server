@@ -14,6 +14,7 @@ using Emby.Server.Implementations.Configuration;
 using Emby.Server.Implementations.Permalinks;
 using Emby.Server.Implementations.Serialization;
 using Jellyfin.Database.Implementations;
+using Jellyfin.Database.Providers.Sqlite;
 using Jellyfin.Server.Extensions;
 using Jellyfin.Server.Helpers;
 using Jellyfin.Server.Implementations.DatabaseConfiguration;
@@ -94,6 +95,7 @@ namespace Jellyfin.Server
             _restoreFromBackup = options.RestoreArchive;
             _startTimestamp = Stopwatch.GetTimestamp();
             ServerApplicationPaths appPaths = StartupHelpers.CreateApplicationPaths(options);
+            using var dataDirectoryLock = StartupHelpers.AcquireDataDirectoryLock(appPaths);
             appPaths.MakeSanityCheckOrThrow();
 
             // $JELLYFIN_LOG_DIR needs to be set for the logger configuration manager
@@ -362,6 +364,12 @@ namespace Jellyfin.Server
             var startupService = migrationStartupServiceProvider.BuildServiceProvider();
 
             PrepareDatabaseProvider(startupService);
+
+            // StartApp owns the data directory for the entire server lifetime, including every migration stage.
+            if (startupService.GetRequiredService<IJellyfinDatabaseProvider>() is SqliteDatabaseProvider sqliteProvider)
+            {
+                await sqliteProvider.ClearAbandonedMigrationLockAsync(CancellationToken.None).ConfigureAwait(false);
+            }
 
             var jellyfinMigrationService = ActivatorUtilities.CreateInstance<JellyfinMigrationService>(startupService);
             await jellyfinMigrationService.CheckFirstTimeRunOrMigration(appPaths, startupOptions).ConfigureAwait(false);

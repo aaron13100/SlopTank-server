@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03, 2026-11-04.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -79,7 +79,7 @@ namespace Emby.Server.Implementations.Plugins
                 }
             }
 
-            _config = config;
+            _config = config ?? throw new ArgumentNullException(nameof(config));
             _appHost = appHost;
             _minimumVersion = new Version(0, 0, 0, 1);
             _plugins = Directory.Exists(_pluginsPath) ? DiscoverPlugins().ToList() : new List<LocalPlugin>();

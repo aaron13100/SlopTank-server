@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 # The same portable helper lives under tools in the operations checkout.
@@ -47,6 +47,7 @@ ADMIN_NAME = "smoke-admin"
 ADMIN_PASSWORD = "Smoke-only-password-4917!"
 MEDIA_NAME = "SlopTank Installed App Smoke.mp4"
 POLL_SECONDS = 0.5
+EXITING_WAIT_SECONDS = 5
 CLEANUP_RESERVE_SECONDS = 75
 
 
@@ -301,8 +302,24 @@ def log_tail(path: Path, limit: int = 20000) -> str:
         return stream.read().decode("utf-8", errors="replace")
 
 
-def owned_server_alive(child: dict[str, Any], profile_data: Path, deadline: Deadline) -> bool:
-    """Check the recorded PID and its executable/profile before signalling it."""
+def classify_owned_process(state: str, command: str, executable: str, profile_data: Path) -> str:
+    """Classify the `ps` row of the recorded server as "running", "exiting" or "exited".
+
+    Any other program is refused with SmokeError, so cleanup never signals a process that is not
+    the recorded server. A zombie has stopped. A process the kernel is tearing down (state flag E)
+    no longer has its arguments: ps shows only its name in parentheses, for example `(jellyfin)`.
+    """
+    if state.startswith("Z"):
+        return "exited"
+    if "E" in state and command == f"({Path(executable).name})":
+        return "exiting"
+    if not command.startswith(executable + " ") or "--datadir " + str(profile_data) not in command:
+        raise SmokeError(f"Owned server no longer matches its executable and profile: {state!r} {command!r}")
+    return "running"
+
+
+def owned_server_status(child: dict[str, Any], profile_data: Path, deadline: Deadline) -> str:
+    """Report the recorded server PID as "running", "exiting", "exited" or "gone"."""
     pid = str(child["pid"])
     result = run(["/bin/ps", "-ww", "-p", pid, "-o", "stat=", "-o", "command="],
                  "Inspect owned server before cleanup", deadline, timeout=5, check=False)
@@ -310,19 +327,30 @@ def owned_server_alive(child: dict[str, Any], profile_data: Path, deadline: Dead
         try:
             os.kill(int(pid), 0)
         except ProcessLookupError:
-            return False
+            return "gone"
         raise SmokeError(f"Could not inspect still-present server PID {pid}: {result.stderr!r}")
     if result.returncode:
         raise SmokeError(f"Could not inspect owned server PID {pid}: {result.stderr!r}")
     parts = result.stdout.strip().split(None, 1)
     if not parts:
         raise SmokeError(f"No process state returned for owned server PID {pid}.")
-    if parts[0].startswith("Z"):
-        return False
-    if len(parts) != 2 or not parts[1].startswith(str(child["executable"]) + " ") \
-            or "--datadir " + str(profile_data) not in parts[1]:
-        raise SmokeError(f"Owned server PID {pid} no longer matches its executable and profile: {result.stdout!r}")
-    return True
+    return classify_owned_process(parts[0], parts[1] if len(parts) == 2 else "", str(child["executable"]), profile_data)
+
+
+def owned_server_alive(child: dict[str, Any], profile_data: Path, deadline: Deadline,
+                       *, exit_wait_seconds: float = EXITING_WAIT_SECONDS,
+                       status: Callable[[dict[str, Any], Path, Deadline], str] = owned_server_status) -> bool:
+    """True while the recorded server runs; one caught mid-exit is waited for, never taken for another process."""
+    wait_until = min(deadline.at, time.monotonic() + load_scaled_timeout(exit_wait_seconds))
+    while True:
+        current = status(child, profile_data, deadline)
+        if current == "running":
+            return True
+        if current != "exiting":
+            return False
+        if time.monotonic() >= wait_until:
+            raise SmokeError(f"Owned server PID {child['pid']} is still exiting after {exit_wait_seconds}s.")
+        time.sleep(min(POLL_SECONDS, max(0, wait_until - time.monotonic())))
 
 
 def launch_app(executable: Path, environment: dict[str, str], log_path: Path) -> subprocess.Popen[bytes]:

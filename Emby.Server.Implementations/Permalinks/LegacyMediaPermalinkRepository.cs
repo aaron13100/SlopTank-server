@@ -1,237 +1,134 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03, 2026-11-04.
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using MediaBrowser.Controller.Permalinks;
 using Microsoft.Data.Sqlite;
 
 namespace Emby.Server.Implementations.Permalinks;
 
-/// <summary>
-/// Reads previously issued alias-to-item associations for migration only. New
-/// installations do not need this database. No media is opened or identified.
-/// </summary>
-public sealed class LegacyMediaPermalinkRepository(IPermalinkAuthorityRootProvider roots)
+/// <summary>Reads issued legacy aliases once for migration, without changing the rollback database.</summary>
+public sealed class LegacyMediaPermalinkRepository
 {
-    internal async Task<IReadOnlyList<string>> ReadItemAliasesAsync(Guid itemId, CancellationToken token)
+    /// <summary>Reads old alias associations. No connection to this store is used during resolution.</summary>
+    /// <param name="databasePath">The existing legacy database or a read-only dry-run copy.</param>
+    /// <param name="token">The cancellation token.</param>
+    /// <returns>Every issued alias, including aliases whose old item no longer exists.</returns>
+    public async Task<IReadOnlyList<LegacyAlias>> ReadAsync(string databasePath, CancellationToken token)
     {
-        await using var connection = await OpenExistingAsync(token).ConfigureAwait(false);
-        if (connection is null)
+        await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            return Array.Empty<string>();
-        }
-
-        try
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false
+        }.ToString());
+        await connection.OpenAsync(token).ConfigureAwait(false);
+        var aliases = new Dictionary<string, LegacyAlias>(StringComparer.Ordinal);
+        await using (var command = connection.CreateCommand())
         {
-            await using var command = connection.CreateCommand();
-            command.CommandText = """
-                SELECT b.PermalinkId
-                  FROM PermalinkBindings b
-                  LEFT JOIN FirstAliasClaims f ON f.permalink_id = b.PermalinkId
-                 WHERE b.ItemId = $item
-                 GROUP BY b.PermalinkId
-                 ORDER BY MIN(COALESCE(f.created_at, b.CreatedAt)), b.PermalinkId
-                """;
-            command.Parameters.AddWithValue("$item", itemId.ToString("D"));
-            var aliases = new List<string>();
+            command.CommandText = "SELECT PermalinkId FROM PermalinkIssuances UNION SELECT PermalinkId FROM PermalinkBindings UNION SELECT permalink_id FROM FirstAliasClaims ORDER BY 1";
             await using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
             while (await reader.ReadAsync(token).ConfigureAwait(false))
             {
-                aliases.Add(reader.GetString(0));
+                var alias = reader.GetString(0);
+                aliases.Add(alias, new LegacyAlias(alias));
             }
-
-            return aliases;
-        }
-        catch (SqliteException exception)
-        {
-            throw ReadFailure(exception);
-        }
-    }
-
-    internal async Task<IReadOnlyList<LegacyAssociation>> ReadAsync(string alias, CancellationToken token)
-    {
-        await using var connection = await OpenExistingAsync(token).ConfigureAwait(false);
-        if (connection is null)
-        {
-            return Array.Empty<LegacyAssociation>();
         }
 
-        try
+        await using (var command = connection.CreateCommand())
         {
-            var result = new List<LegacyAssociation>();
-            await using (var command = connection.CreateCommand())
+            command.CommandText = "SELECT PermalinkId, ItemId FROM PermalinkBindings ORDER BY CreatedAt, PermalinkId";
+            await using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
+            while (await reader.ReadAsync(token).ConfigureAwait(false))
             {
-                command.CommandText = """
-                    SELECT DISTINCT b.ItemId, related.PermalinkId
-                      FROM PermalinkBindings b
-                      JOIN PermalinkBindings related ON related.ItemId = b.ItemId
-                     WHERE b.PermalinkId = $alias
-                     ORDER BY b.ItemId, related.PermalinkId
-                    """;
-                command.Parameters.AddWithValue("$alias", alias);
-                await using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
-                while (await reader.ReadAsync(token).ConfigureAwait(false))
+                var row = aliases[reader.GetString(0)];
+                if (Guid.TryParse(reader.GetString(1), out var itemId))
                 {
-                    if (!Guid.TryParse(reader.GetString(0), out var itemId))
-                    {
-                        throw new PermalinkException(
-                            PermalinkErrorKind.Corrupt,
-                            "legacy-item-id-invalid",
-                            "A previously issued permalink has an invalid library item ID.");
-                    }
-
-                    result.Add(new LegacyAssociation(itemId, itemId, reader.GetString(1), null, null));
+                    row.ItemIds.Add(itemId);
+                }
+                else
+                {
+                    row.Error = "legacy-item-id-invalid";
                 }
             }
+        }
 
-            // Conversions can remove an old item or leave its derived binding
-            // behind. In either case, also retain the saved filename/metadata
-            // association for the ordinary library lookup. A derived binding
-            // alone is not evidence that its library record still exists.
-            await using var orphan = connection.CreateCommand();
-            orphan.CommandText = """
-                SELECT f.capsule_id, a.current_path, a.event_json, f.event_json, a.item_kind
-                  FROM FirstAliasClaims f
-                  JOIN AnchorTokenCapsules a ON a.capsule_id = f.capsule_id
-                 WHERE f.permalink_id = $alias
-                 ORDER BY f.created_at, f.capsule_id
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT f.permalink_id, a.item_kind, a.current_path, f.event_json, a.event_json
+                FROM FirstAliasClaims f LEFT JOIN AnchorTokenCapsules a ON a.capsule_id = f.capsule_id
+                ORDER BY f.created_at, f.permalink_id
                 """;
-            orphan.Parameters.AddWithValue("$alias", alias);
-            await using var orphanReader = await orphan.ExecuteReaderAsync(token).ConfigureAwait(false);
-            while (await orphanReader.ReadAsync(token).ConfigureAwait(false))
+            await using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
+            while (await reader.ReadAsync(token).ConfigureAwait(false))
             {
-                if (!Guid.TryParse(orphanReader.GetString(0), out var groupId))
+                var row = aliases[reader.GetString(0)];
+                if (!await reader.IsDBNullAsync(1, token).ConfigureAwait(false))
                 {
-                    throw new PermalinkException(
-                        PermalinkErrorKind.Corrupt,
-                        "legacy-association-id-invalid",
-                        "A previously issued permalink has an invalid association ID.");
+                    row.Kinds.Add(reader.GetString(1));
                 }
 
-                var path = orphanReader.GetString(1);
-                var metadata = ReadEvent(orphanReader.GetString(2), groupId);
-                var issuance = ReadEvent(orphanReader.GetString(3), groupId);
-                var aliases = metadata.ActiveExternalAliases.Concat(issuance.ActiveExternalAliases)
-                    .Concat(metadata.Ids.Select(value => value.Id)).Concat(issuance.Ids.Select(value => value.Id))
-                    .Append(alias).Distinct(StringComparer.Ordinal);
-                foreach (var recordedAlias in aliases)
+                if (!await reader.IsDBNullAsync(2, token).ConfigureAwait(false))
                 {
-                    if (!MediaContentIdentifier.IsPublicAlias(recordedAlias))
+                    row.RecordedPaths.Add(reader.GetString(2));
+                }
+
+                for (var column = 3; column <= 4; column++)
+                {
+                    if (await reader.IsDBNullAsync(column, token).ConfigureAwait(false))
                     {
-                        throw new PermalinkException(
-                            PermalinkErrorKind.Corrupt,
-                            "legacy-alias-invalid",
-                            "A previously issued permalink contains an unsupported alias.");
+                        continue;
                     }
 
-                    result.Add(new LegacyAssociation(groupId, null, recordedAlias, path, orphanReader.GetString(4)));
+                    try
+                    {
+                        using var document = JsonDocument.Parse(reader.GetString(column));
+                        var value = document.RootElement;
+                        if (value.GetProperty("type").GetString() != "sloptank.permalink-event" || value.GetProperty("version").GetInt32() != 1)
+                        {
+                            row.Error = "legacy-event-version-unsupported";
+                            continue;
+                        }
+
+                        foreach (var alias in value.GetProperty("active_external_aliases").EnumerateArray().Select(element => element.GetString()))
+                        {
+                            if (alias is not null && MediaContentIdentifier.ParseProviderAlias(alias) is not null)
+                            {
+                                row.ProviderAliases.Add(alias);
+                            }
+                        }
+                    }
+                    catch (Exception exception) when (exception is JsonException or InvalidOperationException or KeyNotFoundException)
+                    {
+                        row.Error = $"legacy-event-invalid: {exception.Message}";
+                    }
                 }
             }
+        }
 
-            return result;
-        }
-        catch (SqliteException exception)
-        {
-            throw ReadFailure(exception);
-        }
+        return aliases.Values.ToArray();
     }
 
-    private async Task<SqliteConnection?> OpenExistingAsync(CancellationToken token)
+    /// <summary>Old associations used only by the one-time importer.</summary>
+    /// <param name="Alias">The issued public URL identifier.</param>
+    public sealed record LegacyAlias(string Alias)
     {
-        var root = roots.AuthorityRoot;
-        if (string.IsNullOrWhiteSpace(root))
-        {
-            return null;
-        }
+        /// <summary>Gets the old library record IDs.</summary>
+        public HashSet<Guid> ItemIds { get; } = [];
 
-        var path = Path.Combine(root, ".sloptank", "permalinks", "authority.db");
-        try
-        {
-            _ = File.GetAttributes(path);
-        }
-        catch (FileNotFoundException)
-        {
-            // An installation that never issued legacy links needs no import.
-            return null;
-        }
-        catch (DirectoryNotFoundException)
-        {
-            // The optional legacy authority was never provisioned here.
-            return null;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            throw new PermalinkException(
-                PermalinkErrorKind.Unavailable,
-                "legacy-alias-read-failed",
-                $"Cannot inspect previously issued permalink storage: {exception.Message}",
-                exception);
-        }
+        /// <summary>Gets the saved provider identifiers.</summary>
+        public HashSet<string> ProviderAliases { get; } = new(StringComparer.Ordinal);
 
-        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = path,
-            Mode = SqliteOpenMode.ReadOnly
-        }.ToString());
-        try
-        {
-            await connection.OpenAsync(token).ConfigureAwait(false);
-            await PermalinkAuthoritySchema.ValidateProtocolEpochAsync(connection, token).ConfigureAwait(false);
-            return connection;
-        }
-        catch (SqliteException exception)
-        {
-            await connection.DisposeAsync().ConfigureAwait(false);
-            throw ReadFailure(exception);
-        }
-        catch
-        {
-            await connection.DisposeAsync().ConfigureAwait(false);
-            throw;
-        }
+        /// <summary>Gets the saved locators, used only to locate old records during import.</summary>
+        public HashSet<string> RecordedPaths { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>Gets the saved media kinds, retaining ambiguous aliases across titles.</summary>
+        public HashSet<string> Kinds { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Gets or sets a malformed-record diagnostic to put in the casualty report.</summary>
+        public string? Error { get; set; }
     }
-
-    private static PermalinkEventDocument ReadEvent(string json, Guid associationId)
-    {
-        PermalinkEventDocument document;
-        try
-        {
-            document = CanonicalJson.Deserialize<PermalinkEventDocument>(Encoding.UTF8.GetBytes(json), $"legacy association {associationId}");
-        }
-        catch (PermalinkException exception) when (exception.Code == "malformed-document")
-        {
-            throw new PermalinkException(PermalinkErrorKind.Corrupt, "legacy-event-invalid", exception.Message, exception);
-        }
-
-        if (document.Version != 1)
-        {
-            throw new PermalinkException(
-                PermalinkErrorKind.VersionRefused,
-                "legacy-event-version-unsupported",
-                $"Saved alias metadata version {document.Version} is not supported.");
-        }
-
-        if (document.Type != "sloptank.permalink-event" || document.Ids is null
-            || document.Ids.Any(value => value is null || string.IsNullOrEmpty(value.Id)) || document.ActiveExternalAliases is null)
-        {
-            throw new PermalinkException(
-                PermalinkErrorKind.Corrupt,
-                "legacy-event-invalid",
-                "The saved alias metadata has an unsupported format.");
-        }
-
-        return document;
-    }
-
-    private static PermalinkException ReadFailure(SqliteException exception) => new(
-        PermalinkErrorKind.Unavailable,
-        "legacy-alias-read-failed",
-        $"Cannot read previously issued permalinks (SQLite {exception.SqliteErrorCode}: {exception.Message}).",
-        exception);
-
-    internal sealed record LegacyAssociation(Guid GroupId, Guid? ItemId, string Alias, string? Path, string? ItemKind);
 }

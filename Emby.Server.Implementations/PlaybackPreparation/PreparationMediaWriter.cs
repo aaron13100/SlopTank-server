@@ -1,15 +1,13 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03, 2026-11-04.
 using System;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Emby.Server.Implementations.Permalinks;
 using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
-using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.PlaybackPreparation;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.PlaybackPreparation;
@@ -20,27 +18,26 @@ namespace Emby.Server.Implementations.PlaybackPreparation;
 internal sealed class PreparationMediaWriter
 {
     private readonly IPlaybackPreparationService _preparation;
-    private readonly IPermalinkMutationCoordinator _mutations;
     private readonly ILibraryManager _library;
     private readonly IServerApplicationHost _appHost;
     private readonly Func<bool> _isIdle;
     private readonly Guid _itemId;
     private readonly string _workspace;
+    private readonly string _retiredDirectory;
     private string _path;
     private string _identity;
     private bool _mediaInfoRefreshRequired;
 
     public PreparationMediaWriter(
         IPlaybackPreparationService preparation,
-        IPermalinkMutationCoordinator mutations,
         ILibraryManager library,
         IServerApplicationHost appHost,
+        string retiredDirectory,
         Func<bool> isIdle,
         PlaybackPreparationRequest claim,
         string workspace)
     {
         _preparation = preparation;
-        _mutations = mutations;
         _library = library;
         _appHost = appHost;
         _isIdle = isIdle;
@@ -48,6 +45,7 @@ internal sealed class PreparationMediaWriter
         _path = claim.Path!;
         _identity = claim.MediaSignature!;
         _workspace = workspace;
+        _retiredDirectory = retiredDirectory;
     }
 
     public async Task<string> ReplaceAsync(PreparedMediaReplacement replacement, PlaybackPreparationRequest claim, CancellationToken token)
@@ -63,7 +61,7 @@ internal sealed class PreparationMediaWriter
             throw Error("playback-active", "Media preparation paused because a viewer is watching. It will retry automatically.");
         }
 
-        if (!string.Equals(PermalinkObjectIdentity.Read(_path), _identity, StringComparison.Ordinal))
+        if (!string.Equals(MediaFileFingerprint.Read(_path), _identity, StringComparison.Ordinal))
         {
             throw Error("media-changed", "The source changed while its prepared output was being encoded.");
         }
@@ -75,8 +73,8 @@ internal sealed class PreparationMediaWriter
         }
 
         ValidateStagedPath(replacement.StagedPath);
-        var destination = replacement.DestinationPath;
-        if (destination is not null && !string.Equals(destination, _path, StringComparison.Ordinal)
+        var destination = replacement.DestinationPath is null ? _path : Path.GetFullPath(replacement.DestinationPath);
+        if (!PathsEqual(destination, _path)
             && (!Path.IsPathFullyQualified(destination)
                 || !string.Equals(Path.GetDirectoryName(destination), Path.GetDirectoryName(_path), StringComparison.Ordinal)
                 || !string.Equals(Path.GetFileNameWithoutExtension(destination), Path.GetFileNameWithoutExtension(_path), StringComparison.Ordinal)
@@ -85,14 +83,57 @@ internal sealed class PreparationMediaWriter
             throw Error("replacement-destination-refused", "A preparation job may only retain its filename or change the same file's container to MP4.");
         }
 
-        await MutateAsync(item, "media", null, replacement.StagedPath, claim, token).ConfigureAwait(false);
-        _mediaInfoRefreshRequired = true;
-        _identity = ReadInstalledIdentity();
-        if (destination is not null && !string.Equals(destination, _path, StringComparison.Ordinal))
+        var samePath = PathsEqual(destination, _path);
+        if (!samePath && File.Exists(destination))
         {
-            await MutateAsync(item, "path", destination, null, claim, token).ConfigureAwait(false);
+            throw Error("replacement-destination-occupied", "The new media path already exists and cannot be overwritten.");
+        }
+
+        EnsureRetiredDirectoryIsOutsideLibrary();
+        var stagedForPublish = await CopyToDestinationTempAsync(replacement.StagedPath, destination, token).ConfigureAwait(false);
+        try
+        {
+            await PreserveOriginalAsync(_path, _identity, token).ConfigureAwait(false);
+            await _preparation.RenewAsync(Guid.Parse(claim.RequestId!), claim, token).ConfigureAwait(false);
+            if (!_isIdle())
+            {
+                throw Error("playback-active", "Media preparation paused because a viewer is watching. It will retry automatically.");
+            }
+
+            if (!string.Equals(MediaFileFingerprint.Read(_path), _identity, StringComparison.Ordinal))
+            {
+                throw Error("media-changed", "The source changed while its prepared output was being encoded.");
+            }
+
+            var currentItem = _library.GetItemById<Video>(_itemId);
+            if (currentItem is null || !PathsEqual(_appHost.ExpandVirtualPath(currentItem.Path), _path))
+            {
+                throw Error("media-location-changed", "The job's library record moved before its prepared output was installed.");
+            }
+
+            File.Move(stagedForPublish, destination, samePath);
+            currentItem.Path = destination;
+            currentItem.IngestState = IngestState.Pending;
+            currentItem.PlaybackReadiness = PlaybackReadiness.Pending;
+            currentItem.PlaybackReadyObjectIdentity = null;
+            currentItem.PlaybackReadyAlgorithmVersion = null;
+            await currentItem.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, token).ConfigureAwait(false);
+
             _path = destination;
             _identity = ReadInstalledIdentity();
+            _mediaInfoRefreshRequired = true;
+
+            if (!samePath)
+            {
+                File.Delete(replacement.OriginalPath);
+            }
+        }
+        finally
+        {
+            if (File.Exists(stagedForPublish))
+            {
+                File.Delete(stagedForPublish);
+            }
         }
 
         return _path;
@@ -172,78 +213,139 @@ internal sealed class PreparationMediaWriter
         }
     }
 
-    private async Task MutateAsync(
-        Video item,
-        string kind,
-        string? destination,
-        string? stagedPath,
-        PlaybackPreparationRequest claim,
-        CancellationToken token)
+    private async Task<string> PreserveOriginalAsync(string sourcePath, string expectedFingerprint, CancellationToken token)
     {
-        var requestId = Guid.Parse(claim.RequestId!);
-        await _preparation.RenewAsync(requestId, claim, token).ConfigureAwait(false);
-        var operationId = Guid.NewGuid();
-        var operation = RunAsync();
+        var source = new FileInfo(sourcePath);
+        if (!source.Exists)
+        {
+            throw Error("media-unavailable", "The original media file is missing from its library path.");
+        }
+
+        Directory.CreateDirectory(_retiredDirectory);
         try
         {
-            using var timer = new PeriodicTimer(TimeSpan.FromMinutes(10));
-            while (!operation.IsCompleted)
+            if (new DriveInfo(_retiredDirectory).AvailableFreeSpace < source.Length)
             {
-                var interval = timer.WaitForNextTickAsync(token).AsTask();
-                if (await Task.WhenAny(operation, interval).ConfigureAwait(false) == operation)
-                {
-                    break;
-                }
-
-                token.ThrowIfCancellationRequested();
-                await _preparation.RenewAsync(requestId, claim, token).ConfigureAwait(false);
+                throw Error("retirement-capacity-insufficient", $"The retirement directory does not have {source.Length} bytes available to preserve the original.");
             }
         }
-        catch (Exception leaseFailure)
+        catch (PlaybackPreparationException)
         {
-            // The admitted writer owns durable recovery. Always observe its
-            // result even when a renewal or cancellation interrupts the job.
-            try
-            {
-                await operation.ConfigureAwait(false);
-            }
-            catch (Exception mutationFailure)
-            {
-                throw new AggregateException("Preparation renewal and guarded replacement both failed.", leaseFailure, mutationFailure);
-            }
-
             throw;
         }
-
-        await operation.ConfigureAwait(false);
-
-        async Task RunAsync()
+        catch (Exception exception) when (exception is IOException or ArgumentException or UnauthorizedAccessException)
         {
-            var prepared = await _mutations.PrepareAsync(
-                item,
-                new PermalinkMutationPrepareRequest(
-                    operationId,
-                    item.Id,
-                    kind,
-                    destination,
-                    null,
-                    item.Path),
-                token).ConfigureAwait(false);
-            if (prepared.State != "prepared")
+            throw Error("retirement-capacity-unavailable", $"Could not inspect available space in '{_retiredDirectory}': {exception.Message}");
+        }
+
+        var backupPath = Path.Combine(_retiredDirectory, $"{Guid.NewGuid():N}-{Path.GetFileName(sourcePath)}");
+        var temporaryPath = backupPath + ".partial";
+        try
+        {
+            await CopyVerifiedAsync(sourcePath, temporaryPath, source.Length, token).ConfigureAwait(false);
+
+            if (!string.Equals(MediaFileFingerprint.Read(sourcePath), expectedFingerprint, StringComparison.Ordinal))
             {
-                throw Error("replacement-not-prepared", $"Operation '{operationId}' returned '{prepared.State}' before installation.");
+                throw Error("media-changed", "The original changed while it was being copied to retirement storage.");
             }
 
-            var result = await _mutations.CommitAsync(operationId, new PermalinkMutationCommitRequest(stagedPath), token).ConfigureAwait(false);
-            if (result.State != "committed")
+            File.Move(temporaryPath, backupPath);
+            return backupPath;
+        }
+        catch (Exception exception)
+        {
+            CleanupPartial(temporaryPath);
+
+            if (exception is PlaybackPreparationException or OperationCanceledException)
             {
-                throw Error("replacement-not-committed", $"Operation '{operationId}' returned '{result.State}'; its journal must settle before retry.");
+                throw;
             }
+
+            throw Error("retirement-backup-failed", $"Could not preserve the original media at '{sourcePath}': {exception.Message}");
         }
     }
 
-    private string ReadInstalledIdentity() => PermalinkObjectIdentity.Read(_path)
-        ?? throw Error("media-unavailable", "The installed media could not be read after the guarded operation completed.");
+    private async Task<string> CopyToDestinationTempAsync(string stagedPath, string destinationPath, CancellationToken token)
+    {
+        var temporaryPath = Path.Combine(
+            Path.GetDirectoryName(destinationPath)!,
+            $".{Path.GetFileName(destinationPath)}.{Guid.NewGuid():N}.tmp");
+        var stagedLength = new FileInfo(stagedPath).Length;
+        try
+        {
+            await CopyVerifiedAsync(stagedPath, temporaryPath, stagedLength, token).ConfigureAwait(false);
+
+            return temporaryPath;
+        }
+        catch (Exception exception)
+        {
+            CleanupPartial(temporaryPath);
+
+            if (exception is OperationCanceledException or PlaybackPreparationException)
+            {
+                throw;
+            }
+
+            throw Error("replacement-staging-failed", $"Could not stage prepared media beside its destination: {exception.Message}");
+        }
+    }
+
+    private static async Task CopyVerifiedAsync(string sourcePath, string destinationPath, long expectedLength, CancellationToken token)
+    {
+        await using (var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, useAsync: true))
+        await using (var output = new FileStream(destinationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 1024, useAsync: true))
+        {
+            await input.CopyToAsync(output, token).ConfigureAwait(false);
+            // FlushAsync only drains buffered writes. Retirement requires the
+            // durable flush, which has a synchronous API, off the request thread.
+            await Task.Run(() => output.Flush(flushToDisk: true), token).ConfigureAwait(false);
+        }
+
+        if (new FileInfo(destinationPath).Length != expectedLength)
+        {
+            throw new IOException($"Copied media at '{destinationPath}' does not match the expected {expectedLength} bytes.");
+        }
+    }
+
+    private static void CleanupPartial(string path)
+    {
+        if (File.Exists(path))
+        {
+            File.Delete(path);
+        }
+    }
+
+    private void EnsureRetiredDirectoryIsOutsideLibrary()
+    {
+        var retiredPath = Path.GetFullPath(_retiredDirectory);
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var isInsideLibrary = _library.GetVirtualFolders()
+            .SelectMany(folder => folder.Locations ?? Array.Empty<string>())
+            .Where(location => !string.IsNullOrWhiteSpace(location) && Path.IsPathFullyQualified(location))
+            .Select(Path.GetFullPath)
+            .Any(location =>
+            {
+                var relative = Path.GetRelativePath(location, retiredPath);
+                return !Path.IsPathRooted(relative)
+                    && (string.Equals(relative, ".", comparison)
+                        || (relative != ".."
+                            && !relative.StartsWith(".." + Path.DirectorySeparatorChar, comparison)
+                            && !relative.StartsWith(".." + Path.AltDirectorySeparatorChar, comparison)));
+            });
+        if (isInsideLibrary)
+        {
+            throw Error("retirement-directory-inside-library", "The media retirement directory must be outside every configured library location.");
+        }
+    }
+
+    private static bool PathsEqual(string first, string second)
+    {
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return string.Equals(Path.GetFullPath(first), Path.GetFullPath(second), comparison);
+    }
+
+    private string ReadInstalledIdentity() => MediaFileFingerprint.Read(_path)
+        ?? throw Error("media-unavailable", "The installed media could not be read after replacement.");
 
     private static PlaybackPreparationException Error(string code, string message) => new(409, code, message);
 

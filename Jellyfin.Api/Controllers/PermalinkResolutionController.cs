@@ -1,5 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-07-31, 2026-09-08, 2026-09-09, 2026-09-19, 2026-10-14, 2026-10-31.
-using System;
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-07-30, 2026-07-31, 2026-09-08, 2026-09-09, 2026-09-19, 2026-10-14, 2026-10-31, 2026-11-04.
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Extensions;
@@ -14,182 +13,52 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace Jellyfin.Api.Controllers;
 
-/// <summary>
-/// Exposes metadata-free discovery and purpose-bound candidate redemption.
-/// </summary>
+/// <summary>Resolves public aliases using the ordinary authorized library item flow.</summary>
 [Route("Permalinks")]
 [Authorize]
 public sealed class PermalinkResolutionController : BaseJellyfinApiController
 {
-    private readonly IPermalinkResolutionService _resolution;
-    private readonly IUserManager _userManager;
-    private readonly IDtoService _dtoService;
+    private readonly IPermalinkManager _permalinks;
+    private readonly IUserManager _users;
+    private readonly IDtoService _dtos;
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="PermalinkResolutionController"/> class.
-    /// </summary>
-    /// <param name="resolution">The permalink resolution service.</param>
-    /// <param name="userManager">The user manager.</param>
-    /// <param name="dtoService">The item DTO service.</param>
-    public PermalinkResolutionController(
-        IPermalinkResolutionService resolution,
-        IUserManager userManager,
-        IDtoService dtoService)
+    /// <summary>Initializes a new instance of the <see cref="PermalinkResolutionController"/> class.</summary>
+    /// <param name="permalinks">The logical alias service.</param>
+    /// <param name="users">The existing user service.</param>
+    /// <param name="dtos">The existing library DTO service.</param>
+    public PermalinkResolutionController(IPermalinkManager permalinks, IUserManager users, IDtoService dtos)
     {
-        _resolution = resolution;
-        _userManager = userManager;
-        _dtoService = dtoService;
+        _permalinks = permalinks;
+        _users = users;
+        _dtos = dtos;
     }
 
-    /// <summary>Discovers verified opaque candidates for one alias.</summary>
-    /// <param name="permalinkId">The opaque permalink identifier.</param>
-    /// <param name="purpose">The requested redemption purpose.</param>
+    /// <summary>Gets the current visible library titles named by an existing permalink.</summary>
+    /// <param name="permalinkId">The provider or opaque alias from the public URL.</param>
     /// <param name="cancellationToken">The request cancellation token.</param>
-    /// <returns>The ordered metadata-free candidate envelopes.</returns>
+    /// <returns>Ordinary item DTOs, ready for the existing details and playback APIs.</returns>
     [HttpGet("{permalinkId}/Items")]
-    public async Task<ActionResult<QueryResult<PermalinkCandidateEnvelope>>> Discover(
+    public async Task<ActionResult<QueryResult<BaseItemDto>>> Discover(
         [FromRoute] string permalinkId,
-        [FromQuery] string purpose = "details",
         CancellationToken cancellationToken = default)
     {
-        return await ExecuteAsync(async userId =>
-        {
-            var items = await _resolution.DiscoverAsync(
-                permalinkId,
-                purpose,
-                userId,
-                cancellationToken).ConfigureAwait(false);
-            return Ok(new QueryResult<PermalinkCandidateEnvelope>(items));
-        }).ConfigureAwait(false);
-    }
-
-    /// <summary>Consumes a details lease and returns the revalidated item DTO.</summary>
-    /// <param name="handle">The opaque candidate handle.</param>
-    /// <param name="request">The purpose-bound lease.</param>
-    /// <param name="cancellationToken">The request cancellation token.</param>
-    /// <returns>The revalidated item DTO.</returns>
-    [HttpPost("Candidates/{handle}/Details")]
-    public async Task<ActionResult<BaseItemDto>> Details(
-        [FromRoute] string handle,
-        [FromBody] PermalinkLeaseRequest request,
-        CancellationToken cancellationToken)
-    {
-        return await ExecuteAsync(async userId =>
-        {
-            var user = User.GetRequestUser(_userManager)!;
-            var item = await _resolution.RedeemDetailsAsync(
-                handle,
-                request.Lease,
-                userId,
-                cancellationToken).ConfigureAwait(false);
-            return Ok(_dtoService.GetBaseItemDto(item, new DtoOptions(), user));
-        }).ConfigureAwait(false);
-    }
-
-    /// <summary>Exchanges one consumed details lease for a freshly checked playback lease.</summary>
-    /// <param name="handle">The opaque candidate handle.</param>
-    /// <param name="request">The details lease.</param>
-    /// <param name="cancellationToken">The request cancellation token.</param>
-    /// <returns>The playback-purpose candidate envelope.</returns>
-    [HttpPost("Candidates/{handle}/PlaybackLease")]
-    public async Task<ActionResult<PermalinkCandidateEnvelope>> PlaybackLease(
-        [FromRoute] string handle,
-        [FromBody] PermalinkLeaseRequest request,
-        CancellationToken cancellationToken)
-    {
-        return await ExecuteAsync(async userId => Ok(
-            await _resolution.ExchangePlaybackLeaseAsync(
-                handle,
-                request.Lease,
-                userId,
-                cancellationToken).ConfigureAwait(false))).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Consumes a details lease and returns a player-ready snapshot while
-    /// retaining the existing exchange and redemption checks server-side.
-    /// </summary>
-    /// <param name="handle">The opaque details-candidate handle.</param>
-    /// <param name="request">The details lease and playback session.</param>
-    /// <param name="cancellationToken">The request cancellation token.</param>
-    /// <returns>The immutable playback snapshot.</returns>
-    [HttpPost("Candidates/{handle}/PlaybackReadyV1")]
-    public async Task<ActionResult<PermalinkPlaybackSnapshot>> PlaybackReadyV1(
-        [FromRoute] string handle,
-        [FromBody] PermalinkLeaseRequest request,
-        CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(request.PlaybackSessionId))
-        {
-            return Problem(
-                detail: "PlaybackSessionId is required when consuming a playback lease.",
-                statusCode: StatusCodes.Status409Conflict,
-                title: "playback-session-required");
-        }
-
-        return await ExecuteAsync(async userId => Ok(
-            await _resolution.RedeemPlaybackReadyV1Async(
-                handle,
-                request.Lease,
-                request.PlaybackSessionId,
-                request.QueueOrdinal,
-                request.Complete,
-                userId,
-                cancellationToken).ConfigureAwait(false))).ConfigureAwait(false);
-    }
-
-    /// <summary>Consumes a playback lease and returns its immutable snapshot plan.</summary>
-    /// <param name="handle">The opaque candidate handle.</param>
-    /// <param name="request">The purpose-bound lease.</param>
-    /// <param name="cancellationToken">The request cancellation token.</param>
-    /// <returns>The immutable playback snapshot.</returns>
-    [HttpPost("Candidates/{handle}/Playback")]
-    public async Task<ActionResult<PermalinkPlaybackSnapshot>> Playback(
-        [FromRoute] string handle,
-        [FromBody] PermalinkLeaseRequest request,
-        CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(request.PlaybackSessionId))
-        {
-            return Problem(
-                detail: "PlaybackSessionId is required when consuming a playback lease.",
-                statusCode: StatusCodes.Status409Conflict,
-                title: "playback-session-required");
-        }
-
-        return await ExecuteAsync(async userId => Ok(
-            await _resolution.RedeemPlaybackAsync(
-                handle,
-                request.Lease,
-                request.PlaybackSessionId,
-                request.QueueOrdinal,
-                request.Complete,
-                userId,
-                cancellationToken).ConfigureAwait(false))).ConfigureAwait(false);
-    }
-
-    private async Task<ActionResult<T>> ExecuteAsync<T>(Func<Guid, Task<ActionResult<T>>> action)
-    {
-        // Leases are bound to a user, so a token without one (an API key) has
-        // nothing to bind to and is refused here rather than deeper in.
-        if (User.GetRequestUser(_userManager) is null)
+        var user = User.GetRequestUser(_users);
+        if (user is null)
         {
             return Unauthorized();
         }
 
         try
         {
-            return await action(User.GetUserId()).ConfigureAwait(false);
+            var items = await _permalinks.GetVideoFileAsync(permalinkId, user.Id, cancellationToken).ConfigureAwait(false);
+            return Ok(new QueryResult<BaseItemDto>(_dtos.GetBaseItemDtos(items, new DtoOptions(), user)));
         }
         catch (PermalinkException exception)
         {
             return Problem(
                 detail: exception.Message,
-                statusCode: exception.Kind is PermalinkErrorKind.Unavailable
-                    or PermalinkErrorKind.Corrupt
-                    or PermalinkErrorKind.VersionRefused
-                    ? StatusCodes.Status503ServiceUnavailable
-                    : StatusCodes.Status409Conflict,
+                statusCode: exception.Kind is PermalinkErrorKind.Unavailable or PermalinkErrorKind.Corrupt
+                    ? StatusCodes.Status503ServiceUnavailable : StatusCodes.Status409Conflict,
                 title: exception.Code);
         }
     }

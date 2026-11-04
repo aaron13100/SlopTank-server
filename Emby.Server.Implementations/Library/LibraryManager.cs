@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03, 2026-11-04.
 #pragma warning disable CS1591
 #pragma warning disable CA5394
 
@@ -94,7 +94,6 @@ namespace Emby.Server.Implementations.Library
         private readonly DotIgnoreIgnoreRule _dotIgnoreIgnoreRule;
         private readonly IMediaStreamRepository _mediaStreamRepository;
         private readonly Lazy<IExternalDataManager> _externalDataManagerFactory;
-        private readonly Lazy<IPermalinkIdentityMutationAdapter> _identityMutationAdapter;
         private readonly Lazy<IPermalinkManager> _permalinkManager;
         private readonly IPlaybackPreparationService _playbackPreparationService;
 
@@ -141,7 +140,6 @@ namespace Emby.Server.Implementations.Library
         /// <param name="dotIgnoreIgnoreRule">The .ignore rule handler.</param>
         /// <param name="mediaStreamRepository">The media stream repository.</param>
         /// <param name="externalDataManagerFactory">The external data manager (lazy, to break the DI cycle through ChapterManager).</param>
-        /// <param name="identityMutationAdapter">The durable identity mutation adapter.</param>
         /// <param name="playbackPreparationService">The playback preparation admission service.</param>
         /// <param name="permalinkManager">The portable metadata association service (lazy to avoid a library dependency cycle).</param>
         public LibraryManager(
@@ -169,7 +167,6 @@ namespace Emby.Server.Implementations.Library
             DotIgnoreIgnoreRule dotIgnoreIgnoreRule,
             IMediaStreamRepository mediaStreamRepository,
             Lazy<IExternalDataManager> externalDataManagerFactory,
-            Lazy<IPermalinkIdentityMutationAdapter> identityMutationAdapter,
             IPlaybackPreparationService playbackPreparationService,
             Lazy<IPermalinkManager> permalinkManager)
         {
@@ -203,7 +200,6 @@ namespace Emby.Server.Implementations.Library
 
             _mediaStreamRepository = mediaStreamRepository;
             _externalDataManagerFactory = externalDataManagerFactory;
-            _identityMutationAdapter = identityMutationAdapter;
             _playbackPreparationService = playbackPreparationService;
             _permalinkManager = permalinkManager;
 
@@ -427,15 +423,7 @@ namespace Emby.Server.Implementations.Library
 
         public void DeleteItem(BaseItem item, DeleteOptions options, BaseItem parent, bool notifyParentItem)
         {
-            _identityMutationAdapter.Value.ExecuteAsync(
-                [item],
-                new PermalinkIdentityMutationRequest(options.DeleteFileLocation ? "deletion" : "metadata-removal"),
-                (_, _) =>
-                {
-                    DeleteItemCore(item, options, parent, notifyParentItem);
-                    return Task.CompletedTask;
-                },
-                CancellationToken.None).GetAwaiter().GetResult();
+            DeleteItemCore(item, options, parent, notifyParentItem);
         }
 
         private void DeleteItemCore(BaseItem item, DeleteOptions options, BaseItem parent, bool notifyParentItem)
@@ -652,17 +640,6 @@ namespace Emby.Server.Implementations.Library
 
         private void DeleteItemPath(BaseItem item, bool isRequiredForDelete, FileSystemMetadata fileSystemInfo)
         {
-            // A file-backed item whose path is a capsule-shell phantom (c200) is a
-            // directory the file-delete below cannot remove (File.Delete on a
-            // directory is access-denied). Remove the shell itself, and only when it
-            // holds nothing but its own capsule.
-            if (!fileSystemInfo.IsDirectory
-                && string.Equals(item.Path, fileSystemInfo.FullName, StringComparison.Ordinal)
-                && Permalinks.PermalinkCapsuleShell.IsPhantomShell(item))
-            {
-                Permalinks.PermalinkCapsuleShell.TryRemove(fileSystemInfo.FullName);
-            }
-
             if (Directory.Exists(fileSystemInfo.FullName) || File.Exists(fileSystemInfo.FullName))
             {
                 try
@@ -957,52 +934,41 @@ namespace Emby.Server.Implementations.Library
                     itemId: item.Id);
             }
 
-            Video? refined = null;
-            await _identityMutationAdapter.Value.ExecuteAsync(
-                existing.Length == 0 ? [item] : [item, existing[0]],
-                new PermalinkIdentityMutationRequest("kind-reclassification", DesiredItemKind: targetType.Name),
-                async (ambient, token) =>
+            await _persistenceService.RefineVideoKindAsync(item, targetType, currentPath, cancellationToken, existing.FirstOrDefault()?.Id).ConfigureAwait(false);
+            _cache.TryRemove(item.Id, out _);
+            var refined = RetrieveItem(item.Id) as Video
+                ?? throw new InvalidOperationException("The refined media record could not be loaded.");
+            RegisterItem(refined);
+            if (existing.Length == 1)
+            {
+                // Keep both record IDs and their user data. The existing
+                // concrete record is the normal primary for this file.
+                var primary = existing[0];
+                refined.SetPrimaryVersionId(primary.Id);
+                refined.OwnerId = primary.Id;
+                await UpdateItemAsync(refined, refined.GetParent(), ItemUpdateType.MetadataEdit, cancellationToken).ConfigureAwait(false);
+                if (!primary.LinkedAlternateVersions.Any(link => link.ItemId.HasValue && link.ItemId.Value.Equals(refined.Id)))
                 {
-                    await _persistenceService.RefineVideoKindAsync(item, targetType, currentPath, token, existing.FirstOrDefault()?.Id).ConfigureAwait(false);
-                    _cache.TryRemove(item.Id, out _);
-                    refined = RetrieveItem(item.Id) as Video
-                        ?? throw new PermalinkException(
-                            PermalinkErrorKind.Conflict,
-                            "media-record-missing",
-                            "The refined media record could not be loaded.",
-                            itemId: item.Id);
-                    RegisterItem(refined);
-                    if (existing.Length == 1)
-                    {
-                        // Keep both record IDs and their user data. The existing
-                        // concrete record is the normal primary for this file.
-                        var primary = existing[0];
-                        refined.SetPrimaryVersionId(primary.Id);
-                        refined.OwnerId = primary.Id;
-                        await UpdateItemAsync(refined, refined.GetParent(), ItemUpdateType.MetadataEdit, token).ConfigureAwait(false);
-                        if (!primary.LinkedAlternateVersions.Any(link => link.ItemId.HasValue && link.ItemId.Value.Equals(refined.Id)))
+                    primary.LinkedAlternateVersions =
+                    [
+                        .. primary.LinkedAlternateVersions,
+                        new MediaBrowser.Controller.Entities.LinkedChild
                         {
-                            primary.LinkedAlternateVersions =
-                            [
-                                .. primary.LinkedAlternateVersions,
-                                new MediaBrowser.Controller.Entities.LinkedChild
-                                {
-                                    ItemId = refined.Id,
-                                    Type = MediaBrowser.Controller.Entities.LinkedChildType.LinkedAlternateVersion
-                                }
-                            ];
-                            await UpdateItemAsync(primary, primary.GetParent(), ItemUpdateType.MetadataEdit, token).ConfigureAwait(false);
+                            ItemId = refined.Id,
+                            Type = MediaBrowser.Controller.Entities.LinkedChildType.LinkedAlternateVersion
                         }
+                    ];
+                    await UpdateItemAsync(primary, primary.GetParent(), ItemUpdateType.MetadataEdit, cancellationToken).ConfigureAwait(false);
+                }
 
-                        UpsertLinkedChild(primary.Id, refined.Id, MediaBrowser.Controller.Entities.LinkedChildType.LinkedAlternateVersion);
-                    }
-                    else
-                    {
-                        await UpdateItemAsync(refined, refined.GetParent(), ItemUpdateType.MetadataEdit, token).ConfigureAwait(false);
-                    }
-                },
-                cancellationToken).ConfigureAwait(false);
-            return refined!;
+                UpsertLinkedChild(primary.Id, refined.Id, MediaBrowser.Controller.Entities.LinkedChildType.LinkedAlternateVersion);
+            }
+            else
+            {
+                await UpdateItemAsync(refined, refined.GetParent(), ItemUpdateType.MetadataEdit, cancellationToken).ConfigureAwait(false);
+            }
+
+            return refined;
         }
 
         private Guid GetNewItemIdInternal(string key, Type type, bool forceCaseInsensitive)

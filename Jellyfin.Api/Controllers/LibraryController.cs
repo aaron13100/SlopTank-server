@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-18, 2026-09-19, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-18, 2026-09-19, 2026-10-14, 2026-10-31, 2026-11-04.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -27,7 +27,6 @@ using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
-using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Activity;
 using MediaBrowser.Model.Configuration;
@@ -60,7 +59,6 @@ public class LibraryController : BaseJellyfinApiController
     private readonly ILibraryMonitor _libraryMonitor;
     private readonly ILogger<LibraryController> _logger;
     private readonly IServerConfigurationManager _serverConfigurationManager;
-    private readonly IPermalinkIdentityMutationAdapter _identityMutationAdapter;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="LibraryController"/> class.
@@ -76,7 +74,6 @@ public class LibraryController : BaseJellyfinApiController
     /// <param name="libraryMonitor">Instance of the <see cref="ILibraryMonitor"/> interface.</param>
     /// <param name="logger">Instance of the <see cref="ILogger{LibraryController}"/> interface.</param>
     /// <param name="serverConfigurationManager">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
-    /// <param name="identityMutationAdapter">Durable identity mutation adapter.</param>
     public LibraryController(
         IProviderManager providerManager,
         ISimilarItemsManager similarItemsManager,
@@ -88,8 +85,7 @@ public class LibraryController : BaseJellyfinApiController
         ILocalizationManager localization,
         ILibraryMonitor libraryMonitor,
         ILogger<LibraryController> logger,
-        IServerConfigurationManager serverConfigurationManager,
-        IPermalinkIdentityMutationAdapter identityMutationAdapter)
+        IServerConfigurationManager serverConfigurationManager)
     {
         _providerManager = providerManager;
         _similarItemsManager = similarItemsManager;
@@ -102,7 +98,6 @@ public class LibraryController : BaseJellyfinApiController
         _libraryMonitor = libraryMonitor;
         _logger = logger;
         _serverConfigurationManager = serverConfigurationManager;
-        _identityMutationAdapter = identityMutationAdapter;
     }
 
     /// <summary>
@@ -370,7 +365,7 @@ public class LibraryController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<ActionResult> DeleteItem(Guid itemId)
+    public ActionResult DeleteItem(Guid itemId)
     {
         var userId = User.GetUserId();
         var isApiKey = User.GetIsApiKey();
@@ -403,32 +398,10 @@ public class LibraryController : BaseJellyfinApiController
             return Unauthorized("Unauthorized access");
         }
 
-        try
-        {
-            await _identityMutationAdapter.ExecuteAsync(
-                [item],
-                new PermalinkIdentityMutationRequest("deletion"),
-                (_, _) =>
-                {
-                    _libraryManager.DeleteItem(
-                        item,
-                        new DeleteOptions { DeleteFileLocation = true },
-                        true);
-                    return Task.CompletedTask;
-                },
-                CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (PermalinkException exception)
-        {
-            // Same boundary as ItemUpdateController: a permalink refusal is a
-            // typed conflict naming its fence, not a bare 500 the UI can only
-            // guess at (2026-09-11: the guess told the owner to check write
-            // access to the media folder).
-            return Problem(
-                detail: exception.Message,
-                statusCode: StatusCodes.Status409Conflict,
-                title: exception.Code);
-        }
+        _libraryManager.DeleteItem(
+            item,
+            new DeleteOptions { DeleteFileLocation = true },
+            true);
 
         return NoContent();
     }
@@ -445,7 +418,7 @@ public class LibraryController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<ActionResult> DeleteItems([FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] ids)
+    public ActionResult DeleteItems([FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] ids)
     {
         var isApiKey = User.GetIsApiKey();
         var userId = User.GetUserId();
@@ -475,33 +448,12 @@ public class LibraryController : BaseJellyfinApiController
             items.Add(item);
         }
 
-        try
+        foreach (var item in items)
         {
-            await _identityMutationAdapter.ExecuteAsync(
-                items,
-                new PermalinkIdentityMutationRequest("deletion"),
-                (_, _) =>
-                {
-                    foreach (var item in items)
-                    {
-                        _libraryManager.DeleteItem(
-                            item,
-                            new DeleteOptions { DeleteFileLocation = true },
-                            true);
-                    }
-
-                    return Task.CompletedTask;
-                },
-                CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (PermalinkException exception)
-        {
-            // Same typed boundary as the single-item delete above and
-            // ItemUpdateController: the fence reason reaches the caller.
-            return Problem(
-                detail: exception.Message,
-                statusCode: StatusCodes.Status409Conflict,
-                title: exception.Code);
+            _libraryManager.DeleteItem(
+                item,
+                new DeleteOptions { DeleteFileLocation = true },
+                true);
         }
 
         return NoContent();

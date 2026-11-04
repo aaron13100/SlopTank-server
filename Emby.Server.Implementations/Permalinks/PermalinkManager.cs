@@ -1,7 +1,6 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03, 2026-11-04.
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -26,36 +25,28 @@ public sealed class PermalinkManager : IPermalinkManager
 {
     private readonly MediaPermalinkRepository _repository;
     private readonly MediaContentIdentifier _identifiers;
-    private readonly LegacyMediaPermalinkRepository _legacy;
     private readonly ILibraryManager _library;
     private readonly IUserManager _users;
     private readonly TimeProvider _clock;
-    private readonly Lazy<IPermalinkIdentityMutationAdapter> _identityMutations;
 
     /// <summary>Initializes a new instance of the <see cref="PermalinkManager"/> class.</summary>
     /// <param name="repository">The application database repository for logical title mappings.</param>
     /// <param name="identifiers">The metadata identity adapter.</param>
-    /// <param name="legacy">The reader for existing legacy permalink aliases.</param>
     /// <param name="library">The existing library metadata and visibility service.</param>
     /// <param name="users">The existing user lookup service.</param>
     /// <param name="clock">The clock used for persisted timestamps.</param>
-    /// <param name="identityMutations">The existing guard for unfinished legacy identity operations.</param>
     public PermalinkManager(
         MediaPermalinkRepository repository,
         MediaContentIdentifier identifiers,
-        LegacyMediaPermalinkRepository legacy,
         ILibraryManager library,
         IUserManager users,
-        TimeProvider clock,
-        Lazy<IPermalinkIdentityMutationAdapter> identityMutations)
+        TimeProvider clock)
     {
         _repository = repository;
         _identifiers = identifiers;
-        _legacy = legacy;
         _library = library;
         _users = users;
         _clock = clock;
-        _identityMutations = identityMutations;
     }
 
     /// <summary>Gets the identifier for this movie, series, season or specific episode.</summary>
@@ -69,263 +60,58 @@ public sealed class PermalinkManager : IPermalinkManager
         return new PermalinkResponse(1, binding.Ids, binding.Ids[0]);
     }
 
-    /// <summary>Looks up current library files for an identifier, applying normal user visibility.</summary>
-    /// <param name="identifier">A public logical content identifier.</param>
-    /// <param name="userId">The authenticated user requesting the library item.</param>
-    /// <param name="cancellationToken">The caller's cancellation token.</param>
-    /// <returns>Visible logical candidates, each retaining its ordinary library versions.</returns>
-    public async Task<IReadOnlyList<Candidate>> GetVideoFileAsync(string identifier, Guid userId, CancellationToken cancellationToken)
-    {
-        if (!MediaContentIdentifier.IsPublicAlias(identifier))
-        {
-            return Array.Empty<Candidate>();
-        }
-
-        var user = _users.GetUserById(userId);
-        if (user is null || user.HasPermission(PermissionKind.IsDisabled))
-        {
-            return Array.Empty<Candidate>();
-        }
-
-        await AssociateMetadataMatchesAsync(identifier, userId, cancellationToken).ConfigureAwait(false);
-        var candidates = await ReadMappedCandidatesAsync(identifier, userId, cancellationToken).ConfigureAwait(false);
-        if (candidates.Count > 0)
-        {
-            return candidates;
-        }
-
-        // A prior mapping can outlive its last library record. Give the saved
-        // legacy metadata one recovery attempt even when that dormant mapping
-        // still exists; its presence alone does not mean a file was resolved.
-        await ImportLegacyAliasAsync(identifier, userId, cancellationToken).ConfigureAwait(false);
-        return await ReadMappedCandidatesAsync(identifier, userId, cancellationToken).ConfigureAwait(false);
-    }
-
-    private async Task<IReadOnlyList<Candidate>> ReadMappedCandidatesAsync(string identifier, Guid userId, CancellationToken cancellationToken)
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<BaseItem>> GetVideoFileAsync(string identifier, Guid userId, CancellationToken cancellationToken)
     {
         var user = _users.GetUserById(userId);
-        if (user is null || user.HasPermission(PermissionKind.IsDisabled))
+        if (!MediaContentIdentifier.IsPublicAlias(identifier) || user is null || user.HasPermission(PermissionKind.IsDisabled))
         {
-            return Array.Empty<Candidate>();
+            return Array.Empty<BaseItem>();
         }
 
-        // Complete a version/part association interrupted after its normal
-        // library relationship became durable. Lookup remains a database and
-        // metadata operation, including recovery of an older opaque link.
-        foreach (var mapped in await _repository.ReadByAliasesAsync([identifier], cancellationToken).ConfigureAwait(false))
+        var result = new List<BaseItem>();
+        foreach (var mapping in await _repository.ReadByAliasesAsync([identifier], cancellationToken).ConfigureAwait(false))
         {
-            foreach (var itemId in await _repository.ReadItemIdsAsync(mapped.ContentId, cancellationToken).ConfigureAwait(false))
-            {
-                if (_library.GetItemById<BaseItem>(itemId, user) is Video video
-                    && (video.PrimaryVersionId.HasValue || (!video.ExtraType.HasValue && !video.OwnerId.Equals(Guid.Empty))))
-                {
-                    await BindMetadataAsync(video, cancellationToken).ConfigureAwait(false);
-                }
-            }
-        }
-
-        var mappings = await _repository.ReadByAliasesAsync([identifier], cancellationToken).ConfigureAwait(false);
-        var candidates = new List<Candidate>(mappings.Count);
-        foreach (var mapping in mappings)
-        {
-            if (!mapping.Ids.Contains(identifier, StringComparer.Ordinal))
+            var itemIds = await _repository.ReadItemIdsAsync(mapping.ContentId, cancellationToken).ConfigureAwait(false);
+            if (itemIds.Count == 0)
             {
                 continue;
             }
 
-            foreach (var providerAlias in mapping.Ids.Where(alias => MediaContentIdentifier.ParseProviderAlias(alias) is not null))
+            // The normal library query supplies current records and versions.
+            // Recheck visibility per item just as the ordinary item API does.
+            var items = _library.GetItemList(new InternalItemsQuery(user)
             {
-                await AssociateMetadataMatchesAsync(providerAlias, userId, cancellationToken).ConfigureAwait(false);
-            }
-
-            var visible = new List<BaseItem>();
-            foreach (var itemId in await _repository.ReadItemIdsAsync(mapping.ContentId, cancellationToken).ConfigureAwait(false))
+                ItemIds = itemIds.ToArray(),
+                IncludeOwnedItems = true,
+                GroupByPresentationUniqueKey = false
+            });
+            foreach (var item in items.OrderBy(value => value is Video video && (video.PrimaryVersionId.HasValue || !video.OwnerId.Equals(Guid.Empty))).ThenBy(value => value.Id))
             {
-                var item = _library.GetItemById<BaseItem>(itemId, user);
-                if (item is null)
+                cancellationToken.ThrowIfCancellationRequested();
+                if (_library.GetItemById<BaseItem>(item.Id, user) is null)
                 {
                     continue;
                 }
 
-                if ((await _legacy.ReadItemAliasesAsync(itemId, cancellationToken).ConfigureAwait(false)).Count > 0)
-                {
-                    // Only real legacy bindings have an old operation to settle.
-                    // New logical mappings never initialize this physical service.
-                    await _identityMutations.Value.EnsureNoPendingMutationAsync(itemId, cancellationToken).ConfigureAwait(false);
-                }
-
-                var current = await _repository.ReadForItemAsync(itemId, cancellationToken).ConfigureAwait(false);
+                var current = await _repository.ReadForItemAsync(item.Id, cancellationToken).ConfigureAwait(false);
                 var metadata = await ReadMetadataAsync(item, createSeriesIdentity: false, cancellationToken).ConfigureAwait(false);
-                var canRetainUnidentifiedIdentity = await CanRetainUnidentifiedIdentityAsync(
-                    current,
-                    metadata,
-                    cancellationToken).ConfigureAwait(false);
-                if (!Nullable.Equals(current.ContentId, mapping.ContentId) || metadata.Kind != mapping.Kind
-                    || (IdentityChanged(current, metadata) && !canRetainUnidentifiedIdentity)
-                    || (MediaContentIdentifier.ParseProviderAlias(identifier) is not null && !metadata.PublicAliases.Contains(identifier, StringComparer.Ordinal)))
+                if ((IdentityChanged(current, metadata)
+                        && !await CanRetainUnidentifiedIdentityAsync(current, metadata, cancellationToken).ConfigureAwait(false))
+                    || (MediaContentIdentifier.ParseProviderAlias(identifier) is not null
+                        && !metadata.PublicAliases.Contains(identifier, StringComparer.Ordinal)))
                 {
+                    // Metadata reassignment must not let an earlier title's URL
+                    // expose the newly assigned title before its next save.
                     continue;
                 }
 
-                if (_library.GetItemById<BaseItem>(itemId, user) is not null)
-                {
-                    BaseItem physicalRecord = item;
-                    if (item is Video video && !string.IsNullOrEmpty(video.Path))
-                    {
-                        var fileRecords = _library.GetMediaFileRecords(video.Path);
-                        if (fileRecords.Count == 1)
-                        {
-                            physicalRecord = fileRecords[0];
-                        }
-
-                        if (!video.ExtraType.HasValue && !video.OwnerId.Equals(Guid.Empty)
-                            && _library.GetItemById<Video>(video.OwnerId) is { } owner
-                            && owner.AdditionalParts.Contains(video.Path, StringComparer.Ordinal))
-                        {
-                            physicalRecord = owner;
-                        }
-                    }
-
-                    if (_library.GetItemById<BaseItem>(physicalRecord.Id, user) is not null
-                        && !visible.Any(existing => existing.Id.Equals(physicalRecord.Id)))
-                    {
-                        physicalRecord.PermalinkContentId = mapping.ContentId;
-                        visible.Add(physicalRecord);
-                    }
-                }
-            }
-
-            if (visible.Count > 0)
-            {
-                candidates.Add(new Candidate(mapping.ContentId, mapping.Kind, visible.AsReadOnly()));
+                result.Add(item);
+                break;
             }
         }
 
-        return candidates.AsReadOnly();
-    }
-
-    private async Task AssociateMetadataMatchesAsync(string alias, Guid userId, CancellationToken token)
-    {
-        var provider = MediaContentIdentifier.ParseProviderAlias(alias);
-        var user = _users.GetUserById(userId);
-        if (provider is null || user is null || user.HasPermission(PermissionKind.IsDisabled))
-        {
-            return;
-        }
-
-        var existingBindings = await _repository.ReadByAliasesAsync([alias], token).ConfigureAwait(false);
-        if (existingBindings.Count > 1)
-        {
-            // Preserve an imported ambiguous alias for the existing chooser.
-            // Looking it up must not silently consolidate distinct titles.
-            return;
-        }
-
-        var items = _library.GetItemList(new InternalItemsQuery(user)
-        {
-            Recursive = true,
-            HasAnyProviderIds = new Dictionary<string, string[]> { [provider.Provider] = [provider.Value] },
-            IncludeItemTypes = provider.Kind.HasValue ? [provider.Kind.Value]
-                : [BaseItemKind.Movie, BaseItemKind.Series, BaseItemKind.Season, BaseItemKind.Episode, BaseItemKind.BoxSet, BaseItemKind.Video, BaseItemKind.MusicVideo]
-        }).Where(value => !value.ExtraType.HasValue).ToArray();
-        foreach (var item in items)
-        {
-            token.ThrowIfCancellationRequested();
-            await BindMetadataAsync(item, token).ConfigureAwait(false);
-        }
-    }
-
-    private async Task ImportLegacyAliasAsync(string alias, Guid userId, CancellationToken token)
-    {
-        var legacy = await _legacy.ReadAsync(alias, token).ConfigureAwait(false);
-        var user = _users.GetUserById(userId);
-        if (user is null || user.HasPermission(PermissionKind.IsDisabled))
-        {
-            return;
-        }
-
-        foreach (var association in legacy.GroupBy(value => value.GroupId))
-        {
-            var providerAliases = association.Select(value => value.Alias)
-                .Where(value => MediaContentIdentifier.ParseProviderAlias(value) is not null).Distinct(StringComparer.Ordinal).ToArray();
-            var items = new Dictionary<Guid, BaseItem>();
-            var originalId = association.First().ItemId;
-            var original = originalId.HasValue ? _library.GetItemById<BaseItem>(originalId.Value, user) : null;
-            if (original is not null && !original.ExtraType.HasValue)
-            {
-                var metadata = await ReadMetadataAsync(original, createSeriesIdentity: true, token).ConfigureAwait(false);
-                if (providerAliases.Length == 0 || metadata.PublicAliases.Intersect(providerAliases, StringComparer.Ordinal).Any())
-                {
-                    items[original.Id] = original;
-                }
-            }
-
-            var recordedPaths = association.Where(value => !string.IsNullOrEmpty(value.Path))
-                .SelectMany(value => new[] { value.Path!, Path.ChangeExtension(value.Path!, ".mp4") })
-                .Distinct(StringComparer.Ordinal);
-            var legacyKind = association.First().ItemKind;
-            foreach (var path in recordedPaths)
-            {
-                foreach (var item in _library.GetItemList(new InternalItemsQuery(user) { Recursive = true, Path = path }))
-                {
-                    if (item.ExtraType.HasValue || item is not (Video or Series or Season or MediaBrowser.Controller.Entities.Movies.BoxSet))
-                    {
-                        continue;
-                    }
-
-                    if (legacyKind is not null && !string.Equals(legacyKind, item.GetBaseItemKind().ToString(), StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    var metadata = await ReadMetadataAsync(item, createSeriesIdentity: true, token).ConfigureAwait(false);
-                    if (providerAliases.Length == 0 || metadata.PublicAliases.Intersect(providerAliases, StringComparer.Ordinal).Any())
-                    {
-                        items[item.Id] = item;
-                    }
-                }
-            }
-
-            // A conversion can have left the old path-derived library ID behind.
-            // Recover through recorded provider metadata, never by old file bytes.
-            foreach (var providerAlias in providerAliases)
-            {
-                await AssociateMetadataMatchesAsync(providerAlias, userId, token).ConfigureAwait(false);
-                foreach (var binding in await _repository.ReadByAliasesAsync([providerAlias], token).ConfigureAwait(false))
-                {
-                    foreach (var itemId in await _repository.ReadItemIdsAsync(binding.ContentId, token).ConfigureAwait(false))
-                    {
-                        var item = _library.GetItemById<BaseItem>(itemId, user);
-                        if (item is not null)
-                        {
-                            items[item.Id] = item;
-                        }
-                    }
-                }
-            }
-
-            foreach (var associatedItem in items.Values)
-            {
-                var item = FindTitleRecord(associatedItem, out _) ?? associatedItem;
-                var binding = await BindMetadataAsync(item, token).ConfigureAwait(false);
-                if (MediaContentIdentifier.ParseProviderAlias(alias) is not null
-                    && !(await ReadMetadataAsync(item, createSeriesIdentity: false, token).ConfigureAwait(false)).PublicAliases.Contains(alias, StringComparer.Ordinal))
-                {
-                    continue;
-                }
-
-                await _repository.ImportAliasAsync(
-                    new PermalinkBindingRequest(
-                        item.Id,
-                        binding.ContentId,
-                        binding.ContentId,
-                        binding.Kind,
-                        [alias],
-                        null,
-                        _clock.GetUtcNow().UtcDateTime),
-                    token).ConfigureAwait(false);
-            }
-        }
+        return result.AsReadOnly();
     }
 
     private async Task<MediaPermalinkBinding> BindMetadataAsync(BaseItem item, CancellationToken token)
@@ -375,8 +161,7 @@ public sealed class PermalinkManager : IPermalinkManager
                 .Concat(inheritedContentId.HasValue ? current.PublicAliases : Array.Empty<string>()).Distinct(StringComparer.Ordinal).ToArray();
             var target = matches.FirstOrDefault(value => value.ContentId.Equals(contentId));
             var retiredAliases = (target?.Keys ?? current.Keys).Where(alias => MediaContentIdentifier.IsReplacedClaim(alias, metadata)).ToArray();
-            var legacyAliases = current.ContentId.HasValue ? Array.Empty<string>()
-                : await ReadInitialLegacyAliasesAsync(item.Id, metadata, token).ConfigureAwait(false);
+            var inheritedAliases = Array.Empty<string>();
             if (primaryBinding is not null && current.ContentId.HasValue && !current.ContentId.Value.Equals(contentId)
                 && MediaContentIdentifier.IsKindRefinement(current.Kind, metadata.Kind))
             {
@@ -385,7 +170,7 @@ public sealed class PermalinkManager : IPermalinkManager
                 // update, while keeping different provider claims separate.
                 // If other files still use the source title, the old URL retains
                 // both candidates instead of silently choosing one.
-                legacyAliases = legacyAliases.Concat(current.PublicAliases.Where(alias => alias.StartsWith("sk-", StringComparison.Ordinal)))
+                inheritedAliases = inheritedAliases.Concat(current.PublicAliases.Where(alias => alias.StartsWith("sk-", StringComparison.Ordinal)))
                     .Distinct(StringComparer.Ordinal).ToArray();
             }
 
@@ -410,7 +195,7 @@ public sealed class PermalinkManager : IPermalinkManager
                         metadata.CoordinateKey,
                         _clock.GetUtcNow().UtcDateTime,
                         inheritedContentId,
-                        legacyAliases,
+                        inheritedAliases,
                         retiredAliases),
                     token).ConfigureAwait(false);
                 var saved = await _repository.ReadForItemAsync(item.Id, token).ConfigureAwait(false);
@@ -432,23 +217,7 @@ public sealed class PermalinkManager : IPermalinkManager
         throw MappingChanged();
     }
 
-    private async Task<string[]> ReadInitialLegacyAliasesAsync(Guid itemId, MediaContentIdentity metadata, CancellationToken token)
-    {
-        var aliases = await _legacy.ReadItemAliasesAsync(itemId, token).ConfigureAwait(false);
-        var providerAliases = aliases.Where(alias => MediaContentIdentifier.ParseProviderAlias(alias) is not null).ToArray();
-        if (metadata.PublicAliases.Count > 0 && providerAliases.Length > 0
-            && !metadata.PublicAliases.Intersect(providerAliases, StringComparer.Ordinal).Any())
-        {
-            // A record explicitly reassigned to another title must not take
-            // that earlier title's opaque URL with it during migration.
-            return Array.Empty<string>();
-        }
-
-        return aliases.Where(alias => MediaContentIdentifier.IsPublicAlias(alias)
-            && (alias.StartsWith("sk-", StringComparison.Ordinal) || metadata.PublicAliases.Contains(alias, StringComparer.Ordinal))).ToArray();
-    }
-
-    private async Task<MediaContentIdentity> ReadMetadataAsync(BaseItem item, bool createSeriesIdentity, CancellationToken token)
+    internal async Task<MediaContentIdentity> ReadMetadataAsync(BaseItem item, bool createSeriesIdentity, CancellationToken token)
     {
         // Versions and stacked parts already have title relationships in the
         // library. Reuse their owner's metadata instead of identifying bytes.
@@ -586,7 +355,4 @@ public sealed class PermalinkManager : IPermalinkManager
         PermalinkErrorKind.Conflict,
         "mapping-changed",
         "The media metadata changed while its permalink association was being saved.");
-
-    /// <summary>A logical title and its current visible library versions.</summary>
-    public sealed record Candidate(Guid ContentId, string Kind, IReadOnlyList<BaseItem> Items);
 }

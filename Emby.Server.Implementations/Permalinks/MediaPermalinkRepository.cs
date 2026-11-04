@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03, 2026-11-04.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -315,7 +315,7 @@ public sealed class MediaPermalinkRepository
                     throw new PermalinkException(PermalinkErrorKind.Conflict, "alias-kind-conflict", "A private coordinate key cannot be changed into a public alias.", itemId: request.ItemId);
                 }
 
-                var orderedAliases = (request.LegacyAliases ?? Array.Empty<string>()).Concat(request.PublicAliases).Distinct(StringComparer.Ordinal).ToArray();
+                var orderedAliases = (request.AdditionalAliases ?? Array.Empty<string>()).Concat(request.PublicAliases).Distinct(StringComparer.Ordinal).ToArray();
                 var desiredKeys = orderedAliases.Concat(request.CoordinateKey is null ? Array.Empty<string>() : [request.CoordinateKey]).ToHashSet(StringComparer.Ordinal);
                 var aliasStateChanged = refinesKind;
                 foreach (var row in contentRows)
@@ -432,7 +432,7 @@ public sealed class MediaPermalinkRepository
             request.PublicAliases.Distinct(StringComparer.Ordinal).Count() != request.PublicAliases.Count ||
             request.PublicAliases.Any(alias => alias.Length > 512) ||
             request.CoordinateKey is { Length: 0 or > 512 } ||
-            request.LegacyAliases?.Any(alias => !MediaContentIdentifier.IsPublicAlias(alias)) == true ||
+            request.AdditionalAliases?.Any(alias => !MediaContentIdentifier.IsPublicAlias(alias)) == true ||
             request.RetiredAliases?.Any(alias => string.IsNullOrEmpty(alias) || alias.StartsWith("sk-", StringComparison.Ordinal)
                 || request.PublicAliases.Contains(alias, StringComparer.Ordinal) || request.CoordinateKey == alias) == true ||
             (request.InheritedContentId.HasValue
@@ -622,6 +622,6 @@ public sealed class MediaPermalinkRepository
         string? CoordinateKey,
         DateTime NowUtc,
         Guid? InheritedContentId = null,
-        IReadOnlyList<string>? LegacyAliases = null,
+        IReadOnlyList<string>? AdditionalAliases = null,
         IReadOnlyList<string>? RetiredAliases = null);
 }

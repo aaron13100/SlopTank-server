@@ -1,7 +1,8 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-23, 2026-10-04, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-23, 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-04.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,7 +17,6 @@ using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
-using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -40,7 +40,6 @@ public class ItemUpdateController : BaseJellyfinApiController
     private readonly ILocalizationManager _localizationManager;
     private readonly IFileSystem _fileSystem;
     private readonly IServerConfigurationManager _serverConfigurationManager;
-    private readonly IPermalinkIdentityMutationAdapter _identityMutationAdapter;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="ItemUpdateController"/> class.
@@ -50,21 +49,18 @@ public class ItemUpdateController : BaseJellyfinApiController
     /// <param name="providerManager">Instance of the <see cref="IProviderManager"/> interface.</param>
     /// <param name="localizationManager">Instance of the <see cref="ILocalizationManager"/> interface.</param>
     /// <param name="serverConfigurationManager">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
-    /// <param name="identityMutationAdapter">Durable identity mutation adapter.</param>
     public ItemUpdateController(
         IFileSystem fileSystem,
         ILibraryManager libraryManager,
         IProviderManager providerManager,
         ILocalizationManager localizationManager,
-        IServerConfigurationManager serverConfigurationManager,
-        IPermalinkIdentityMutationAdapter identityMutationAdapter)
+        IServerConfigurationManager serverConfigurationManager)
     {
         _libraryManager = libraryManager;
         _providerManager = providerManager;
         _localizationManager = localizationManager;
         _fileSystem = fileSystem;
         _serverConfigurationManager = serverConfigurationManager;
-        _identityMutationAdapter = identityMutationAdapter;
     }
 
     /// <summary>
@@ -86,40 +82,113 @@ public class ItemUpdateController : BaseJellyfinApiController
             return NotFound();
         }
 
-        // Computed before the mutation so the identity request states the exact
-        // write scope. LockData recurses through any folder, while the normal
-        // update path also propagates ratings/tags and some series fields into
-        // Series, Season, and MusicAlbum descendants.
+        var updatedPath = GetValidatedVideoPathUpdate(item, request, out var pathError);
+        if (pathError is not null)
+        {
+            return BadRequest(pathError);
+        }
+
         var newLockData = request.LockData ?? false;
         var isLockedChanged = item.IsLocked != newLockData;
-        var updatesDescendants = (isLockedChanged && item is Folder)
-            || item is Series or Season or MusicAlbum;
-        var preservesIdentity = PreservesPermalinkIdentity(item, request);
+        await ApplyItemUpdateAsync(item, request, isLockedChanged, updatedPath).ConfigureAwait(false);
+        if (updatedPath is not null)
+        {
+            _providerManager.QueueRefresh(
+                item.Id,
+                new MetadataRefreshOptions(new DirectoryService(_fileSystem))
+                {
+                    MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
+                    ReplaceAllMetadata = false
+                },
+                RefreshPriority.High);
+        }
 
-        try
-        {
-            await _identityMutationAdapter.ExecuteAsync(
-                [item],
-                new PermalinkIdentityMutationRequest(
-                    "manual-metadata",
-                    request.ProviderIds,
-                    request.Type == default ? null : request.Type.ToString(),
-                    CascadeToDescendants: updatesDescendants,
-                    SkipPreparationWhenIdentityUnchanged: preservesIdentity),
-                async (_, _) => await ApplyItemUpdateAsync(item, request, isLockedChanged).ConfigureAwait(false),
-                CancellationToken.None).ConfigureAwait(false);
-            return NoContent();
-        }
-        catch (PermalinkException exception)
-        {
-            return Problem(
-                detail: exception.Message,
-                statusCode: StatusCodes.Status409Conflict,
-                title: exception.Code);
-        }
+        return NoContent();
     }
 
-    private async Task ApplyItemUpdateAsync(BaseItem item, BaseItemDto request, bool isLockedChanged)
+    private string? GetValidatedVideoPathUpdate(BaseItem item, BaseItemDto request, out string? error)
+    {
+        error = null;
+        if (string.IsNullOrWhiteSpace(request.Path)
+            || string.Equals(request.Path, item.Path, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        if (item is not Video)
+        {
+            error = "Only a video library record can be moved to another media path.";
+            return null;
+        }
+
+        if (!Path.IsPathFullyQualified(request.Path)
+            || (Uri.TryCreate(request.Path, UriKind.Absolute, out var uri) && (!uri.IsFile || uri.IsUnc)))
+        {
+            error = "The new media path must be a fully qualified local file path.";
+            return null;
+        }
+
+        string destination;
+        try
+        {
+            destination = Path.GetFullPath(request.Path);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            error = $"The new media path is invalid: {exception.Message}";
+            return null;
+        }
+
+        var pathComparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (item.Path is not null && string.Equals(Path.GetFullPath(item.Path), destination, pathComparison))
+        {
+            return null;
+        }
+
+        var isInsideLibrary = _libraryManager.GetVirtualFolders()
+            .SelectMany(folder => folder.Locations)
+            .Where(location => Path.IsPathFullyQualified(location))
+            .Select(Path.GetFullPath)
+            .Any(location =>
+            {
+                var relative = Path.GetRelativePath(location, destination);
+                return !Path.IsPathRooted(relative)
+                    && !string.Equals(relative, "..", pathComparison)
+                    && !relative.StartsWith(".." + Path.DirectorySeparatorChar, pathComparison)
+                    && !relative.StartsWith(".." + Path.AltDirectorySeparatorChar, pathComparison);
+            });
+        if (!isInsideLibrary)
+        {
+            error = "The new media path must be inside an existing library location.";
+            return null;
+        }
+
+        if (!_fileSystem.FileExists(destination))
+        {
+            error = "The new media file does not exist.";
+            return null;
+        }
+
+        var occupiedItems = _libraryManager.GetItemList(new InternalItemsQuery
+        {
+            Path = destination,
+            Recursive = true,
+            IncludeOwnedItems = true,
+            GroupByPresentationUniqueKey = false,
+            EnableTotalRecordCount = false
+        });
+        if (occupiedItems.Any(existing => !existing.Id.Equals(item.Id)))
+        {
+            error = "The new media path is already assigned to another library record.";
+            return null;
+        }
+
+        return destination;
+    }
+
+    private async Task ApplyItemUpdateAsync(BaseItem item, BaseItemDto request, bool isLockedChanged, string? updatedPath)
     {
         var newLockData = request.LockData ?? false;
         var series = item as Series;
@@ -141,8 +210,19 @@ public class ItemUpdateController : BaseJellyfinApiController
         }
 
         await UpdateItem(request, item).ConfigureAwait(false);
+        if (updatedPath is not null && item is Video video)
+        {
+            video.Path = updatedPath;
+            video.IngestState = Jellyfin.Database.Implementations.Enums.IngestState.Pending;
+            video.PlaybackReadiness = Jellyfin.Database.Implementations.Enums.PlaybackReadiness.Pending;
+            video.PlaybackReadyObjectIdentity = null;
+            video.PlaybackReadyAlgorithmVersion = null;
+        }
+
         item.OnMetadataChanged();
-        await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
+        await item.UpdateToRepositoryAsync(
+            updatedPath is null ? ItemUpdateType.MetadataEdit : ItemUpdateType.MetadataImport,
+            CancellationToken.None).ConfigureAwait(false);
 
         if (isLockedChanged && item is Folder folder)
         {
@@ -165,54 +245,6 @@ public class ItemUpdateController : BaseJellyfinApiController
                 },
                 RefreshPriority.High);
         }
-    }
-
-    private bool PreservesPermalinkIdentity(BaseItem item, BaseItemDto request)
-    {
-        var desiredOriginalTitle = string.IsNullOrWhiteSpace(request.OriginalTitle)
-            ? null
-            : request.OriginalTitle;
-        DateTime? desiredPremiereDate = request.PremiereDate.HasValue
-            ? NormalizeDateTime(request.PremiereDate.Value)
-            : null;
-        var desiredSeriesName = request.SeriesName is not null && item is IHasSeries
-            ? request.SeriesName
-            : item is IHasSeries hasSeries
-                ? hasSeries.SeriesName
-                : null;
-
-        if ((request.Type != default && request.Type != item.GetBaseItemKind())
-            || !ProviderIdsEqual(item.ProviderIds, request.ProviderIds)
-            || !string.Equals(item.Name, request.Name, StringComparison.Ordinal)
-            || !string.Equals(item.OriginalTitle, desiredOriginalTitle, StringComparison.Ordinal)
-            || item.ProductionYear != request.ProductionYear
-            || item.PremiereDate != desiredPremiereDate
-            || !string.Equals(
-                item is IHasSeries currentSeries ? currentSeries.SeriesName : null,
-                desiredSeriesName,
-                StringComparison.Ordinal)
-            || item.ParentIndexNumber != request.ParentIndexNumber
-            || item.IndexNumber != request.IndexNumber)
-        {
-            return false;
-        }
-
-        // A Series update writes its current name into every Season/Episode.
-        // Treat a pre-existing child mismatch as an identity mutation even
-        // when the submitted series name itself is unchanged.
-        return item is not Series series
-            || series.GetRecursiveChildren()
-                .OfType<IHasSeries>()
-                .All(child => string.Equals(child.SeriesName, request.Name, StringComparison.Ordinal));
-    }
-
-    private static bool ProviderIdsEqual(
-        IReadOnlyDictionary<string, string> current,
-        IReadOnlyDictionary<string, string> desired)
-    {
-        return current.Count == desired.Count
-            && current.All(pair => desired.TryGetValue(pair.Key, out var value)
-                && string.Equals(pair.Value, value, StringComparison.Ordinal));
     }
 
     /// <summary>

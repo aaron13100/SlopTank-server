@@ -1,11 +1,10 @@
-; SlopTank modification notice: added or changed by SlopTank on 2026-09-02, 2026-09-09, 2026-09-10, 2026-10-14, 2026-10-31.
+; SlopTank modification notice: added or changed by SlopTank on 2026-09-02, 2026-09-09, 2026-09-10, 2026-10-14, 2026-10-31, 2026-11-04.
 ; Unshipped analyzer release
 ; https://github.com/dotnet/roslyn/blob/main/src/RoslynAnalyzers/Microsoft.CodeAnalysis.Analyzers/ReleaseTrackingAnalyzers.Help.md
 
 ### New Rules
 Rule ID | Category    | Severity | Notes
 --------|-------------|----------|-------
-JF0002  | Performance | Error    | Permalink playback resolution must not read media content
 
 ### Changed Rules
 Rule ID | New Category | New Severity | Old Category | Old Severity | Notes

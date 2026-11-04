@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-15.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-15, 2026-10-31, 2026-11-04.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;

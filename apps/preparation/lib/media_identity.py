@@ -119,8 +119,8 @@ def copy_retirement_across_devices(source: Path, slot: Path) -> None:
                         candidate, cleanup_error)
 
 
-def _retire(original: Path, retired_dir: Path) -> Path | None:
-    """Keep an undo copy when possible; replacement itself remains primary."""
+def _retire(original: Path, retired_dir: Path) -> Path:
+    """Retain the original before allowing its library path to be overwritten."""
     slot = None
     try:
         slot = retirement_slot(retired_dir, original.name)
@@ -130,13 +130,13 @@ def _retire(original: Path, retired_dir: Path) -> Path | None:
             try:
                 copy_retirement_across_devices(original, slot)
             except OSError as copy_error:
-                log.warning("could not copy an undo copy of %s: %s; "
-                            "continuing without one", original, copy_error)
-                return None
+                raise MediaIdentityError(
+                    f"cannot retain original {original} in {retired_dir}; "
+                    f"replacement refused: {copy_error}") from copy_error
         else:
-            log.warning("could not retire an undo copy of %s: %s; "
-                        "continuing without one", original, exc)
-            return None
+            raise MediaIdentityError(
+                f"cannot retain original {original} in {retired_dir}; "
+                f"replacement refused: {exc}") from exc
     return slot
 
 
@@ -159,8 +159,8 @@ def replace_media_file(tmp: Path, original: Path,
     When ``target`` is the original path, the old file is hardlinked into the
     undo window before the atomic replacement. For a new target, the complete
     output is published first and the old path is then moved into retirement.
-    The undo copy is best effort; a failure to create it does not block a
-    verified replacement. A bundled preparation worker delegates publication
+    An in-place replacement is refused if the original cannot be retained.
+    A bundled preparation worker delegates publication
     to its existing parent-owned host so the server retains its item record.
     Other callers notify the library through its normal update or scan mechanism.
     """
@@ -179,11 +179,9 @@ def replace_media_file(tmp: Path, original: Path,
         try:
             tmp.replace(original)
         except Exception:
-            if slot is not None:
-                slot.unlink(missing_ok=True)
+            slot.unlink(missing_ok=True)
             raise
-        if slot is not None:
-            retirement_ledger.record_retirement(retired_dir, slot, original)
+        retirement_ledger.record_retirement(retired_dir, slot, original)
         return original
 
     tmp.rename(destination)

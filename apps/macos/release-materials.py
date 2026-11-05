@@ -109,6 +109,16 @@ def collect_preparation_sources(output: Path, runtimes: list[Path]) -> list[dict
     return records
 
 
+def stage_gpl_licenses(output: Path) -> None:
+    """Retain the complete standalone GPL texts from the audited corpus."""
+    with tarfile.open(Path(__file__).parent / "license-inputs.tar.gz", "r:gz") as archive:
+        for version in ("2.0", "3.0"):
+            member = archive.extractfile(f"license-texts/GPL-{version}-or-later.txt")
+            if member is None:
+                raise ValueError(f"missing GPL-{version} license text")
+            (output / f"GPL-{version}.txt").write_bytes(member.read())
+
+
 def collect_managed_sources(output: Path, runtimes: dict[str, Path]) -> tuple[list[dict], list[dict]]:
     """Retain actual source bindings and the LGPL replacement materials."""
     graphs = []
@@ -184,6 +194,7 @@ def collect(output: Path, web_ref: str, runtimes: dict[str, Path]) -> None:
     for name, url in sources.items():
         with urllib.request.urlopen(url, timeout=120) as source, (output / name).open("xb") as target:
             shutil.copyfileobj(source, target)
+    stage_gpl_licenses(output)
     server_ref = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, timeout=30).strip()
     managed_sources, managed_archives = collect_managed_sources(output, runtimes)
     (output / "sources.json").write_text(json.dumps({

@@ -70,6 +70,7 @@ jobs:
           github-token: ${{ github.token }}
           run-id: "41988658833"
           path: dist
+          merge-multiple: true
       - name: Verify the included web source archive commit
         run: test "$(git get-tar-commit-id < dist/web-source.tar)" = "$WEB_REF"
       - uses: actions/upload-artifact@v4
@@ -107,6 +108,7 @@ jobs:
           github-token: ${{ github.token }}
           run-id: ${{ env.FFMPEG_ARM64_BUILD_RUN_ID }}
           path: components/ffmpeg-arm64
+          merge-multiple: true
       - name: Verify and stage pinned FFmpeg components and source kit
         run: |
           mkdir -p components/osx-x64 components/osx-arm64 universal/ffmpeg universal/materials

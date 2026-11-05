@@ -1,4 +1,4 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05.
 name: Universal Mac artifact
 
 on:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  WEB_REF: 34c6f82583e0c07704a8b3be494e209b90bbd5ed
+  WEB_REF: a9ff07acbd4d85707b3e9b6400d0fd585d8b13a8
   RELEASE_VERSION: 0.1.0
 
 permissions:

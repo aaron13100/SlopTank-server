@@ -101,13 +101,13 @@ jobs:
         with:
           name: ffmpeg-teletext-x86_64
           github-token: ${{ github.token }}
-          run-id: ${{ env.FFMPEG_BUILD_RUN_ID }}
+          run-id: ${{ env.FFMPEG_X64_BUILD_RUN_ID }}
           path: components/ffmpeg-x86_64
       - uses: actions/download-artifact@v4
         with:
           artifact-ids: "13429639242"
           github-token: ${{ github.token }}
-          run-id: ${{ env.FFMPEG_BUILD_RUN_ID }}
+          run-id: ${{ env.FFMPEG_ARM64_BUILD_RUN_ID }}
           path: components/ffmpeg-arm64
       - name: Verify and stage pinned FFmpeg components and source kit
         run: |

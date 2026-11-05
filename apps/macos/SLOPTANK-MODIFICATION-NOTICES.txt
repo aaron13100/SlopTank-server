@@ -1,8 +1,8 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-06.
 # Scope: exact same-directory paths only.
 # Columns: path<TAB>change-dates<TAB>git-mode<TAB>sha256
 Info.plist	2026-11-04	100644	cfff66e241d696656293babcc79a10ceaae7453a1fa9c88992d57c56fd45a925
 Package.swift	2026-11-04	100644	b76dabdd9214be3a90363f2c15d896f7f50eae5a49f71e475c31d326162bc81b
-ffmpeg-macos-no-gcc.patch	2026-11-05	100644	6d7cd0acefcca7203f863a99623b168a35660fafc92bd9a1a1f4da19005d470e
+ffmpeg-macos-no-gcc.patch	2026-11-05,2026-11-06	100644	cfec3413c0df2eff5128bf35c413ce3766410024d5a18d33129c80da8b8356b9
 ffmpeg-zvbi-subtitles-only.patch	2026-11-05	100644	f1c52398f7e093c5c2d0d5abd1de91b4d96bcaba983f8649d548cb4d7a200187
 license-inputs.tar.gz	2026-11-05	100644	6d8133175f88055b06930e18e29a03f6f60d07f8034ce3c679f0aaec32b1f26e

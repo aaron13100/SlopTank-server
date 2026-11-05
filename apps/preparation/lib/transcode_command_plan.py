@@ -1,4 +1,4 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05.
 """Subtitle/container selection and pure ffmpeg command construction."""
 
 from __future__ import annotations
@@ -24,6 +24,19 @@ _TEXT_SUBTITLE_CODECS = {
     "subrip", "srt", "ass", "ssa", "mov_text", "text", "webvtt",
 }
 _SIDECAR_BITMAP_SUBTITLE_SUFFIXES = {"hdmv_pgs_subtitle": ".sup"}
+
+
+def _build_realign_cmd(path: Path, tmp: Path, plan: AlignmentPlan) -> list[str]:
+    """Copy non-audio streams and apply the existing audio alignment plan."""
+    cmd = [
+        require_tool("ffmpeg"), "-nostdin", "-y", "-i", str(path),
+        "-map", "0", "-map_metadata", "0",
+        "-c:v", "copy", "-c:s", "copy", "-c:d", "copy",
+    ]
+    cmd += audio_alignment_ffmpeg_args(plan)
+    cmd += alignment_container_args(plan)
+    cmd += ["-movflags", "+faststart", str(tmp)]
+    return cmd
 
 #: The longest cue gap an mp4's mov_text track can represent. ffmpeg's mov
 #: muxer gives a mov_text track a 1,000,000 timescale and writes every
@@ -234,10 +247,9 @@ def _resolve_alignment_plan(
 
     Also None whenever the video is being re-encoded (``needs_video``):
     design.md step 3, the output's own first DTS is not knowable before that
-    encode runs, so the plan cannot be computed against it. That output keeps
-    today's default muxing and relies on the encoder's own (bounded)
-    composition delay instead of a computed correction; the step-5
-    verification in ``lib.transcode_execution`` still bounds the result.
+    encode runs, so the plan cannot be computed against it. The encoded MP4
+    is measured and realigned if needed before the normal output verification
+    in ``lib.transcode_execution``.
 
     Also None for a non-mp4 target (c294): only an mp4 hides a start offset
     in an edit list. Matroska keeps every block's own timestamp, so copied

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05.
 """Compatibility facade for the portable streaming conversion pipeline."""
 
 from __future__ import annotations
@@ -222,6 +222,7 @@ def _transcode_for_streaming(path: Path, *, plan: StreamingWorkPlan | None = Non
         execute_kwargs = {
             "container_only": CONTAINER_ONLY_PASS or direct_play_remux,
             "run_transcode": run_transcode or _run_transcode,
+            "video_encoded": plan.needs_video,
         }
         return _execute_transcode(
             path, tmp, plan.target_suffix, sidecars, command, no_subs, software,

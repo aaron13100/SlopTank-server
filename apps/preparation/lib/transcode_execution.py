@@ -1,10 +1,13 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05.
 """Retry, verification, and replacement mechanics for streaming conversion."""
 
 from __future__ import annotations
 
 import logging
+import os
 import re
+import stat
+import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +16,7 @@ from lib.media_identity import replace_media_file
 from lib.container_remux import _move_sidecars_to_new_stem
 from lib.encode_cancellation import EncodeCancelled
 from lib.encode_priority import run_encode
+from lib.encode_watchdog import stream_copy_outer_timeout_seconds
 from lib.file_ops import unique_path
 from lib.media_duration import get_media_duration
 from lib.media_probe import _ffmpeg_stderr_tail, _probe_video_audio
@@ -25,7 +29,7 @@ from lib.mp4_start_alignment import (
     probe_opening_packets,
     probe_start_alignment,
 )
-from lib.transcode_command_plan import _build_transcode_cmd
+from lib.transcode_command_plan import _build_realign_cmd, _build_transcode_cmd
 from lib.transcode_subtitle_io import (
     discard_sidecars,
     probe_text_track_cue_facts,
@@ -214,15 +218,16 @@ _SUBTITLE_TIMING_TOLERANCE_SECONDS = 0.1
 
 
 def _mp4_text_timing_problem(tmp: Path, *, source: Path,
-                             probe_facts=None) -> str | None:
+                             probe_facts=None, probe_alignment=None) -> str | None:
     """Return a rejection reason when an output text track lost its timing.
 
     The c298 net: ffmpeg's mp4 muxer collapses a mov_text track whose cue
     gaps exceed its int32 stts range to back-to-back cues from zero (cue
     durations preserved, every gap one tick), so the track's first cue start
     is the observable that survives the write wrong. Every text track of the
-    OUTPUT must start where some same-language text track of the SOURCE
-    started, so this catches any mp4-writing path that zero-bases a track --
+    OUTPUT must start at the same position relative to the video's first
+    presentation time as some same-language SOURCE track. This permits a
+    uniform muxer origin shift while catching a zero-based track --
     this builder's own bug, a future change, or a different writer routed
     through the same verification -- regardless of which gap caused it.
     Probes the output itself, never the command that produced it.
@@ -244,18 +249,28 @@ def _mp4_text_timing_problem(tmp: Path, *, source: Path,
         return f"could not measure subtitle timing: {exc}"
     if not output_facts:
         return None
+    try:
+        source_video = (probe_alignment or probe_start_alignment)(source)
+        output_video = (probe_alignment or probe_start_alignment)(tmp)
+    except AlignmentProbeError as exc:
+        return f"could not measure subtitle video timeline: {exc.detail}"
+    if source_video is None or output_video is None:
+        return "could not measure subtitle video timeline: video stream missing"
     problems = []
     for track in output_facts.values():
         candidates = [
-            facts.first_cue_start for facts in source_facts.values()
+            facts.first_cue_start - source_video.video_first_pts
+            for facts in source_facts.values()
             if track.language is None or facts.language in (None, track.language)
-        ] or [facts.first_cue_start for facts in source_facts.values()]
+        ] or [facts.first_cue_start - source_video.video_first_pts
+              for facts in source_facts.values()]
+        output_start = track.first_cue_start - output_video.video_first_pts
         if candidates and not any(
-                abs(track.first_cue_start - start) <= _SUBTITLE_TIMING_TOLERANCE_SECONDS
+                abs(output_start - start) <= _SUBTITLE_TIMING_TOLERANCE_SECONDS
                 for start in candidates):
             problems.append(
-                f"text stream {track.index} starts at {track.first_cue_start:.3f}s "
-                f"but the source's text tracks start at "
+                f"text stream {track.index} starts at {output_start:.3f}s "
+                f"relative to video, but the source's text tracks start at "
                 f"{', '.join(f'{start:.3f}s' for start in sorted(candidates))}")
     if not problems:
         return None
@@ -289,7 +304,7 @@ def _verify_transcode_output(
             "original file preserved",
         )
     text_timing_problem = _mp4_text_timing_problem(
-        tmp, source=path, probe_facts=probe_cues)
+        tmp, source=path, probe_facts=probe_cues, probe_alignment=probe_alignment)
     if text_timing_problem is not None:
         tmp.unlink(missing_ok=True)
         raise TranscodeFailedError(
@@ -357,7 +372,8 @@ def _with_start_alignment_facts(
     than growing that one). Skipped when the video is being re-encoded: the
     output's own first DTS is not knowable yet (design.md step 3), so the
     probe would only cost an ffprobe call for a result `_build_transcode_cmd`
-    is going to ignore anyway.
+    is going to ignore anyway. The encoded MP4 is measured and realigned if
+    needed after encoding, before the normal output verification.
 
     :param probe_alignment: Injectable seam for tests; defaults to the real
         `lib.mp4_start_alignment.probe_start_alignment`.
@@ -413,11 +429,43 @@ def _transcode_commands(
     return command, no_subs, software
 
 
+def _realign_encoded_output(tmp: Path, *, probe=None, run=None) -> None:
+    """Correct measured post-encode drift before the normal output checks."""
+    measured = (probe or probe_start_alignment)(tmp)
+    if measured is None:
+        raise TranscodeFailedError(f"cannot measure video alignment for {tmp.name}")
+    plan = plan_audio_alignment(
+        measured.video_first_pts, measured.video_first_dts, measured.audio_starts)
+    if plan.unmeasured:
+        raise TranscodeFailedError(f"cannot measure audio alignment for {tmp.name}")
+    if not plan.needed:
+        return
+
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{tmp.stem}.realign.", suffix=".mp4", dir=tmp.parent)
+    os.close(descriptor)
+    corrected = Path(name)
+    try:
+        command = _build_realign_cmd(tmp, corrected, plan)
+        result = (run or run_encode)(
+            command, timeout=stream_copy_outer_timeout_seconds(tmp.stat().st_size),
+            progress_path=corrected, extend_while_progressing=True)
+        if result.returncode != 0 or not corrected.is_file() or corrected.stat().st_size == 0:
+            raise TranscodeFailedError(
+                f"audio realignment failed for {tmp.name}: rc={result.returncode}; "
+                f"{_ffmpeg_stderr_tail(result)}")
+        os.chmod(corrected, stat.S_IMODE(tmp.stat().st_mode))
+        os.replace(corrected, tmp)
+    finally:
+        corrected.unlink(missing_ok=True)
+
+
 def _execute_transcode(
         path: Path, tmp: Path, target_suffix: str, sidecars: list[Path],
         command: list[str], no_subs_command: list[str],
         software_command: list[str] | None, *, container_only: bool,
         run_transcode=None, verify=None, finalize=None,
+        video_encoded: bool = False, realign=None,
         discard=None) -> Path:
     """Run, verify, and finalize one conversion fail-safely."""
     run_transcode = run_transcode or _run_transcode
@@ -430,6 +478,8 @@ def _execute_transcode(
             raise TranscodeFailedError(
                 f"ffmpeg failed for {path.name}; original file preserved",
             )
+        if video_encoded and target_suffix == ".mp4":
+            (realign or _realign_encoded_output)(tmp)
         verify(path, tmp, allow_deferred_long_gop=container_only)
         return finalize(path, tmp, target_suffix)
     except TranscodeFailedError:

@@ -71,7 +71,12 @@ jobs:
           run-id: "41988658833"
           path: dist
       - name: Verify the included web source archive commit
-        run: test "$(git get-tar-commit-id dist/web-source.tar)" = "$WEB_REF"
+        run: test "$(git get-tar-commit-id < dist/web-source.tar)" = "$WEB_REF"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: dist
+          retention-days: 7
 
   assemble:
     needs: [native, web]

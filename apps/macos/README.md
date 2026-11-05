@@ -49,8 +49,11 @@ python3 apps/macos/build-native.py --rid osx-x64 --output build/osx-x64
 
 `build-native.py` uses self-contained `dotnet publish` (including SVG), Swift and
 PyInstaller, with fixed command deadlines and normal priority.
-`fetch-components.py` verifies pinned official Jellyfin FFmpeg and Intro Skipper
-archive hashes. Runtime-pack licence texts remain under each publish's
+`fetch-components.py` verifies the pinned Intro Skipper archive hash. FFmpeg is
+built separately from the pinned source by `.github/workflows/ffmpeg-subtitles.yml`;
+the universal workflow downloads both architecture artifacts from its fixed run,
+checks their source pins and binary hashes, and packages the corresponding-source
+kit separately from the app. Runtime-pack licence texts remain under each publish's
 `licenses/<NuGetPackageId>/`. The optional `stage-server.py` validates/copies a
 completed publish and can select a separately built SVG converter; it never
 constructs another .NET runtime.
@@ -89,7 +92,8 @@ override. An Intel Mac cannot execute the arm64 worker.
 
 `.github/workflows/macos-universal.yml` in SlopTank-server builds native components
 on `macos-15-intel` and `macos-15` (Apple chip), builds the pinned public SlopTank
-web source, assembles one app/DMG and smokes that same installed image on both
+web source, retrieves the two checked FFmpeg source-build artifacts, assembles one
+app/DMG plus its corresponding-source kit, and smokes that same installed image on both
 runner types. Push the pinned public web commit first; pushing the server's
 `release-universal` branch then starts the workflow automatically. Manual dispatch
 is available after the workflow reaches the default branch. The smoke uses an isolated

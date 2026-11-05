@@ -6,8 +6,14 @@ on:
     branches: [release-ffmpeg]
     paths:
       - apps/macos/ffmpeg-zvbi-subtitles-only.patch
-      - .github/workflows/ffmpeg-subtitles.yml
   workflow_dispatch:
+    inputs:
+      architecture:
+        description: Architecture to build; use x86_64 for the Intel retry
+        type: choice
+        options: [both, x86_64, arm64]
+        default: both
+        required: true
 
 permissions:
   contents: read
@@ -18,27 +24,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-15-intel
-            arch: x86_64
-            target: mac64
-            archive: jellyfin-ffmpeg_8.1.3-2_portable_mac64-gpl.tar.xz
-            sha256: d394180f1155f84857544a48a99869f5741ccc50c5a1f73d2797429a2b326448
-          - runner: macos-15
-            arch: arm64
-            target: macarm64
-            archive: jellyfin-ffmpeg_8.1.3-2_portable_macarm64-gpl.tar.xz
-            sha256: d898cc819e7c4e9219d6410ddbdaada0838f14bec6ff89e283639915394cb43f
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+        arch: ${{ fromJSON(inputs.architecture == 'x86_64' && '["x86_64"]' || inputs.architecture == 'arm64' && '["arm64"]' || '["x86_64","arm64"]') }}
+    runs-on: ${{ matrix.arch == 'x86_64' && 'macos-15-intel' || 'macos-15' }}
+    timeout-minutes: ${{ matrix.arch == 'x86_64' && 240 || 120 }}
     env:
       FF_SOURCE_COMMIT: 7250de8375a4959ac1c25c139ce9789fdac199fb
       ZVBI_COMMIT: 41477c97c8edf7a01f1594b2a95b94f0117eed21
       TELE_TEXT_SAMPLE: https://samples.ffmpeg.org/ffmpeg-bugs/trac/ticket2086/teletextsubtitles.ts
       ARCH: ${{ matrix.arch }}
-      TARGET: ${{ matrix.target }}
-      ORIGINAL_ARCHIVE: ${{ matrix.archive }}
-      ORIGINAL_SHA256: ${{ matrix.sha256 }}
+      TARGET: ${{ matrix.arch == 'x86_64' && 'mac64' || 'macarm64' }}
+      ORIGINAL_ARCHIVE: ${{ matrix.arch == 'x86_64' && 'jellyfin-ffmpeg_8.1.3-2_portable_mac64-gpl.tar.xz' || 'jellyfin-ffmpeg_8.1.3-2_portable_macarm64-gpl.tar.xz' }}
+      ORIGINAL_SHA256: ${{ matrix.arch == 'x86_64' && 'd394180f1155f84857544a48a99869f5741ccc50c5a1f73d2797429a2b326448' || 'd898cc819e7c4e9219d6410ddbdaada0838f14bec6ff89e283639915394cb43f' }}
     steps:
       - uses: actions/checkout@v4
       - name: Set up Homebrew
@@ -62,6 +58,9 @@ jobs:
           tar -czf "$RUNNER_TEMP/output/sources/ffmpeg-builder-recipes.tar.gz" \
             --exclude='builder/build/*' --exclude='builder/artifacts/*' --exclude='.git' \
             -C "$RUNNER_TEMP/jellyfin-ffmpeg" builder debian/changelog debian/patches
+          cp .github/workflows/ffmpeg-subtitles.yml "$RUNNER_TEMP/output/sources/ffmpeg-subtitles.yml"
+          WORKFLOW_SHA256="$(shasum -a 256 "$RUNNER_TEMP/output/sources/ffmpeg-subtitles.yml" | awk '{print $1}')"
+          MACOS_DEPS_PATCH_SHA256="$(shasum -a 256 apps/macos/ffmpeg-macos-no-gcc.patch | awk '{print $1}')"
           git -C "$RUNNER_TEMP/jellyfin-ffmpeg" show "$FF_SOURCE_COMMIT:.github/workflows/_meta_mac_portable.yaml" \
             > "$RUNNER_TEMP/output/sources/upstream-meta-mac-portable.yaml"
           git -C "$RUNNER_TEMP/jellyfin-ffmpeg" show "$FF_SOURCE_COMMIT:builder/Buildmac.md" \
@@ -87,11 +86,19 @@ jobs:
           printf 'original_archive=%s\noriginal_sha256=%s\narchitecture=%s\ntarget=%s\n' \
             "$ORIGINAL_ARCHIVE" "$ORIGINAL_SHA256" "$ARCH" "$TARGET" \
             >> "$RUNNER_TEMP/output/source-facts.txt"
+          printf 'workflow_commit=%s\nworkflow_sha256=%s\nmacos_recipe_patch_sha256=%s\n' \
+            "$GITHUB_SHA" "$WORKFLOW_SHA256" "$MACOS_DEPS_PATCH_SHA256" \
+            >> "$RUNNER_TEMP/output/source-facts.txt"
           printf 'name\tcommit-or-revision\tarchive\n' > "$RUNNER_TEMP/output/source-pins.tsv"
           printf 'jellyfin-ffmpeg\t%s\tsources/jellyfin-ffmpeg-v8.1.3-2.tar.gz\n' \
             "$FF_SOURCE_COMMIT" >> "$RUNNER_TEMP/output/source-pins.tsv"
+          printf 'ffmpeg-subtitles-workflow\t%s\tsources/ffmpeg-subtitles.yml\n' \
+            "$GITHUB_SHA" >> "$RUNNER_TEMP/output/source-pins.tsv"
+          printf 'ffmpeg-macos-no-gcc-patch\t%s\tsources/ffmpeg-macos-no-gcc.patch\n' \
+            "$GITHUB_SHA" >> "$RUNNER_TEMP/output/source-pins.tsv"
           shasum -a 256 "$RUNNER_TEMP/output/sources/jellyfin-ffmpeg-v8.1.3-2.tar.gz" \
             "$RUNNER_TEMP/output/sources/ffmpeg-builder-recipes.tar.gz" \
+            "$RUNNER_TEMP/output/sources/ffmpeg-subtitles.yml" \
             > "$RUNNER_TEMP/output/sources.sha256"
       - name: Verify baseline GPL symbols and teletext subtitle decode
         run: |
@@ -106,10 +113,20 @@ jobs:
             "$RUNNER_TEMP/output/original.srt"
           test -s "$RUNNER_TEMP/output/original.srt"
           grep -q -- '-->' "$RUNNER_TEMP/output/original.srt"
-      - name: Apply the narrow ZVBI source patch
+      - name: Apply pinned macOS and ZVBI source patches
         env:
           PATCH_FILE: ${{ github.workspace }}/apps/macos/ffmpeg-zvbi-subtitles-only.patch
+          MACOS_DEPS_PATCH_FILE: ${{ github.workspace }}/apps/macos/ffmpeg-macos-no-gcc.patch
         run: |
+          git -C "$RUNNER_TEMP/jellyfin-ffmpeg" apply --check "$MACOS_DEPS_PATCH_FILE"
+          git -C "$RUNNER_TEMP/jellyfin-ffmpeg" apply "$MACOS_DEPS_PATCH_FILE"
+          cp "$MACOS_DEPS_PATCH_FILE" "$RUNNER_TEMP/output/sources/ffmpeg-macos-no-gcc.patch"
+          cp "$RUNNER_TEMP/jellyfin-ffmpeg/builder/images/macos/00-dep.sh" \
+            "$RUNNER_TEMP/output/sources/00-dep-no-gcc.sh"
+          git -C "$RUNNER_TEMP/jellyfin-ffmpeg" diff --no-index -- \
+            <(git -C "$RUNNER_TEMP/jellyfin-ffmpeg" show "$FF_SOURCE_COMMIT:builder/images/macos/00-dep.sh") \
+            "$RUNNER_TEMP/jellyfin-ffmpeg/builder/images/macos/00-dep.sh" \
+            > "$RUNNER_TEMP/output/sources/macos-deps-injection.patch" || test "$?" -eq 1
           grep -qx 'SCRIPT_REPO="https://github.com/zapping-vbi/zvbi.git"' "$RUNNER_TEMP/jellyfin-ffmpeg/builder/scripts.d/50-zvbi.sh"
           grep -qx "SCRIPT_COMMIT=\"$ZVBI_COMMIT\"" "$RUNNER_TEMP/jellyfin-ffmpeg/builder/scripts.d/50-zvbi.sh"
           python3 - "$RUNNER_TEMP/jellyfin-ffmpeg/builder/scripts.d/50-zvbi.sh" <<'PY'
@@ -133,9 +150,15 @@ jobs:
           shasum -a 256 "$RUNNER_TEMP/output/sources/ffmpeg-zvbi-subtitles-only.patch" \
             "$RUNNER_TEMP/output/sources/50-zvbi.sh" \
             "$RUNNER_TEMP/output/sources/build-script-injection.patch" \
+            "$RUNNER_TEMP/output/sources/ffmpeg-macos-no-gcc.patch" \
+            "$RUNNER_TEMP/output/sources/00-dep-no-gcc.sh" \
+            "$RUNNER_TEMP/output/sources/macos-deps-injection.patch" \
             "$RUNNER_TEMP/output/sources/upstream-meta-mac-portable.yaml" \
             "$RUNNER_TEMP/output/sources/Buildmac.md" >> "$RUNNER_TEMP/output/sources.sha256"
       - name: Build using upstream macOS recipe
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_UPGRADE: "1"
         run: |
           cd "$RUNNER_TEMP/jellyfin-ffmpeg"
           export PATCH_FILE="$GITHUB_WORKSPACE/apps/macos/ffmpeg-zvbi-subtitles-only.patch"
@@ -144,6 +167,15 @@ jobs:
           cp builder/artifacts/jellyfin-ffmpeg_8.1.3-2_portable_${TARGET}-gpl.tar.xz "$RUNNER_TEMP/output/"
           tar -xJf "$RUNNER_TEMP/output/jellyfin-ffmpeg_8.1.3-2_portable_${TARGET}-gpl.tar.xz" \
             -C "$RUNNER_TEMP/output" ffmpeg ffprobe
+          {
+            printf 'HOMEBREW_NO_AUTO_UPDATE=1\nHOMEBREW_NO_INSTALL_UPGRADE=1\n'
+            xcodebuild -version
+            clang --version | head -n 1
+            clang++ --version | head -n 1
+            g++ --version | head -n 1
+            cmake --version | head -n 1
+            brew list --versions cmake gcc gcc@15 2>/dev/null || true
+          } > "$RUNNER_TEMP/output/toolchain-facts.txt"
       - name: Verify patched symbols and subtitle text and timing
         run: |
           nm -g "$RUNNER_TEMP/output/ffmpeg" > "$RUNNER_TEMP/output/patched-symbols.txt"

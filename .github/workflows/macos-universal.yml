@@ -9,9 +9,12 @@ on:
 env:
   WEB_REF: a9ff07acbd4d85707b3e9b6400d0fd585d8b13a8
   RELEASE_VERSION: 0.1.0
+  FFMPEG_X64_BUILD_RUN_ID: "42052719596"
+  FFMPEG_ARM64_BUILD_RUN_ID: "42052719596"
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   native:
@@ -80,7 +83,7 @@ jobs:
   assemble:
     needs: [native, web]
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -94,11 +97,36 @@ jobs:
         with:
           name: web
           path: web
-      - name: Merge launcher and static FFmpeg slices, then assemble one app
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-teletext-x86_64
+          github-token: ${{ github.token }}
+          run-id: ${{ env.FFMPEG_BUILD_RUN_ID }}
+          path: components/ffmpeg-x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: "13429639242"
+          github-token: ${{ github.token }}
+          run-id: ${{ env.FFMPEG_BUILD_RUN_ID }}
+          path: components/ffmpeg-arm64
+      - name: Verify and stage pinned FFmpeg components and source kit
         run: |
           mkdir -p components/osx-x64 components/osx-arm64 universal/ffmpeg universal/materials
           tar -xf components/native-osx-x64/native.tar -C components/osx-x64
           tar -xf components/native-osx-arm64/native.tar -C components/osx-arm64
+          python apps/macos/release-materials.py \
+            --output universal/materials \
+            --web-ref "$WEB_REF" \
+            --runtime osx-x64=components/osx-x64 \
+            --runtime osx-arm64=components/osx-arm64 \
+            --ffmpeg-component osx-x64=components/ffmpeg-x86_64 \
+            --ffmpeg-component osx-arm64=components/ffmpeg-arm64 \
+            --ffmpeg-run-id "osx-x64=$FFMPEG_X64_BUILD_RUN_ID" \
+            --ffmpeg-run-id "osx-arm64=$FFMPEG_ARM64_BUILD_RUN_ID" \
+            --source-kit-output "universal/SlopTank-$RELEASE_VERSION-ffmpeg-corresponding-source.tar.gz" \
+            --version "$RELEASE_VERSION"
+      - name: Merge launcher and FFmpeg slices, then assemble one app
+        run: |
           lipo -create components/osx-x64/SlopTank components/osx-arm64/SlopTank -output universal/SlopTank
           for tool in ffmpeg ffprobe; do
             lipo -create "components/osx-x64/upstream/ffmpeg/$tool" "components/osx-arm64/upstream/ffmpeg/$tool" -output "universal/ffmpeg/$tool"
@@ -111,7 +139,6 @@ jobs:
           cp LICENSE* universal/materials/
           cp components/osx-x64/upstream/components.json universal/materials/components-osx-x64.json
           cp components/osx-arm64/upstream/components.json universal/materials/components-osx-arm64.json
-          python apps/macos/release-materials.py --output universal/materials --web-ref "$WEB_REF" --runtime osx-x64=components/osx-x64 --runtime osx-arm64=components/osx-arm64
           python apps/macos/assemble-app.py --launcher-binary universal/SlopTank --runtime osx-x64=components/osx-x64 --runtime osx-arm64=components/osx-arm64 --web-dir web --ffmpeg-dir universal/ffmpeg --intro-skipper-plugin components/osx-x64/upstream/IntroSkipper --release-materials-dir universal/materials --version "$RELEASE_VERSION" --build-number "$GITHUB_RUN_NUMBER" --output universal/SlopTank.app
           codesign --force --sign - universal/SlopTank.app
           python apps/macos/package-dmg.py --app universal/SlopTank.app --output universal/SlopTank.dmg --timeout-seconds 1200
@@ -123,6 +150,11 @@ jobs:
             universal/SlopTank.dmg
             universal/SlopTank.dmg.sha256
           retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-corresponding-source-kit
+          path: universal/SlopTank-${{ env.RELEASE_VERSION }}-ffmpeg-corresponding-source.tar.gz
+          retention-days: 14
 
   installed-smoke:
     needs: assemble
@@ -164,6 +196,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: candidate-dmg
+          path: candidate
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-corresponding-source-kit
           path: candidate
       - uses: actions/upload-artifact@v4
         with:

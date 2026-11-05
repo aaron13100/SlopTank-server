@@ -178,7 +178,7 @@ def build(output: Path, rid: str) -> None:
     license_sources = stage_preparation_licenses(output / "Preparation")
     (output / "Preparation/build-environment.txt").write_text(
         sys.version + "\n" + versions + "\nlicense-sources=" + json.dumps(license_sources) + "\n")
-    run([sys.executable, "apps/macos/fetch-components.py", "--rid", rid,
+    run([sys.executable, "apps/macos/fetch-components.py",
          "--output", str(output / "upstream")], root, 600)
     for component in ("jellyfin", "svg-rasterizer/svg-rasterizer"):
         run(["lipo", str(output / "Server" / component), "-verify_arch", expected_machine], root, 30)

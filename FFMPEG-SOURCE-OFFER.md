@@ -1,4 +1,4 @@
-<!-- SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09, 2026-10-14, 2026-10-31. -->
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-09-07, 2026-09-09, 2026-10-14, 2026-10-31, 2026-11-05. -->
 # FFmpeg corresponding source offer
 
 SlopTank distributions that include the macOS x86_64 FFmpeg binary described
@@ -53,6 +53,28 @@ for source availability. If a link fails, open an issue at
 the covered corresponding source through a network server at no charge. This
 offer remains valid for at least three years after SlopTank last conveys this
 binary, and for as long as SlopTank offers support for the product model.
+
+## Additional FFmpeg component planned for SlopTank 0.1.0
+
+The pending macOS 0.1.0 candidate uses Jellyfin FFmpeg `8.1.3-2` for x86_64
+and arm64, built from source commit
+`7250de8375a4959ac1c25c139ce9789fdac199fb`. Its pinned ZVBI source is
+`41477c97c8edf7a01f1594b2a95b94f0117eed21`, with the accompanying
+`ffmpeg-zvbi-subtitles-only.patch`. The patch removes the unused Teletext 8/30
+metadata handlers while retaining Teletext subtitle decoding and its initial
+page link.
+
+The corresponding source package is expected as the public release asset
+`SlopTank-0.1.0-ffmpeg-corresponding-source.tar.gz` at:
+
+<https://github.com/aaron13100/SlopTank-server/releases/download/v0.1.0/SlopTank-0.1.0-ffmpeg-corresponding-source.tar.gz>
+
+That package contains the exact FFmpeg and dependency source trees, build
+recipes, patch, per-architecture source pins and hashes, build records, the
+GNU GPL version 3 text, and the source license files. The candidate build
+artifact is not a published public release; the source asset must be published
+beside the matching DMG. `FFMPEG-SOURCE-ACCESS.txt` and `sources.json` in the
+application record the expected asset and the component hashes.
 
 ## Installing a rebuilt binary
 

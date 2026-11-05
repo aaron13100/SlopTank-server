@@ -111,7 +111,7 @@ jobs:
           cp LICENSE* universal/materials/
           cp components/osx-x64/upstream/components.json universal/materials/components-osx-x64.json
           cp components/osx-arm64/upstream/components.json universal/materials/components-osx-arm64.json
-          python apps/macos/release-materials.py --output universal/materials --web-ref "$WEB_REF"
+          python apps/macos/release-materials.py --output universal/materials --web-ref "$WEB_REF" --runtime osx-x64=components/osx-x64 --runtime osx-arm64=components/osx-arm64
           python apps/macos/assemble-app.py --launcher-binary universal/SlopTank --runtime osx-x64=components/osx-x64 --runtime osx-arm64=components/osx-arm64 --web-dir web --ffmpeg-dir universal/ffmpeg --intro-skipper-plugin components/osx-x64/upstream/IntroSkipper --release-materials-dir universal/materials --version "$RELEASE_VERSION" --build-number "$GITHUB_RUN_NUMBER" --output universal/SlopTank.app
           codesign --force --sign - universal/SlopTank.app
           python apps/macos/package-dmg.py --app universal/SlopTank.app --output universal/SlopTank.dmg --timeout-seconds 1200

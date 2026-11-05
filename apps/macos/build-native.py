@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05.
 """Build one native release tree from a public SlopTank-server source checkout."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
 import os
 import platform
@@ -12,7 +14,92 @@ import signal
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
+import urllib.request
+import zipfile
 from pathlib import Path
+from xml.etree import ElementTree
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "notices"))
+from sloptank_server_notice_metadata import _load_license_overrides, _shipped_nuget_packages
+from sloptank_server_notices import _third_party_notices_text
+
+
+def write_managed_notices(server: Path, cache: Path, corpus: Path, overrides: Path) -> None:
+    """Write notices from the actual server and converter dependency manifests."""
+    resolved = _load_license_overrides(overrides)
+    for directory in (server, server / "svg-rasterizer"):
+        notices = _third_party_notices_text(
+            _shipped_nuget_packages(directory), cache, corpus, resolved,
+            title=("SlopTank server - Third-Party Notices" if directory == server
+                   else "Standalone SVG converter - Third-Party Notices"))
+        (directory / "THIRD-PARTY-NOTICES.txt").write_text(notices, encoding="utf-8")
+
+
+def stage_managed_notices(server: Path) -> None:
+    """Use restored packages and official exact-version SDK runtime packages."""
+    origin = Path(os.environ.get("NUGET_PACKAGES", Path.home() / ".nuget/packages"))
+    packages = set(_shipped_nuget_packages(server) + _shipped_nuget_packages(server / "svg-rasterizer"))
+    with tempfile.TemporaryDirectory(prefix="sloptank-native-notices-") as name:
+        scratch = Path(name)
+        with tarfile.open(Path(__file__).parent / "license-inputs.tar.gz", "r:gz") as archive:
+            archive.extractall(scratch, filter="data")
+        cache = scratch / "packages"
+        for package, version in sorted(packages):
+            key = package.lower()
+            destination = cache / key / version
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            existing = origin / key / version
+            if existing.is_dir():
+                destination.symlink_to(existing, target_is_directory=True)
+            elif not key.startswith(("microsoft.netcore.app.runtime.", "microsoft.aspnetcore.app.runtime.")):
+                raise RuntimeError(f"missing restored NuGet package {package} {version}")
+            else:
+                url = f"https://api.nuget.org/v3-flatcontainer/{key}/{version}/{key}.{version}.nupkg"
+                with urllib.request.urlopen(url, timeout=120) as response:
+                    payload = response.read()
+                print(json.dumps({"nuget": package, "version": version,
+                                  "sha256": hashlib.sha256(payload).hexdigest()}), flush=True)
+                package_zip = scratch / "runtime.nupkg"
+                package_zip.write_bytes(payload)
+                destination.mkdir()
+                with zipfile.ZipFile(package_zip) as archive:
+                    archive.extractall(destination)
+            if not key.startswith(("microsoft.netcore.app.runtime.", "microsoft.aspnetcore.app.runtime.")):
+                continue
+            nuspec = destination / f"{key}.nuspec"
+            if not nuspec.exists():
+                matches = list(destination.glob("*.nuspec"))
+                if len(matches) != 1 or existing.is_dir():
+                    raise RuntimeError(f"missing runtime nuspec for {package} {version}")
+                matches[0].rename(nuspec)
+            metadata = ElementTree.parse(nuspec).getroot()
+            values = {node.tag.rsplit("}", 1)[-1]: (node.text or "").strip()
+                      for node in metadata.iter() if node.tag.rsplit("}", 1)[-1] in {"id", "version"}}
+            if values.get("id", "").casefold() != key or values.get("version") != version:
+                raise RuntimeError(f"runtime NuGet identity mismatch for {package} {version}")
+        write_managed_notices(server, cache, scratch / "license-texts", scratch / "overrides.json")
+
+
+def stage_preparation_licenses(preparation: Path) -> list[dict[str, str]]:
+    """Include the running Python and installed bootloader's exact-version terms."""
+    versions = (("PYTHON-LICENSE.txt", "python/cpython", platform.python_version(), "LICENSE"),
+                ("PYINSTALLER-LICENSE.txt", "pyinstaller/pyinstaller",
+                 importlib.metadata.version("pyinstaller"), "COPYING.txt"))
+    records = []
+    for filename, repository, version, source in versions:
+        url = f"https://raw.githubusercontent.com/{repository}/v{version}/{source}"
+        with urllib.request.urlopen(url, timeout=30) as response:
+            content = response.read()
+        if not content:
+            raise RuntimeError(f"empty license from {url}")
+        (preparation / filename).write_bytes(content)
+        record = {"license": filename, "version": version, "source": url,
+                  "sha256": hashlib.sha256(content).hexdigest()}
+        records.append(record)
+        print(json.dumps(record), flush=True)
+    return records
 
 
 def run(command: list[str], cwd: Path, timeout: int) -> None:
@@ -48,6 +135,7 @@ def build(output: Path, rid: str) -> None:
     run([dotnet, "publish", "Jellyfin.Server/Jellyfin.Server.csproj", "-c", "Release",
          "-r", rid, "--self-contained", "true", "--disable-build-servers", "-m:2",
          "-o", str(output / "Server")], root, 2400)
+    stage_managed_notices(output / "Server")
     sources = sorted(str(path) for path in (root / "apps/macos/Sources/SlopTank").glob("*.swift"))
     run(["xcrun", "swiftc", "-O", "-whole-module-optimization", "-target",
          f"{expected_machine}-apple-macosx12.0", *sources, "-o", str(output / "SlopTank")], root, 1200)
@@ -55,7 +143,9 @@ def build(output: Path, rid: str) -> None:
          "--distpath", str(output), "--workpath", str(output / "pyinstaller-work"),
          "apps/preparation/playback-preparation.spec"], root, 1200)
     versions = subprocess.check_output([sys.executable, "-m", "pip", "freeze"], text=True, timeout=30)
-    (output / "Preparation/build-environment.txt").write_text(sys.version + "\n" + versions)
+    license_sources = stage_preparation_licenses(output / "Preparation")
+    (output / "Preparation/build-environment.txt").write_text(
+        sys.version + "\n" + versions + "\nlicense-sources=" + json.dumps(license_sources) + "\n")
     run([sys.executable, "apps/macos/fetch-components.py", "--rid", rid,
          "--output", str(output / "upstream")], root, 600)
     for component in ("jellyfin", "svg-rasterizer/svg-rasterizer"):

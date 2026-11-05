@@ -1,9 +1,10 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05.
 #nullable disable
 #pragma warning disable CS1591
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -1141,13 +1142,19 @@ namespace MediaBrowser.MediaEncoding.Encoder
             TrySetProcessPriority(process);
         }
 
-        internal void TrySetProcessPriority(ProcessWrapper process)
+        internal void TrySetProcessPriority(ProcessWrapper process, Action<Process> setPriority = null)
         {
+            const int NoSuchProcess = 3; // ESRCH on macOS and Linux; Windows error 3 has a different meaning.
+            setPriority ??= static child => child.PriorityClass = ProcessPriorityClass.BelowNormal;
             if (_canSetProcessPriority)
             {
                 try
                 {
-                    process.Process.PriorityClass = ProcessPriorityClass.BelowNormal;
+                    setPriority(process.Process);
+                }
+                catch (Win32Exception ex) when ((OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()) && ex.NativeErrorCode == NoSuchProcess)
+                {
+                    _logger.LogDebug(ex, "Process exited before its priority could be lowered");
                 }
                 catch (Exception ex) when (process.Process.HasExited)
                 {

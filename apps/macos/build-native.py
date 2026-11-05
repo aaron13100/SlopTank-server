@@ -10,6 +10,7 @@ import importlib.metadata
 import json
 import os
 import platform
+import re
 import signal
 import shutil
 import subprocess
@@ -24,6 +25,31 @@ from xml.etree import ElementTree
 sys.path.insert(0, str(Path(__file__).resolve().parent / "notices"))
 from sloptank_server_notice_metadata import _load_license_overrides, _shipped_nuget_packages
 from sloptank_server_notices import _third_party_notices_text
+
+
+def managed_source_binding(package: str, version: str, cache: Path, overrides: dict) -> dict:
+    """Bind a shipped package to its declared or approved exact source."""
+    key = package.lower()
+    nuspec = cache / key / version / f"{key}.nuspec"
+    if not nuspec.is_file():
+        raise ValueError(f"missing source metadata for {package} {version}")
+    root = ElementTree.parse(nuspec).getroot()
+    repository = next((dict(node.attrib) for node in root.iter()
+                       if node.tag.rsplit("}", 1)[-1] == "repository"), {})
+    project_url = next(((node.text or "").strip() for node in root.iter()
+                        if node.tag.rsplit("}", 1)[-1] == "projectUrl"), "")
+    source = overrides.get(f"pkg:nuget/{package}@{version}".casefold())
+    if source is None:
+        url = repository.get("url") or project_url
+        if url == "https://go.microsoft.com/fwlink/?linkid=868515":
+            url = "https://github.com/mono/SkiaSharp"
+        commit = repository.get("commit", "")
+        if not url.startswith("https://") or not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+            raise ValueError(f"missing exact source binding for {package} {version}")
+        source = {"repository": url, "commit": commit,
+                  "binding": "package-commit" if repository.get("url") else "project-url-and-package-commit"}
+    return {"name": package, "version": version, "vendorRepository": repository,
+            "vendorProjectUrl": project_url or None, "source": source}
 
 
 def write_managed_notices(server: Path, cache: Path, corpus: Path, overrides: Path) -> None:
@@ -80,6 +106,12 @@ def stage_managed_notices(server: Path) -> None:
             if values.get("id", "").casefold() != key or values.get("version") != version:
                 raise RuntimeError(f"runtime NuGet identity mismatch for {package} {version}")
         write_managed_notices(server, cache, scratch / "license-texts", scratch / "overrides.json")
+        source_overrides = json.loads((scratch / "source-overrides.json").read_text(encoding="utf-8"))
+        bindings = [managed_source_binding(package, version, cache, source_overrides)
+                    for package, version in sorted(packages)]
+        (server / "source-locations.json").write_text(
+            json.dumps({"packages": bindings}, indent=2) + "\n", encoding="utf-8")
+        shutil.copy2(scratch / "sqlite-build-options.txt", server / "sqlite-build-options.txt")
 
 
 def stage_preparation_licenses(preparation: Path) -> list[dict[str, str]]:

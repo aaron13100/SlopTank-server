@@ -11,6 +11,7 @@ import json
 import re
 import shutil
 import subprocess
+import tarfile
 import urllib.request
 from pathlib import Path
 
@@ -108,7 +109,72 @@ def collect_preparation_sources(output: Path, runtimes: list[Path]) -> list[dict
     return records
 
 
-def collect(output: Path, web_ref: str, runtimes: list[Path]) -> None:
+def collect_managed_sources(output: Path, runtimes: dict[str, Path]) -> tuple[list[dict], list[dict]]:
+    """Retain actual source bindings and the LGPL replacement materials."""
+    graphs = []
+    packages = {}
+    for rid, runtime in sorted(runtimes.items()):
+        server = runtime / "Server"
+        data = json.loads((server / "source-locations.json").read_text(encoding="utf-8"))
+        if not isinstance(data.get("packages"), list) or not data["packages"]:
+            raise ValueError(f"missing managed source bindings for {rid}")
+        graphs.append({"rid": rid, "packages": data["packages"]})
+        for item in data["packages"]:
+            key = (item["name"].casefold(), item["version"])
+            if key in packages and packages[key]["source"] != item["source"]:
+                raise ValueError(f"conflicting managed source binding for {item['name']} {item['version']}")
+            packages[key] = item
+    kit = output / "managed-source-kit"
+    kit.mkdir()
+    archives = []
+    for name, version, repository, commit in (
+        ("BDInfo", "0.8.0", "jellyfin/BDInfo", "40d2c5be76f68096f7277b706ccaf23395ee6e6e"),
+        ("TagLibSharp", "2.3.0", "mono/taglib-sharp", "b5ae84f2e84087bf160bb0471420200dd2b5d809"),
+    ):
+        item = packages.get((name.casefold(), version))
+        if item is None or item["source"].get("commit") != commit:
+            raise ValueError(f"missing approved LGPL source binding for {name} {version}")
+        filename = f"{name}-{version}-{commit}.tar.gz"
+        url = f"https://codeload.github.com/{repository}/tar.gz/{commit}"
+        archives.append({"name": name, "version": version, "file": f"managed-source-kit/{filename}",
+                         "url": url, "sha256": _download(url, kit / filename)})
+    sqlite = packages.get(("sqlitepclraw.lib.e_sqlite3", "2.1.13"))
+    if sqlite is None:
+        raise ValueError("missing SQLite native source binding")
+    source = sqlite["source"]
+    sqlite_file = kit / "sqlite-amalgamation-3530300.zip"
+    _download(source["archive"], sqlite_file)
+    verify_source_checksum(sqlite_file, source["sha256"])
+    archives.append({"name": "SQLite", "version": "3.53.3", "file": f"managed-source-kit/{sqlite_file.name}",
+                     "url": source["archive"], "sha256": source["sha256"],
+                     "sourceId": source["sourceId"]})
+    option_files = [(runtime / "Server/sqlite-build-options.txt").read_bytes()
+                    for runtime in runtimes.values()]
+    if any(value != option_files[0] for value in option_files[1:]):
+        raise ValueError("runtime SQLite build options differ")
+    (kit / "sqlite-build-options.txt").write_bytes(option_files[0])
+    with tarfile.open(Path(__file__).parent / "license-inputs.tar.gz", "r:gz") as archive:
+        for license_name in ("LGPL-2.1-only", "LGPL-3.0-only"):
+            member = archive.extractfile(f"license-texts/{license_name}.txt")
+            if member is None:
+                raise ValueError(f"missing {license_name} license text")
+            (kit / f"{license_name}.txt").write_bytes(member.read())
+    (kit / "REBUILD-AND-RELINK.txt").write_text(
+        "Each managed source entry identifies its exact repository and commit or archive. "
+        "For Git sources use git clone, git checkout <commit>, and git submodule update --init --recursive.\n"
+        "Extract the supplied BDInfo and TagLibSharp archives. From each extracted root, "
+        "build src/BDInfo/BDInfo.csproj and src/TaglibSharp/TaglibSharp.csproj respectively "
+        "with a compatible .NET SDK. On a copy of the app, replace BDInfo.dll or "
+        "TagLibSharp.dll under Contents/Resources/Runtimes/<rid>/Server for the target "
+        "architecture, re-sign the copy, and test with isolated state. You may modify "
+        "these libraries and reverse engineer the combined work to debug your modifications.\n"
+        "SQLite source ID and observed compile options are supplied. Build the SQLite "
+        "amalgamation as libe_sqlite3 for the target architecture; the original native "
+        "package build invocation is unknown.\n", encoding="utf-8")
+    return graphs, archives
+
+
+def collect(output: Path, web_ref: str, runtimes: dict[str, Path]) -> None:
     """Record exact application sources and upstream source locations for review."""
     sources = {
         "intro-skipper-source.tar.gz": "https://github.com/intro-skipper/intro-skipper/archive/6e0cb179007ac4c16cd9f358e9a617e791e9bf06.tar.gz",
@@ -119,11 +185,14 @@ def collect(output: Path, web_ref: str, runtimes: list[Path]) -> None:
         with urllib.request.urlopen(url, timeout=120) as source, (output / name).open("xb") as target:
             shutil.copyfileobj(source, target)
     server_ref = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, timeout=30).strip()
+    managed_sources, managed_archives = collect_managed_sources(output, runtimes)
     (output / "sources.json").write_text(json.dumps({
         "serverAndInstaller": {"repository": "https://github.com/aaron13100/SlopTank-server", "commit": server_ref},
         "web": {"repository": "https://github.com/aaron13100/SlopTank", "commit": web_ref},
         "upstream": sources,
-        "preparationSources": collect_preparation_sources(output, runtimes),
+        "preparationSources": collect_preparation_sources(output, list(runtimes.values())),
+        "managedSources": managed_sources,
+        "managedSourceArchives": managed_archives,
     }, indent=2) + "\n")
     (output / "CANDIDATE.txt").write_text(
         "Workflow artifact only. Ad-hoc signed for native execution; not Developer ID signed or notarized.\n"
@@ -140,12 +209,14 @@ def main() -> None:
     parser.add_argument("--web-ref", required=True)
     parser.add_argument("--runtime", action="append", required=True, metavar="RID=DIR")
     args = parser.parse_args()
-    runtimes = []
+    runtimes = {}
     for value in args.runtime:
         rid, separator, directory = value.partition("=")
         if not separator or not re.fullmatch(r"osx-(?:x64|arm64)", rid) or not directory:
             parser.error("--runtime must be osx-x64=DIR or osx-arm64=DIR")
-        runtimes.append(Path(directory))
+        if rid in runtimes:
+            parser.error(f"duplicate runtime {rid}")
+        runtimes[rid] = Path(directory)
     collect(args.output, args.web_ref, runtimes)
 
 

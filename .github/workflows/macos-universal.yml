@@ -63,22 +63,15 @@ jobs:
     steps:
       - name: Require an exact public web source commit
         run: '[[ "$WEB_REF" =~ ^[0-9a-f]{40}$ ]]'
-      - uses: actions/checkout@v4
+      - name: Download the verified production web artifact
+        uses: actions/download-artifact@v4
         with:
-          repository: aaron13100/SlopTank
-          ref: ${{ env.WEB_REF }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - run: npm ci
-      - run: npm run build:production
-      - run: git archive HEAD -o dist/web-source.tar
-      - uses: actions/upload-artifact@v4
-        with:
-          name: web
+          artifact-ids: "13397342745"
+          github-token: ${{ github.token }}
+          run-id: "41988658833"
           path: dist
-          retention-days: 7
+      - name: Verify the included web source archive commit
+        run: test "$(git get-tar-commit-id dist/web-source.tar)" = "$WEB_REF"
 
   assemble:
     needs: [native, web]

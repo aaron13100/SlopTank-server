@@ -77,16 +77,8 @@ jobs:
             printf 'homebrew_version=%s\ncore_commit=%s\ncore_path=%s\n' \
               "$(brew --version | head -n 1)" "$(git -C "$core" rev-parse HEAD)" "$core"
             brew list --versions "${formulae[@]}"
-            for tool in wget svn autoconf automake cmake meson ninja pkg-config nproc make python3 glibtoolize gsed gtar nasm quilt makeinfo; do
-              printf '%s\t%s\n' "$tool" "$(command -v "$tool")"
-            done
-            printf 'coreutils_gnubin=%s\nmake_gnubin=%s\ngnu_sed_gnubin=%s\n' \
-              "$(brew --prefix coreutils)/libexec/gnubin" \
-              "$(brew --prefix make)/libexec/gnubin" \
-              "$(brew --prefix gnu-sed)/libexec/gnubin"
-            intel_path="$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix make)/libexec/gnubin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"
-            for tool in nproc make sed; do
-              printf 'effective_%s_path=%s\n' "$tool" "$(PATH="$intel_path" command -v "$tool")"
+            for tool in wget svn autoconf automake cmake meson ninja pkg-config nproc make python3 glibtoolize sed gsed gtar nasm quilt makeinfo cp install mkdir rm mv tar xargs stat readlink mktemp; do
+              printf '%s\t%s\n' "$tool" "$(command -v "$tool" || true)"
             done
           } > "$RUNNER_TEMP/output/homebrew-after.txt"
           shasum -a 256 "$RUNNER_TEMP/output/homebrew-before.txt" \

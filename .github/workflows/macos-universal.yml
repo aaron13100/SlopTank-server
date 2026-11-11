@@ -84,7 +84,12 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     steps:
+      # The corresponding-source kit reads the retained arm64 FFmpeg workflow from this
+      # repository's history (release-materials.py FFMPEG_LEGACY_WORKFLOW_COMMIT), which a
+      # shallow checkout does not contain.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

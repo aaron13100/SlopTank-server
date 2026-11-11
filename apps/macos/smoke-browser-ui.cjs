@@ -17,6 +17,12 @@ const path = require('node:path');
 const { chromium } = require('@playwright/test');
 
 const API_TIMEOUT_MS = 30000;
+// Playwright's default launch timeout is 30 s. Universal run 43107039540 on the
+// shared macos-15-intel GitHub VM started Google Chrome (pid logged) but had not
+// connected over the debugging pipe by then; the same image managed it in run
+// 43074003438. The browser step has a 600 s budget in smoke-installed-app.py, so
+// a cold first launch gets 180 s before the step fails.
+const BROWSER_LAUNCH_TIMEOUT_MS = 180000;
 const ITEM_POLL_MS = 120000;
 const SESSION_POLL_MS = 60000;
 
@@ -217,7 +223,7 @@ async function main() {
     };
 
     try {
-        browser = await chromium.launch({ channel: 'chrome', headless: true, timeout: 30000 });
+        browser = await chromium.launch({ channel: 'chrome', headless: true, timeout: BROWSER_LAUNCH_TIMEOUT_MS });
         receipt.browserVersion = browser.version();
         context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
         context.setDefaultTimeout(30000);

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05.
-"""Run the isolated installed-app acceptance journey against a SlopTank DMG.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11.
+"""Run backend API checks and optional GUI acceptance against a SlopTank DMG.
 
 Usage: python3 apps/macos/smoke-installed-app.py --dmg SlopTank.dmg \
     --work-dir "$(mktemp -d "${TMPDIR:-/private/tmp}/sloptank-smoke.XXXXXX")"
 
-The work directory retains logs, generated media, profile and a JSON receipt.
-Only the copied app is removed. The mounted image is always detached.
+The work directory retains logs, generated media, profiles and JSON receipts.
+The optional GUI journey is fail-closed to its authorized GitHub macOS guest.
+Only owned app copies are removed. The mounted image is always detached.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import json
 import os
 import platform
 import plistlib
+import shutil
 import signal
 import socket
 import subprocess
@@ -28,6 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Callable
 
@@ -234,6 +237,441 @@ def direct_range(base: str, token: str, item_id: str, media: Path, deadline: Dea
     return {"status": status, "content_range": content_range, "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
 
 
+def run_welcome_ui(app_pid: int, app_bundle: Path, home: Path, action: str,
+                   work: Path, deadline: Deadline, selected_root: Path | None = None) -> None:
+    """Use macOS accessibility only against the recorded launcher PID."""
+    script_config = {"pid": app_pid, "bundle": str(app_bundle), "home": str(home),
+                     "action": action, "selectedRoot": str(selected_root) if selected_root else None}
+    config_literal = json.dumps(script_config, ensure_ascii=False)
+    script = f'''ObjC.import("AppKit");
+var cfg = {config_literal};
+var current = Application.currentApplication();
+current.includeStandardAdditions = true;
+var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(cfg.pid);
+if (!app || ObjC.unwrap(app.isTerminated)) throw new Error("Owned SlopTank PID is not running.");
+var actualBundle = ObjC.unwrap(app.bundleURL.path);
+if (actualBundle !== cfg.bundle) throw new Error("PID bundle mismatch: " + actualBundle);
+var systemEvents = Application("System Events");
+var process = systemEvents.processes.whose({{ unixId: cfg.pid }})[0];
+if (!process || !process.exists()) throw new Error("System Events cannot see the owned PID.");
+process.frontmost = true;
+function delayBriefly() {{ current.delay(0.2); }}
+function findWindow(title) {{
+    var windows = process.windows;
+    for (var index = 0; index < windows.length; index++) {{
+        var candidate = windows[index];
+        if (candidate.exists() && candidate.name() === title) return candidate;
+    }}
+    return null;
+}}
+function waitForWindow(title, seconds) {{
+    var until = Date.now() + seconds * 1000;
+    while (Date.now() < until) {{
+        var candidate = findWindow(title);
+        if (candidate) return candidate;
+        delayBriefly();
+    }}
+    throw new Error("Timed out waiting for owned-app window: " + title);
+}}
+function waitForButton(window, title, seconds) {{
+    var until = Date.now() + seconds * 1000;
+    while (Date.now() < until) {{
+        try {{
+            var button = window.buttons.byName(title);
+            if (button.exists()) return button;
+        }} catch (_) {{}}
+        delayBriefly();
+    }}
+    throw new Error("Timed out waiting for button: " + title);
+}}
+var welcomeTitle = "Welcome to SlopTank";
+if (cfg.action === "assert-no-welcome") {{
+    var welcomeUntil = Date.now() + 2000;
+    while (Date.now() < welcomeUntil) {{
+        if (findWindow(welcomeTitle)) throw new Error("Welcome window reappeared after profile initialization.");
+        delayBriefly();
+    }}
+}} else {{
+    var welcome = waitForWindow(welcomeTitle, 30);
+    if (cfg.action === "choose-and-start") {{
+        if (!cfg.selectedRoot) throw new Error("Alternate data root was not supplied.");
+        waitForButton(welcome, "Use another drive...", 10).click();
+        var panel = waitForWindow("Choose Server Data Location", 20);
+        systemEvents.keystroke("g", {{ using: ["command down", "shift down"] }});
+        var sheet = null;
+        var sheetUntil = Date.now() + 10 * 1000;
+        while (Date.now() < sheetUntil) {{
+            if (panel.sheets.length > 0) {{ sheet = panel.sheets[0]; break; }}
+            delayBriefly();
+        }}
+        if (!sheet || !sheet.exists() || sheet.textFields.length === 0) {{
+            throw new Error("Go to Folder sheet did not expose its path field.");
+        }}
+        sheet.textFields[0].value = cfg.selectedRoot;
+        systemEvents.keyCode(36);
+        var useFolder = waitForButton(panel, "Use This Folder", 15);
+        useFolder.click();
+        welcome = waitForWindow(welcomeTitle, 10);
+        var shown = welcome.staticTexts().map(function (text) {{ return String(text.value()); }});
+        if (!shown.some(function (value) {{ return value.indexOf(cfg.selectedRoot) !== -1; }})) {{
+            throw new Error("Welcome window does not display the selected data root " + cfg.selectedRoot + ": " + JSON.stringify(shown));
+        }}
+    }} else if (cfg.action !== "start-default") {{
+        throw new Error("Unknown welcome action: " + cfg.action);
+    }}
+    waitForButton(welcome, "Start SlopTank", 10).click();
+}}
+'''
+    script_path = work / "welcome-ui.js"
+    script_path.write_text(script, encoding="utf-8")
+    run(["/usr/bin/osascript", "-l", "JavaScript", str(script_path)],
+        f"Run {action} against SlopTank PID {app_pid}", deadline, timeout=120)
+
+
+def _read_profile(home: Path) -> tuple[dict[str, Any], Path]:
+    profile_file = home / PROFILE_RELATIVE / "profile.json"
+    if not profile_file.is_file() or profile_file.is_symlink():
+        raise SmokeError(f"Launcher did not write a regular profile record under its isolated home: {profile_file}")
+    try:
+        profile = json.loads(profile_file.read_text(encoding="utf-8"))
+        selected_path = Path(profile["selectedRootPath"])
+        if selected_path.is_symlink():
+            raise SmokeError(f"Selected data root must not be a symlink: {selected_path}")
+        selected_root = selected_path.resolve(strict=True)
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        raise SmokeError(f"Could not read the initialized profile at {profile_file}: {error}") from error
+    if not profile_file.resolve().is_relative_to(home.resolve()) or not selected_root.is_dir():
+        raise SmokeError(f"Selected data root is not an owned real directory: {selected_root}")
+    return profile, selected_root
+
+
+def _wait_profile_ready(home: Path, process: subprocess.Popen[bytes],
+                        deadline: Deadline) -> tuple[dict[str, Any], Path]:
+    """Wait for the launcher to record a ready profile; its first startup completes asynchronously.
+
+    The Start button returns before the server is ready, and the launcher writes
+    startupCompleted only after readiness, so a single read races it.
+    """
+    last = "profile.json not written yet"
+    while deadline.remaining() > 0:
+        if process.poll() is not None:
+            raise SmokeError(f"Native app exited {process.returncode} before completing its profile initialization: {last}")
+        try:
+            profile, profile_root = _read_profile(home)
+        except SmokeError as error:
+            last = str(error)
+        else:
+            if profile.get("startupCompleted") is True and profile.get("initializationState") == "ready":
+                return profile, profile_root
+            last = f"profile not ready: {profile!r}"
+        time.sleep(min(POLL_SECONDS, max(0, deadline.remaining())))
+    raise SmokeError(f"Launcher did not complete its profile initialization before the deadline: {last}")
+
+
+def _profile_port(profile_root: Path) -> int:
+    network_file = profile_root / "Configuration/network.xml"
+    try:
+        root = ET.parse(network_file).getroot()
+        port = int(root.findtext("InternalHttpPort", ""))
+    except (OSError, ValueError, ET.ParseError) as error:
+        raise SmokeError(f"Could not read the launcher-created network configuration {network_file}: {error}") from error
+    if not 1024 <= port <= 65535:
+        raise SmokeError(f"Launcher-created server port is invalid: {port}")
+    return port
+
+
+def _make_isolated_environment(home: Path) -> dict[str, str]:
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(("JELLYFIN_", "SLOPTANK_", "DOTNET_"))}
+    temporary = home / "tmp"
+    temporary.mkdir(mode=0o700, parents=True, exist_ok=True)
+    environment.update({"PATH": SYSTEM_PATH, "HOME": str(home), "CFFIXED_USER_HOME": str(home),
+                        "TMPDIR": str(temporary)})
+    return environment
+
+
+def _user_defaults_key_present(bundle_id: str, environment: dict[str, str], deadline: Deadline) -> bool:
+    result = run(["/usr/bin/defaults", "read", bundle_id, "serverDataRootBookmark"],
+                 f"Inspect isolated UserDefaults bookmark for {bundle_id}", deadline,
+                 timeout=10, check=False, env=environment)
+    return result.returncode == 0
+
+
+def _isolated_bookmark_file(home: Path, bundle_id: str, deadline: Deadline) -> Path:
+    candidates = (
+        home / "Library/Preferences" / f"{bundle_id}.plist",
+        home / "Library/Containers" / bundle_id / "Data/Library/Preferences" / f"{bundle_id}.plist",
+    )
+    wait_until = min(deadline.at, time.monotonic() + load_scaled_timeout(10))
+    while time.monotonic() < wait_until:
+        for candidate in candidates:
+            if not candidate.is_symlink() and candidate.is_file():
+                try:
+                    values = plistlib.loads(candidate.read_bytes())
+                except (OSError, plistlib.InvalidFileException) as error:
+                    raise SmokeError(f"Could not read the isolated app preferences plist {candidate}: {error}") from error
+                if isinstance(values, dict) and values.get("serverDataRootBookmark"):
+                    return candidate
+        time.sleep(min(0.2, max(0, wait_until - time.monotonic())))
+    raise SmokeError(f"Selected data bookmark was not persisted inside isolated HOME {home}.")
+
+
+def _run_browser_wizard(base_url: str, media_directory: Path, media: Path, library_name: str,
+                        admin_name: str, admin_password: str, node: str, work: Path,
+                        environment: dict[str, str], deadline: Deadline) -> dict[str, Any]:
+    module_dir = os.environ.get("SLOPTANK_PLAYWRIGHT_NODE_MODULES")
+    if not module_dir or not Path(module_dir).is_dir():
+        raise SmokeError("Pinned Playwright module directory is missing; interactive acceptance cannot continue.")
+    config_path = work / "browser-config.json"
+    write_json(config_path, {"baseUrl": base_url, "mediaDirectory": str(media_directory),
+                             "mediaName": media.name, "mediaTitle": media.stem, "mediaPath": str(media),
+                             "libraryName": library_name, "adminName": admin_name,
+                             "adminPassword": admin_password, "workDir": str(work)})
+    config_path.chmod(0o600)
+    try:
+        result = run([node, str(Path(__file__).with_name("smoke-browser-ui.cjs")), str(config_path)],
+                     "Complete browser setup, add the scratch library and decode its video", deadline,
+                     timeout=600, env=environment)
+    finally:
+        config_path.unlink(missing_ok=True)
+    receipt_path = work / "browser-journey.json"
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise SmokeError(f"Browser driver did not write a valid receipt (exit {result.returncode}): {error}") from error
+    if result.returncode or receipt.get("status") != "passed":
+        raise SmokeError(f"Browser acceptance failed: {result.stderr[-2000:]} {receipt.get('error', '')}")
+    return receipt
+
+
+def run_gui_acceptance(source_app: Path, copied_app: Path, work: Path, media_directory: Path,
+                       media: Path, expected_rid: str, live: dict[str, Any],
+                       journeys: dict[str, Any], deadline: Deadline) -> dict[str, Any]:
+    """Exercise the default and alternate native welcome paths in separate homes."""
+    if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_OS") != "macOS" or not os.environ.get("GITHUB_RUN_ID"):
+        raise SmokeError("Interactive acceptance is allowed only inside its authorized GitHub macOS guest.")
+    if not shutil.which("node"):
+        raise SmokeError("Node.js is unavailable for the pinned browser acceptance driver.")
+    if not os.environ.get("SLOPTANK_PLAYWRIGHT_NODE_MODULES"):
+        raise SmokeError("SLOPTANK_PLAYWRIGHT_NODE_MODULES is required for GUI acceptance.")
+
+    node = shutil.which("node")
+    node_bin_dir = Path(node).resolve().parent
+    executable = copied_app / "Contents/MacOS/SlopTank"
+    bundle_info = plistlib.loads((copied_app / "Contents/Info.plist").read_bytes())
+    bundle_id = bundle_info.get("CFBundleIdentifier")
+    if not isinstance(bundle_id, str) or not bundle_id:
+        raise SmokeError("Installed app Info.plist omitted CFBundleIdentifier.")
+    journeys.update({"scope": "GitHub macOS guest only", "status": "running",
+                     "bundle_id": bundle_id, "runtime_id": expected_rid})
+    media_directory = media_directory.resolve(strict=True)
+    media = media.resolve(strict=True)
+    if not media.is_file() or not media.is_relative_to(media_directory):
+        raise SmokeError(f"The GUI media fixture must be inside the owned media directory: {media}")
+    app_log: Path | None = None
+
+    def launch_journey(name: str, home: Path, action: str, selected_root: Path | None = None) -> tuple[subprocess.Popen[bytes], dict[str, Any], Path, int, dict[str, Any], dict[str, str], dict[str, Any]]:
+        nonlocal app_log
+        home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        support = home / PROFILE_RELATIVE
+        if support.exists() or support.is_symlink():
+            raise SmokeError(f"GUI journey must start with an empty isolated home: {support}")
+        if selected_root is not None:
+            selected_root.mkdir(mode=0o700, parents=True)
+            if any(selected_root.iterdir()):
+                raise SmokeError(f"Alternate data folder must be empty before selection: {selected_root}")
+        environment = _make_isolated_environment(home)
+        if _user_defaults_key_present(bundle_id, environment, deadline):
+            raise SmokeError(f"Isolated GUI home already contains a data-root bookmark: {home}")
+        app_log = work / name / "native-app.log"
+        app_log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        expected_root = selected_root or home / PROFILE_RELATIVE / "ServerProfile"
+        journey_key = "default_root" if name == "gui-default" else "alternate_root"
+        journeys[journey_key].update({"native_app_log": str(app_log),
+                                      "server_log": str(expected_root / "Logs/server.log"),
+                                      "welcome_control": str(work / name / "welcome-ui.js")})
+        process = launch_app(executable, environment, app_log)
+        live.update({"process": process, "child": None, "data_path": expected_root / "Data",
+                     "server_log": expected_root / "Logs/server.log", "home": home, "app_log": app_log})
+        run_welcome_ui(process.pid, copied_app, home, action, work / name, deadline, selected_root)
+        profile, profile_root = _wait_profile_ready(home, process, deadline)
+        if selected_root is not None and profile_root != selected_root.resolve(strict=True):
+            raise SmokeError(f"Welcome chooser selected {selected_root}, profile records {profile_root}.")
+        if selected_root is None and profile_root != (home / PROFILE_RELATIVE / "ServerProfile").resolve():
+            raise SmokeError(f"Default welcome flow did not keep its normal data root: {profile_root}")
+        data_path = profile_root / "Data"
+        server_log = profile_root / "Logs/server.log"
+        port = _profile_port(profile_root)
+        child = server_child(process.pid, copied_app, data_path, expected_rid, deadline)
+        live.update({"process": process, "child": child, "data_path": data_path,
+                     "server_log": server_log, "home": home, "app_log": app_log})
+        info = public_info(f"http://127.0.0.1:{port}", deadline, process)
+        if info.get("StartupWizardCompleted") is not False:
+            raise SmokeError(f"Fresh UI journey should begin at the real browser wizard: {info!r}")
+        return process, profile, profile_root, port, child, environment, info
+
+    def quit_journey(process: subprocess.Popen[bytes], port: int) -> None:
+        quit_app(process, work, port, deadline)
+        live.update({"process": None, "child": None, "data_path": None, "server_log": None,
+                     "home": None, "app_log": None})
+
+    default_home = work / "gui-default/isolated-home"
+    default_work = work / "gui-default"
+    journeys["default_root"] = {"status": "running", "welcome_action": "Start SlopTank"}
+    default_process, default_profile, default_root, default_port, default_child, default_env, default_info = launch_journey(
+        "gui-default", default_home, "start-default")
+    default_server_id = str(default_info["Id"])
+    journeys["default_root"].update({"server_log": str(default_root / "Logs/server.log")})
+    if _user_defaults_key_present(bundle_id, default_env, deadline):
+        raise SmokeError("The normal default-root journey unexpectedly stored a location bookmark.")
+    default_base = f"http://127.0.0.1:{default_port}"
+    browser_env = dict(default_env)
+    browser_env["NODE_PATH"] = os.environ["SLOPTANK_PLAYWRIGHT_NODE_MODULES"]
+    browser_env["PATH"] = SYSTEM_PATH + os.pathsep + str(node_bin_dir)
+    browser_receipt = _run_browser_wizard(default_base, media_directory, media, "Smoke Movies",
+                                          ADMIN_NAME, ADMIN_PASSWORD, node, default_work, browser_env, deadline)
+    token, user_id = authenticate(default_base, deadline)
+    item_query = urllib.parse.urlencode({"Recursive": "true", "IncludeItemTypes": "Movie", "Fields": "Path"})
+    items = json_api(default_base, "GET", "/Items?" + item_query, deadline, token=token).get("Items", [])
+    media_items = [row for row in items if isinstance(row, dict)
+                   and Path(str(row.get("Path", ""))).resolve() == media]
+    if len(media_items) != 1:
+        raise SmokeError(f"Browser wizard did not create exactly one library item for {media}: {media_items!r}")
+    item_id = str(media_items[0].get("Id"))
+    playback_report = browser_receipt.get("serverPlaybackReport")
+    if (browser_receipt.get("itemId") != item_id or not isinstance(playback_report, dict)
+            or playback_report.get("nowPlayingItemId") != item_id):
+        raise SmokeError(f"Browser journey did not play the expected library item {item_id}: {browser_receipt!r}")
+    user_data = json_api(default_base, "GET", f"/Users/{user_id}/Items/{item_id}", deadline, token=token).get("UserData")
+    if not isinstance(user_data, dict) or int(user_data.get("PlayCount") or 0) < 1:
+        raise SmokeError(f"Server recorded no playback start for the UI-played item {item_id}: {user_data!r}")
+    default_profile_id = default_profile.get("profileID")
+    if not default_profile_id:
+        raise SmokeError("Default welcome journey did not record its private profile ID.")
+    journeys["default_root"].update({"profile": str(default_root), "profile_id": default_profile_id,
+                                     "server_id": default_info["Id"], "browser": browser_receipt,
+                                     "admin_user_id": user_id, "library_item_id": item_id,
+                                     "server_playback": {"play_count": user_data.get("PlayCount"),
+                                                         "last_played_date": user_data.get("LastPlayedDate"),
+                                                         "session_report": playback_report},
+                                     "backend_api_coverage": "API confirms UI-created account/library item and its playback start",
+                                     "user_defaults_bookmark_present": False})
+    quit_journey(default_process, default_port)
+
+    replacement = copied_app.with_name("SlopTank.replacement.app")
+    previous = copied_app.with_name("SlopTank.previous.app")
+    if replacement.exists() or replacement.is_symlink() or previous.exists() or previous.is_symlink():
+        raise SmokeError("Owned app replacement paths are unexpectedly occupied.")
+    run(["/usr/bin/ditto", str(source_app), str(replacement)],
+        "Copy the same-candidate app bundle for stopped-app replacement", deadline, timeout=480)
+    os.replace(copied_app, previous)
+    try:
+        os.replace(replacement, copied_app)
+    except OSError:
+        os.replace(previous, copied_app)
+        raise
+    run([sys.executable, "-c", "import shutil,sys; shutil.rmtree(sys.argv[1])", str(previous)],
+        "Remove the owned old same-version app copy after replacement", deadline, timeout=120)
+
+    replacement_env = _make_isolated_environment(default_home)
+    default_process = launch_app(executable, replacement_env, work / "gui-default/replacement-app.log")
+    live.update({"process": default_process, "child": None, "data_path": None,
+                 "server_log": None, "home": default_home, "app_log": work / "gui-default/replacement-app.log"})
+    profile_after, root_after = _read_profile(default_home)
+    if profile_after.get("profileID") != default_profile_id or root_after != default_root:
+        raise SmokeError("Same-version replacement changed the default profile identity or data root.")
+    default_data = root_after / "Data"
+    default_log = root_after / "Logs/server.log"
+    default_port = _profile_port(root_after)
+    default_child = server_child(default_process.pid, copied_app, default_data, expected_rid, deadline)
+    live.update({"process": default_process, "child": default_child, "data_path": default_data,
+                 "server_log": default_log, "home": default_home, "app_log": work / "gui-default/replacement-app.log"})
+    journeys["default_root"]["replacement_app_log"] = str(work / "gui-default/replacement-app.log")
+    default_info = public_info(f"http://127.0.0.1:{default_port}", deadline, default_process)
+    run_welcome_ui(default_process.pid, copied_app, default_home, "assert-no-welcome", work / "gui-default", deadline)
+    if default_info.get("Id") != default_server_id:
+        raise SmokeError(f"Same-version replacement changed the server identity: {default_server_id!r} -> {default_info.get('Id')!r}")
+    if default_info.get("StartupWizardCompleted") is not True:
+        raise SmokeError(f"Same-version replacement did not preserve completed web setup: {default_info!r}")
+    replacement_token, replacement_user = authenticate(f"http://127.0.0.1:{default_port}", deadline)
+    retained = json_api(f"http://127.0.0.1:{default_port}", "GET", "/Items?" + item_query,
+                        deadline, token=replacement_token).get("Items", [])
+    if replacement_user != user_id or not any(isinstance(row, dict) and str(row.get("Id")) == item_id for row in retained):
+        raise SmokeError("Same-version app replacement did not preserve the admin and UI-created library item.")
+    if not media.is_file():
+        raise SmokeError("Same-version app replacement removed the retained scratch media.")
+    journeys["default_root"]["same_version_replacement"] = {
+        "profile_id": profile_after.get("profileID"), "selected_root": str(root_after),
+        "server_id": default_info.get("Id"), "admin_user_id": replacement_user,
+        "library_item_retained": True, "media_retained": True, "welcome_reappeared": False
+    }
+    quit_journey(default_process, default_port)
+
+    alternate_home = work / "gui-alternate/isolated-home"
+    alternate_root = work / "gui-alternate/empty-server-data"
+    journeys["alternate_root"] = {"status": "running", "welcome_action": "choose empty alternate folder, then Start SlopTank"}
+    alternate_process, alternate_profile, actual_alternate_root, alternate_port, alternate_child, alternate_env, alternate_info = launch_journey(
+        "gui-alternate", alternate_home, "choose-and-start", alternate_root)
+    journeys["alternate_root"].update({"native_app_log": str(app_log),
+                                       "server_log": str(actual_alternate_root / "Logs/server.log"),
+                                       "welcome_control": str(work / "gui-alternate/welcome-ui.js")})
+    alternate_base = f"http://127.0.0.1:{alternate_port}"
+    alternate_profile_id = alternate_profile.get("profileID")
+    if not alternate_profile_id or not (actual_alternate_root / ".sloptank-profile").is_file():
+        raise SmokeError("Alternate-root welcome journey did not persist its profile marker and identity.")
+    if not _user_defaults_key_present(bundle_id, alternate_env, deadline):
+        raise SmokeError("Alternate data-root bookmark is not readable in its isolated UserDefaults domain.")
+    journeys["alternate_root"].update({"selected_root": str(actual_alternate_root),
+                                      "profile_id": alternate_profile_id, "server_id": alternate_info["Id"],
+                                      "user_defaults_bookmark_present": True,
+                                      "browser_setup": "intentionally not repeated on this second fresh profile"})
+    quit_journey(alternate_process, alternate_port)
+    preferences_file = _isolated_bookmark_file(alternate_home, bundle_id, deadline)
+    journeys["alternate_root"]["isolated_preferences_file"] = str(preferences_file)
+
+    alternate_env = _make_isolated_environment(alternate_home)
+    alternate_process = launch_app(executable, alternate_env, work / "gui-alternate/relaunch-app.log")
+    live.update({"process": alternate_process, "child": None, "data_path": None,
+                 "server_log": None, "home": alternate_home, "app_log": work / "gui-alternate/relaunch-app.log"})
+    alternate_after, alternate_root_after = _read_profile(alternate_home)
+    if alternate_after.get("profileID") != alternate_profile_id or alternate_root_after != actual_alternate_root:
+        raise SmokeError("Alternate-root relaunch changed the selected folder or profile identity.")
+    alternate_data = alternate_root_after / "Data"
+    alternate_log = alternate_root_after / "Logs/server.log"
+    alternate_port = _profile_port(alternate_root_after)
+    alternate_child = server_child(alternate_process.pid, copied_app, alternate_data, expected_rid, deadline)
+    live.update({"process": alternate_process, "child": alternate_child, "data_path": alternate_data,
+                 "server_log": alternate_log, "home": alternate_home,
+                 "app_log": work / "gui-alternate/relaunch-app.log"})
+    journeys["alternate_root"]["relaunch_app_log"] = str(work / "gui-alternate/relaunch-app.log")
+    alternate_after_info = public_info(f"http://127.0.0.1:{alternate_port}", deadline, alternate_process)
+    run_welcome_ui(alternate_process.pid, copied_app, alternate_home, "assert-no-welcome",
+                   work / "gui-alternate", deadline)
+    if alternate_after_info.get("Id") != alternate_info.get("Id") or alternate_after_info.get("StartupWizardCompleted") is not False:
+        raise SmokeError("Alternate-root relaunch did not preserve its running server identity and pending browser wizard.")
+    if not _user_defaults_key_present(bundle_id, alternate_env, deadline):
+        raise SmokeError("Alternate data-root bookmark disappeared after launcher restart.")
+    journeys["alternate_root"]["relaunch"] = {
+        "selected_root": str(alternate_root_after), "profile_id": alternate_after.get("profileID"),
+        "server_id": alternate_after_info.get("Id"), "server_data_path": str(alternate_data),
+        "welcome_reappeared": False, "wizard_remains_pending": True
+    }
+    quit_journey(alternate_process, alternate_port)
+    retained_profiles = {
+        "default": (default_home / PROFILE_RELATIVE / "profile.json").is_file() and default_root.is_dir(),
+        "alternate": (alternate_home / PROFILE_RELATIVE / "profile.json").is_file()
+        and alternate_root_after.is_dir(),
+        "media": media.is_file(),
+    }
+    if not all(retained_profiles.values()):
+        raise SmokeError(f"A GUI journey did not retain its isolated profile or scratch media: {retained_profiles!r}")
+    journeys["retained_after_both_journeys"] = retained_profiles
+    journeys["alternate_root"]["status"] = "passed"
+    journeys["default_root"]["status"] = "passed"
+    journeys["status"] = "passed"
+    return journeys
+
+
 def server_child(app_pid: int, app_bundle: Path, profile_data: Path, expected_rid: str,
                  deadline: Deadline) -> dict[str, Any]:
     """Identify and verify the launcher-owned server child and native runtime."""
@@ -354,6 +792,83 @@ def owned_server_alive(child: dict[str, Any], profile_data: Path, deadline: Dead
         time.sleep(min(POLL_SECONDS, max(0, wait_until - time.monotonic())))
 
 
+def bundle_processes(copied_app: Path, deadline: Deadline) -> list[dict[str, Any]]:
+    """List live processes executing from the owned app copy, whatever their ancestry.
+
+    A server whose launcher died is re-parented to launchd and a worker it spawned is a
+    grandchild, so a parent-PID walk misses exactly the processes that make removing the
+    bundle unsafe. Matching the executable path covers both; zombies hold no executable.
+    """
+    listing = run(["/bin/ps", "-axww", "-o", "pid=", "-o", "stat=", "-o", "command="],
+                  "List processes for owned bundle cleanup", deadline, timeout=10)
+    prefix = str(copied_app) + "/"
+    found = []
+    for row in listing.stdout.splitlines():
+        parts = row.strip().split(None, 2)
+        if len(parts) < 3 or not parts[0].isdigit() or parts[1].startswith("Z"):
+            continue
+        if parts[2].startswith(prefix):
+            found.append({"pid": int(parts[0]), "state": parts[1], "command": parts[2][:300]})
+    return found
+
+
+def stop_owned_processes(app: subprocess.Popen[bytes] | None, child: dict[str, Any] | None,
+                         data_path: Path | None, copied_app: Path | None,
+                         receipt: dict[str, Any], deadline: Deadline) -> bool:
+    """Stop the launcher, its recorded server and anything else running from the owned bundle.
+
+    Returns True only when the launcher has exited and no process executes from the bundle,
+    so a failure before the server child was identified never counts as "nothing running".
+    """
+    cleanup = receipt.setdefault("cleanup", [])
+    remaining: list[dict[str, Any]] = []
+    # Cleanup most often runs because the overall deadline expired, so it gets its own grace period.
+    grace = Deadline(60.0)
+    try:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            targets: dict[int, str] = {}
+            if child is not None and data_path is not None:
+                try:
+                    if owned_server_alive(child, data_path, grace):
+                        targets[int(child["pid"])] = "server_pid"
+                except (OSError, SmokeError) as error:
+                    receipt["cleanup_errors"].append(f"Could not inspect recorded server PID {child['pid']}: {error}")
+            if copied_app is not None:
+                for row in bundle_processes(copied_app, grace):
+                    targets.setdefault(row["pid"], "bundle_pid")
+            if app is not None and app.poll() is None:
+                targets[app.pid] = "app_pid"
+            for pid, role in targets.items():
+                try:
+                    os.kill(pid, sig)
+                    cleanup.append({role: pid, "signal": sig.name})
+                except ProcessLookupError:
+                    cleanup.append({role: pid, "already_stopped": True})
+                except OSError as error:
+                    receipt["cleanup_errors"].append(f"Could not signal {role} {pid}: {error}")
+            end = min(grace.at, time.monotonic() + 5)
+            while True:
+                remaining = bundle_processes(copied_app, grace) if copied_app is not None else []
+                if not remaining and (app is None or app.poll() is not None):
+                    return True
+                if time.monotonic() >= end:
+                    break
+                time.sleep(min(0.2, max(0, end - time.monotonic())))
+        receipt["cleanup_errors"].append(
+            f"Owned processes still running after SIGKILL: app_running={app is not None and app.poll() is None}, "
+            f"bundle={remaining!r}")
+        return False
+    except Exception as error:
+        receipt["cleanup_errors"].append(f"Could not verify owned process cleanup: {error}")
+        return False
+    finally:
+        if app is not None:
+            try:
+                app.poll()  # Reap the launcher even when it has already become a zombie.
+            except OSError as error:
+                receipt["cleanup_errors"].append(f"Could not reap app PID {app.pid}: {error}")
+
+
 def launch_app(executable: Path, environment: dict[str, str], log_path: Path) -> subprocess.Popen[bytes]:
     with log_path.open("ab", buffering=0) as log:
         return subprocess.Popen([str(executable)], cwd=str(executable.parent), env=environment,
@@ -366,9 +881,20 @@ def main() -> int:
     parser.add_argument("--dmg", required=True, type=Path)
     parser.add_argument("--work-dir", required=True, type=Path)
     parser.add_argument("--timeout-seconds", type=int, default=1200, help="One deadline for the full journey and cleanup; default 1200")
+    parser.add_argument("--gui-acceptance", action="store_true",
+                        help="Also run PID-scoped native welcome and real browser journeys; GitHub macOS guest only")
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("This installed-app smoke runs only on macOS.")
+    if args.gui_acceptance and not (
+            os.environ.get("GITHUB_ACTIONS") == "true"
+            and os.environ.get("RUNNER_OS") == "macOS"
+            and os.environ.get("GITHUB_RUN_ID")):
+        parser.error("--gui-acceptance is permitted only inside the authorized GitHub macOS guest.")
+    if args.gui_acceptance and not os.environ.get("SLOPTANK_PLAYWRIGHT_NODE_MODULES"):
+        parser.error("--gui-acceptance requires the pinned SLOPTANK_PLAYWRIGHT_NODE_MODULES installation.")
+    if args.gui_acceptance and not Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome").is_file():
+        parser.error("--gui-acceptance requires the runner's installed Google Chrome browser.")
     if args.timeout_seconds < 300:
         parser.error("--timeout-seconds must be at least 300")
     dmg = args.dmg.expanduser().absolute()
@@ -395,7 +921,8 @@ def main() -> int:
     receipt: dict[str, Any] = {"schemaVersion": 1, "type": "sloptank-installed-app-smoke",
                                "status": "running", "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                                "dmg": str(dmg), "work_dir": str(work), "timeout_seconds": args.timeout_seconds,
-                               "machine": platform.machine(), "cleanup_errors": []}
+                               "machine": platform.machine(), "cleanup_errors": [],
+                               "coverage": ["backend-api"] + (["native-welcome-and-browser-ui"] if args.gui_acceptance else [])}
     mounts = work / "mounts"
     apps = work / "Applications"
     home = work / "isolated-home"
@@ -407,6 +934,7 @@ def main() -> int:
     copied_app: Path | None = None
     process: subprocess.Popen[bytes] | None = None
     child: dict[str, Any] | None = None
+    gui_live: dict[str, Any] = {}
     profile: dict[str, Path | str] | None = None
     media: Path | None = None
     result_code = 1
@@ -503,11 +1031,16 @@ def main() -> int:
         run([str(ffmpeg), "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
              "-f", "lavfi", "-i", "color=c=black:s=320x180:r=24",
              "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000",
-             "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
-             "-movflags", "+faststart", "-shortest", str(media)],
+             "-t", "12", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "24", "-keyint_min", "24",
+             "-c:a", "aac", "-movflags", "+faststart", "-shortest", str(media)],
             "Generate H.264/AAC MP4 with bundled ffmpeg", operations, timeout=90)
         receipt["media"] = {"path": str(media), "size_bytes": media.stat().st_size,
                             "sha256": hashlib.sha256(media.read_bytes()).hexdigest()}
+
+        if args.gui_acceptance:
+            receipt["gui_acceptance"] = {"status": "running", "journeys": ["default-root", "alternate-empty-root"]}
+            receipt["gui_acceptance"] = run_gui_acceptance(source_app, copied_app, work, media_dir, media,
+                                                           expected_rid, gui_live, receipt["gui_acceptance"], operations)
 
         unready = media_dir / UNREADY_NAME
         run([str(ffmpeg), "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
@@ -608,6 +1141,13 @@ def main() -> int:
                                "server_process": child}
         process = None
 
+        receipt["backend_api_coverage"] = {
+            "status": "passed",
+            "description": "Noninteractive server/API and native-helper coverage; does not substitute for GUI acceptance.",
+            "checks": ["startup setup API", "library registration and refresh API", "direct stream Range response",
+                       "preparation worker conversion and retained original", "normal quit and relaunch persistence"]
+        }
+
         run([sys.executable, "-c", "import shutil,sys; shutil.rmtree(sys.argv[1])", str(copied_app)],
             "Remove only the copied app", operations, timeout=60)
         receipt["app_removed"] = not copied_app.exists()
@@ -622,47 +1162,13 @@ def main() -> int:
         receipt["error"] = {"type": type(error).__name__, "message": str(error)}
         receipt["traceback"] = traceback.format_exc()
     finally:
-        if process is not None and receipt["status"] != "passed":
-            owned_processes_stopped = False
-            try:
-                for sig in (signal.SIGTERM, signal.SIGKILL):
-                    if child is not None:
-                        try:
-                            if owned_server_alive(child, data_path, deadline):
-                                os.kill(child["pid"], sig)
-                                receipt.setdefault("cleanup", []).append({"server_pid": child["pid"], "signal": sig.name})
-                        except ProcessLookupError:
-                            receipt.setdefault("cleanup", []).append({"server_pid": child["pid"], "already_stopped": True})
-                        except (OSError, SmokeError) as error:
-                            receipt["cleanup_errors"].append(f"Could not inspect or signal server PID {child['pid']}: {error}")
-                    if process.poll() is None:
-                        try:
-                            process.send_signal(sig)
-                            receipt.setdefault("cleanup", []).append({"app_pid": process.pid, "signal": sig.name})
-                        except ProcessLookupError:
-                            receipt.setdefault("cleanup", []).append({"app_pid": process.pid, "already_stopped": True})
-                        except OSError as error:
-                            receipt["cleanup_errors"].append(f"Could not signal app PID {process.pid}: {error}")
-                    try:
-                        end = min(deadline.at, time.monotonic() + 5)
-                        while time.monotonic() < end:
-                            if process.poll() is not None and child is not None and not owned_server_alive(child, data_path, deadline):
-                                break
-                            time.sleep(min(0.2, max(0, end - time.monotonic())))
-                        if process.poll() is not None and child is not None and not owned_server_alive(child, data_path, deadline):
-                            owned_processes_stopped = True
-                            break
-                    except (OSError, SmokeError) as error:
-                        receipt["cleanup_errors"].append(f"Could not verify server shutdown after {sig.name}: {error}")
-                if not owned_processes_stopped:
-                    receipt["cleanup_errors"].append("Could not confirm that the owned app and recorded server stopped; retained app.")
-            except Exception as error:
-                receipt["cleanup_errors"].append(f"Could not verify owned process cleanup: {error}")
-            try:
-                process.poll()  # Reap the launcher even when it has already become a zombie.
-            except OSError as error:
-                receipt["cleanup_errors"].append(f"Could not reap app PID {process.pid}: {error}")
-        if copied_app is not None and copied_app.exists() and owned_processes_stopped and (process is None or process.poll() is not None):
+        active_process = process if process is not None else gui_live.get("process")
+        active_child = child if child is not None else gui_live.get("child")
+        active_data_path = data_path if process is not None else gui_live.get("data_path")
+        if receipt["status"] != "passed" and (active_process is not None or copied_app is not None):
+            owned_processes_stopped = stop_owned_processes(active_process, active_child, active_data_path,
+                                                           copied_app, receipt, deadline)
+        if copied_app is not None and copied_app.exists() and owned_processes_stopped and (active_process is None or active_process.poll() is not None):
             try:
                 run([sys.executable, "-c", "import shutil,sys; shutil.rmtree(sys.argv[1])", str(copied_app)],
                     "Remove only the copied app after failure", deadline, timeout=30)
@@ -670,6 +1176,22 @@ def main() -> int:
                 receipt["cleanup_errors"].append(f"Could not remove copied app {copied_app}: {error}")
                 receipt["status"] = "failed"
                 result_code = 1
+        if copied_app is not None and owned_processes_stopped:
+            for temporary_app in (copied_app.with_name("SlopTank.replacement.app"),
+                                  copied_app.with_name("SlopTank.previous.app")):
+                if temporary_app.is_symlink():
+                    receipt["cleanup_errors"].append(f"Refused to remove symlink at owned replacement path {temporary_app}")
+                    receipt["status"] = "failed"
+                    result_code = 1
+                    continue
+                if temporary_app.exists():
+                    try:
+                        run([sys.executable, "-c", "import shutil,sys; shutil.rmtree(sys.argv[1])", str(temporary_app)],
+                            "Remove only an owned incomplete replacement copy", deadline, timeout=120)
+                    except Exception as error:
+                        receipt["cleanup_errors"].append(f"Could not remove owned replacement copy {temporary_app}: {error}")
+                        receipt["status"] = "failed"
+                        result_code = 1
         if device:
             try:
                 run(["/usr/bin/hdiutil", "detach", str(device)], "Detach mounted DMG", deadline, timeout=30)
@@ -681,6 +1203,16 @@ def main() -> int:
             receipt["logs"] = {"native_app": str(app_log), "native_app_tail": log_tail(app_log),
                                "server": str(server_log) if server_log else None,
                                "server_tail": log_tail(server_log) if server_log else ""}
+            if args.gui_acceptance:
+                gui_logs: dict[str, dict[str, Any]] = {}
+                for journey_name in ("default_root", "alternate_root"):
+                    journey = receipt.get("gui_acceptance", {}).get(journey_name, {})
+                    gui_logs[journey_name] = {}
+                    for key in ("native_app_log", "replacement_app_log", "relaunch_app_log", "server_log"):
+                        log_path = journey.get(key)
+                        if log_path:
+                            gui_logs[journey_name][key] = {"path": log_path, "tail": log_tail(Path(log_path))}
+                receipt["logs"]["gui_acceptance"] = gui_logs
         except OSError as error:
             receipt["cleanup_errors"].append(f"Could not collect log tails: {error}")
         receipt["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat()

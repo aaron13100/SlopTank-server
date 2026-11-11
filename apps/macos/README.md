@@ -1,4 +1,4 @@
-<!-- SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05. -->
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11. -->
 # SlopTank for macOS
 
 SlopTank uses one Mac download for Intel and Apple chips (M1 or later), targeting
@@ -76,6 +76,10 @@ python3 apps/macos/package-dmg.py --app build/SlopTank.app --output build/SlopTa
 python3 apps/macos/smoke-installed-app.py --dmg build/SlopTank.dmg --work-dir build/smoke --timeout-seconds 1800
 ```
 
+That local command runs the noninteractive backend/API smoke. The installed-smoke
+workflow adds `--gui-acceptance` inside its authorized macOS guest to exercise the
+native welcome and browser screens with a pinned browser driver.
+
 Assembly refuses an existing output, incomplete inputs, overlapping paths and
 escaping component symlinks. It copies prebuilt components rather than qualifying
 them; verify the native slices before assembly. Runtime IDs use the portable
@@ -97,13 +101,21 @@ app/DMG plus its corresponding-source kit, and smokes that same installed image 
 runner types. Push the pinned public web commit first; pushing the server's
 `release-universal` branch then starts the workflow automatically. Manual dispatch
 is available after the workflow reaches the default branch. The smoke uses an isolated
-profile/port and a clip generated with the bundled FFmpeg, then checks setup,
-HTTP 206 bytes, installed SVG conversion and preparation-worker startup, normal
-Quit, retained-profile relaunch and removal. The worker probe checks its expected
-end-of-input response; a separate smoke step converts an incompatible clip and checks
-playback bytes and the retained original. The smoke bypasses
-the welcome-window interaction using a ready-profile fixture. Outputs are workflow
-artifacts only, with no release or tag. Ad-hoc signing permits native execution;
+profile/port and a clip generated with the bundled FFmpeg. On each macOS runner it
+starts from a fresh default home, uses the native welcome window's Start button,
+completes the real browser setup and library screens, and confirms decoded video
+playback of the fixture the server lists at its exact path, both in the browser and
+in the server's own session and play-count records. It then quits and replaces the
+app with the same candidate, confirming the server identity, profile, account,
+library and media remain available. A second fresh home exercises
+the welcome window's optional empty-folder chooser and verifies the selected data
+root and bookmark survive relaunch. These are first-release and same-version
+replacement checks; they do not claim an older-to-newer upgrade. The smoke also
+checks HTTP 206 bytes, installed SVG conversion and preparation-worker startup. The
+worker probe checks its expected end-of-input response; a separate backend/API
+journey converts an incompatible clip and checks playback bytes and the retained
+original. Outputs are workflow artifacts only, with no release or tag. Ad-hoc
+signing permits native execution;
 Developer ID signing, notarization and exact-component source/licence clearance
 remain requirements for public distribution.
 

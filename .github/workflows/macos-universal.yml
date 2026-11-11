@@ -1,4 +1,4 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11.
 name: Universal Mac artifact
 
 on:
@@ -9,7 +9,7 @@ on:
 env:
   WEB_REF: a9ff07acbd4d85707b3e9b6400d0fd585d8b13a8
   RELEASE_VERSION: 0.1.0
-  FFMPEG_X64_BUILD_RUN_ID: "42052719596"
+  FFMPEG_X64_BUILD_RUN_ID: "42138038357"
   FFMPEG_ARM64_BUILD_RUN_ID: "42052719596"
 
 permissions:
@@ -98,10 +98,11 @@ jobs:
           path: web
       - uses: actions/download-artifact@v4
         with:
-          name: ffmpeg-teletext-x86_64
+          artifact-ids: "13470771440"
           github-token: ${{ github.token }}
           run-id: ${{ env.FFMPEG_X64_BUILD_RUN_ID }}
           path: components/ffmpeg-x86_64
+          merge-multiple: true
       - uses: actions/download-artifact@v4
         with:
           artifact-ids: "13429639242"
@@ -173,14 +174,22 @@ jobs:
         with:
           name: candidate-dmg
           path: candidate
-      - name: Install, set up, direct play, quit, relaunch and remove
+      - name: Install the pinned browser driver for the guest-only UI journey
+        env:
+          PLAYWRIGHT_INSTALL_PREFIX: ${{ runner.temp }}/sloptank-playwright
+        run: |
+          npm install --prefix "$PLAYWRIGHT_INSTALL_PREFIX" --no-save --ignore-scripts --no-audit --no-fund @playwright/test@1.61.1
+          test "$(node -p "require('$PLAYWRIGHT_INSTALL_PREFIX/node_modules/@playwright/test/package.json').version")" = 1.61.1
+          test -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+          echo "SLOPTANK_PLAYWRIGHT_NODE_MODULES=$PLAYWRIGHT_INSTALL_PREFIX/node_modules" >> "$GITHUB_ENV"
+      - name: Exercise native welcome, browser setup and backend acceptance
         env:
           RUNNER_LABEL: ${{ matrix.runner }}
         run: |
           if [ "$RUNNER_LABEL" = macos-15-intel ]; then expected=x86_64; else expected=arm64; fi
           test "$(python -c 'import platform; print(platform.machine())')" = "$expected"
           sw_vers
-          python apps/macos/smoke-installed-app.py --dmg candidate/SlopTank.dmg --work-dir "$RUNNER_TEMP/installed-smoke" --timeout-seconds 1800
+          python apps/macos/smoke-installed-app.py --dmg candidate/SlopTank.dmg --work-dir "$RUNNER_TEMP/installed-smoke" --timeout-seconds 1800 --gui-acceptance
       - uses: actions/upload-artifact@v4
         if: always()
         with:

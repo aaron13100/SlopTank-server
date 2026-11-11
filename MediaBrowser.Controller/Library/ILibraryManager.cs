@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03, 2026-11-11.
 #pragma warning disable CA1002, CS1591
 
 using System;
@@ -215,6 +215,19 @@ namespace MediaBrowser.Controller.Library
         /// <returns>BaseItem.</returns>
         /// <exception cref="ArgumentNullException"><paramref name="id"/> is <c>null</c>.</exception>
         BaseItem? GetItemById(Guid id);
+
+        /// <summary>
+        /// Gets the registered instance of an item without reading the database.
+        /// </summary>
+        /// <remarks>
+        /// Writers that mutate an item and save it must share one instance: a copy saved
+        /// later overwrites changes made to the registered one, as when a library scan saving
+        /// its own copy of a collection deleted the member the API had just added. Unlike
+        /// <see cref="GetItemById(Guid)"/>, an unregistered item yields <c>null</c> here.
+        /// </remarks>
+        /// <param name="id">The id.</param>
+        /// <returns>The registered item, or <c>null</c> when none is registered.</returns>
+        BaseItem? GetRegisteredItem(Guid id);
 
         /// <summary>
         /// Gets the item by id, as T.

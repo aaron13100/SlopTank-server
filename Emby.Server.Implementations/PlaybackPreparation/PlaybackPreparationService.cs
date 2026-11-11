@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-03, 2026-11-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-03, 2026-11-04, 2026-11-11.
 // allow-no-test-found: private integration coverage is assigned to sloptank-tests/server/tests.
 #pragma warning disable CS1591
 using System;
@@ -14,6 +14,7 @@ using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.PlaybackPreparation;
 using MediaBrowser.Model.PlaybackPreparation;
 using Microsoft.EntityFrameworkCore;
@@ -28,6 +29,9 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
     private readonly IServerApplicationHost _appHost;
     private readonly TimeProvider _timeProvider;
 
+    // Resolved lazily: the library manager depends on this service, so it cannot be injected.
+    private readonly Lazy<ILibraryManager?> _library;
+
     public PlaybackPreparationService(
         IDbContextFactory<JellyfinDbContext> dbProvider,
         IServerApplicationHost appHost,
@@ -36,6 +40,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
         _dbProvider = dbProvider;
         _appHost = appHost;
         _timeProvider = timeProvider;
+        _library = new Lazy<ILibraryManager?>(() => appHost.Resolve<ILibraryManager>());
     }
 
     public async Task<PlaybackPreparationRequest?> ClaimAsync(CancellationToken cancellationToken)
@@ -118,6 +123,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
                     });
                     await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
                     await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                    SyncRegisteredItem(item);
                     return null;
                 }
 
@@ -226,6 +232,11 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
                     attempt.CompletedAtUtc = now;
                     await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
                     await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                    if (item is not null)
+                    {
+                        SyncRegisteredItem(item);
+                    }
+
                     throw new PlaybackPreparationException(409, "media-changed", "The media object changed after claim.");
                 }
 
@@ -284,6 +295,11 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
 
                 await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                SyncRegisteredItem(preparedItem);
+                foreach (var alias in sameFileRecords)
+                {
+                    SyncRegisteredItem(alias);
+                }
             }
         }
     }
@@ -295,22 +311,7 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
             return false;
         }
 
-        // Ready rows created before attestation deliberately remain visible until audit.
-        if (string.IsNullOrEmpty(item.PlaybackReadyObjectIdentity))
-        {
-            return true;
-        }
-
-        var currentIdentity = item.Path is null
-            ? null
-            : MediaFileFingerprint.Read(_appHost.ExpandVirtualPath(item.Path));
-        var valid = string.Equals(
-                item.PlaybackReadyAlgorithmVersion,
-                PlaybackPreparationContract.PlannerAlgorithmVersion,
-                StringComparison.Ordinal)
-            && currentIdentity is not null
-            && string.Equals(currentIdentity, item.PlaybackReadyObjectIdentity, StringComparison.Ordinal);
-        if (valid)
+        if (!ReadyObjectChanged(item.Path, ReadyAttestation.From(item)))
         {
             return true;
         }
@@ -330,43 +331,23 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
                         .SetProperty(value => value.PlaybackReadyAlgorithmVersion, (string?)null),
                     cancellationToken)
                 .ConfigureAwait(false);
-            return false;
-        }
-    }
 
-    public async Task InvalidateReadinessIfChangedAsync(
-        System.Collections.Generic.IReadOnlyCollection<Guid> itemIds,
-        CancellationToken cancellationToken)
-    {
-        if (itemIds.Count == 0)
-        {
-            return;
-        }
-
-        var db = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        await using (db.ConfigureAwait(false))
-        {
-            var items = await db.BaseItems.Where(value => itemIds.Contains(value.Id)).ToListAsync(cancellationToken).ConfigureAwait(false);
-            foreach (var item in items)
+            // The row may already carry a newer attestation than the item we were handed, so
+            // the live item mirrors whatever the row now says: a stale Ready would keep
+            // refusing playback here, and a stale Pending would never be claimed again.
+            var persisted = await db.BaseItems
+                .Where(value => value.Id.Equals(item.Id))
+                .Select(value => new { value.PlaybackReadiness, value.PlaybackReadyObjectIdentity, value.PlaybackReadyAlgorithmVersion })
+                .SingleOrDefaultAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (persisted is not null)
             {
-                if (item.PlaybackReadiness != PlaybackReadiness.Ready
-                    || string.IsNullOrEmpty(item.PlaybackReadyObjectIdentity)
-                    || item.Path is null)
-                {
-                    continue;
-                }
-
-                var current = MediaFileFingerprint.Read(_appHost.ExpandVirtualPath(item.Path));
-                if (!string.Equals(item.PlaybackReadyAlgorithmVersion, PlaybackPreparationContract.PlannerAlgorithmVersion, StringComparison.Ordinal)
-                    || !string.Equals(current, item.PlaybackReadyObjectIdentity, StringComparison.Ordinal))
-                {
-                    item.PlaybackReadiness = PlaybackReadiness.Pending;
-                    item.PlaybackReadyObjectIdentity = null;
-                    item.PlaybackReadyAlgorithmVersion = null;
-                }
+                item.PlaybackReadiness = persisted.PlaybackReadiness;
+                item.PlaybackReadyObjectIdentity = persisted.PlaybackReadyObjectIdentity;
+                item.PlaybackReadyAlgorithmVersion = persisted.PlaybackReadyAlgorithmVersion;
             }
 
-            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return false;
         }
     }
 
@@ -387,16 +368,63 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
             return items
                 .Where(candidate => persistedItems.TryGetValue(candidate.Id, out var persisted)
                     && persisted.PlaybackReadiness == PlaybackReadiness.Ready
-                    && !string.IsNullOrEmpty(persisted.PlaybackReadyObjectIdentity)
-                    && candidate.Path is not null
-                    && (!string.Equals(persisted.PlaybackReadyAlgorithmVersion, PlaybackPreparationContract.PlannerAlgorithmVersion, StringComparison.Ordinal)
-                        || !string.Equals(
-                            MediaFileFingerprint.Read(_appHost.ExpandVirtualPath(candidate.Path!)),
-                            persisted.PlaybackReadyObjectIdentity,
-                            StringComparison.Ordinal)))
+                    && ReadyObjectChanged(candidate.Path, ReadyAttestation.From(persisted)))
                 .Select(item => item.Id)
                 .ToArray();
         }
+    }
+
+    /// <summary>
+    /// Decides whether the file under <paramref name="currentPath"/> is still the object a
+    /// Ready attestation describes. One rule serves the row about to be saved and the live
+    /// item about to be played.
+    /// </summary>
+    private bool ReadyObjectChanged(string? currentPath, ReadyAttestation attested)
+    {
+        var path = currentPath is null ? null : _appHost.ExpandVirtualPath(currentPath);
+        if (!string.IsNullOrEmpty(attested.ObjectIdentity))
+        {
+            var current = path is null ? null : MediaFileFingerprint.Read(path);
+            return !string.Equals(attested.AlgorithmVersion, PlaybackPreparationContract.PlannerAlgorithmVersion, StringComparison.Ordinal)
+                || !string.Equals(current, attested.ObjectIdentity, StringComparison.Ordinal);
+        }
+
+        // Rows attested before object identities existed carry only the size and modification
+        // time the library recorded when it saved them. Different bytes, under the same path or
+        // a new one (an mkv replaced by its mp4), are not the bytes that were attested.
+        return path is not null
+            && MediaFileFingerprint.DiffersFromRecorded(path, attested.RecordedSize, attested.RecordedLastWriteUtc);
+    }
+
+    /// <summary>The facts a Ready attestation rests on, read from a row or a live item.</summary>
+    private readonly record struct ReadyAttestation(
+        string? ObjectIdentity,
+        string? AlgorithmVersion,
+        long? RecordedSize,
+        DateTime? RecordedLastWriteUtc)
+    {
+        public static ReadyAttestation From(BaseItemEntity persisted)
+            => new(persisted.PlaybackReadyObjectIdentity, persisted.PlaybackReadyAlgorithmVersion, persisted.Size, persisted.DateModified);
+
+        public static ReadyAttestation From(BaseItem item)
+            => new(item.PlaybackReadyObjectIdentity, item.PlaybackReadyAlgorithmVersion, item.Size, item.DateModified);
+    }
+
+    /// <summary>
+    /// Copies persisted readiness onto the registered item, which answers playback requests
+    /// until a restart would otherwise reload it from the database.
+    /// </summary>
+    private void SyncRegisteredItem(BaseItemEntity persisted)
+    {
+        var registered = _library.Value?.GetRegisteredItem(persisted.Id);
+        if (registered is null)
+        {
+            return;
+        }
+
+        registered.PlaybackReadiness = persisted.PlaybackReadiness;
+        registered.PlaybackReadyObjectIdentity = persisted.PlaybackReadyObjectIdentity;
+        registered.PlaybackReadyAlgorithmVersion = persisted.PlaybackReadyAlgorithmVersion;
     }
 
     private static PlaybackPreparationRequest NewRequest(Guid requestId, string nonce, Guid itemId, string path, string identity)
@@ -473,6 +501,11 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
                         attempt.CompletedAtUtc = now;
                         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
                         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                        if (item is not null)
+                        {
+                            SyncRegisteredItem(item);
+                        }
+
                         throw new PlaybackPreparationException(409, "media-unavailable", "The current media object cannot be identified.");
                     }
 

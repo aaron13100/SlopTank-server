@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-30, 2026-09-04, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-26, 2026-10-14, 2026-10-31, 2026-11-03, 2026-11-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-08-30, 2026-09-04, 2026-09-09, 2026-09-19, 2026-09-20, 2026-09-26, 2026-10-14, 2026-10-31, 2026-11-03, 2026-11-04, 2026-11-11.
 #nullable disable
 
 #pragma warning disable CA1002, CA1721, CA1819, CS1591
@@ -937,12 +937,25 @@ namespace MediaBrowser.Controller.Entities
         /// <returns>IEnumerable{BaseItem}.</returns>
         protected IReadOnlyList<BaseItem> GetCachedChildren()
         {
-            return ItemRepository.GetItemList(new InternalItemsQuery
+            var loaded = ItemRepository.GetItemList(new InternalItemsQuery
             {
                 Parent = this,
                 GroupByPresentationUniqueKey = false,
                 DtoOptions = new DtoOptions(true)
             });
+
+            // The repository returns fresh copies. Validation mutates and saves these children
+            // while API writers edit the registered instance of the same item, so the registered
+            // instance stands in for its copy; otherwise whichever save lands last silently
+            // discards the other writer's changes (a scan once deleted a collection member the
+            // API had just added).
+            var children = new BaseItem[loaded.Count];
+            for (var i = 0; i < loaded.Count; i++)
+            {
+                children[i] = LibraryManager.GetRegisteredItem(loaded[i].Id) ?? loaded[i];
+            }
+
+            return children;
         }
 
         public virtual int GetChildCount(User user)

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  WEB_REF: a9ff07acbd4d85707b3e9b6400d0fd585d8b13a8
+  WEB_REF: 4c7048b9be584ba0bf545bf07fa3c9f44b16129b
   RELEASE_VERSION: 0.1.0
   FFMPEG_X64_BUILD_RUN_ID: "42138038357"
   FFMPEG_ARM64_BUILD_RUN_ID: "42052719596"
@@ -63,15 +63,18 @@ jobs:
     steps:
       - name: Require an exact public web source commit
         run: '[[ "$WEB_REF" =~ ^[0-9a-f]{40}$ ]]'
-      - name: Download the verified production web artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          artifact-ids: "13397342745"
-          github-token: ${{ github.token }}
-          run-id: "41988658833"
-          path: dist
-          merge-multiple: true
-      - name: Verify the included web source archive commit
+          repository: aaron13100/SlopTank
+          ref: ${{ env.WEB_REF }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build:production
+      - run: git archive HEAD -o dist/web-source.tar
+      - name: Verify the archived web source commit
         run: test "$(git get-tar-commit-id < dist/web-source.tar)" = "$WEB_REF"
       - uses: actions/upload-artifact@v4
         with:

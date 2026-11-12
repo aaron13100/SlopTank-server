@@ -1,225 +1,39 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11.
-name: Universal Mac artifact
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11, 2026-11-12.
+name: SlopTank JXA harness diagnostic
 
 on:
-  push:
-    branches: [release-universal]
   workflow_dispatch:
-
-env:
-  WEB_REF: 4c7048b9be584ba0bf545bf07fa3c9f44b16129b
-  RELEASE_VERSION: 0.1.0
-  FFMPEG_X64_BUILD_RUN_ID: "42138038357"
-  FFMPEG_ARM64_BUILD_RUN_ID: "42052719596"
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
-  native:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15-intel
-            rid: osx-x64
-            machine: x86_64
-          - runner: macos-15
-            rid: osx-arm64
-            machine: arm64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Confirm native runner and install preparation build tools
-        env:
-          EXPECTED_MACHINE: ${{ matrix.machine }}
-        run: |
-          test "$(uname -m)" = "$EXPECTED_MACHINE"
-          sw_vers
-          python -m pip install --disable-pip-version-check pyinstaller==6.22.3 guessit==3.8.0 charset-normalizer==3.4.4
-      - name: Build native components (normal priority, bounded commands)
-        env:
-          TARGET_RID: ${{ matrix.rid }}
-        run: python apps/macos/build-native.py --rid "$TARGET_RID" --output "$RUNNER_TEMP/native"
-      - name: Preserve executable modes and runtime symlinks
-        run: tar -C "$RUNNER_TEMP/native" -cf "$RUNNER_TEMP/native.tar" Server Preparation SlopTank upstream
-      - uses: actions/upload-artifact@v4
-        with:
-          name: native-${{ matrix.rid }}
-          path: ${{ runner.temp }}/native.tar
-          retention-days: 7
-
-  web:
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - name: Require an exact public web source commit
-        run: '[[ "$WEB_REF" =~ ^[0-9a-f]{40}$ ]]'
-      - uses: actions/checkout@v4
-        with:
-          repository: aaron13100/SlopTank
-          ref: ${{ env.WEB_REF }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - run: npm ci
-      - run: npm run build:production
-      - run: git archive HEAD -o dist/web-source.tar
-      - name: Verify the archived web source commit
-        run: test "$(git get-tar-commit-id < dist/web-source.tar)" = "$WEB_REF"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: web
-          path: dist
-          retention-days: 7
-
-  assemble:
-    needs: [native, web]
-    runs-on: macos-15
-    timeout-minutes: 60
-    steps:
-      # The corresponding-source kit reads the retained arm64 FFmpeg workflow from this
-      # repository's history (release-materials.py FFMPEG_LEGACY_WORKFLOW_COMMIT), which a
-      # shallow checkout does not contain.
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: native-*
-          path: components
-      - uses: actions/download-artifact@v4
-        with:
-          name: web
-          path: web
-      - uses: actions/download-artifact@v4
-        with:
-          artifact-ids: "13470771440"
-          github-token: ${{ github.token }}
-          run-id: ${{ env.FFMPEG_X64_BUILD_RUN_ID }}
-          path: components/ffmpeg-x86_64
-          merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          artifact-ids: "13429639242"
-          github-token: ${{ github.token }}
-          run-id: ${{ env.FFMPEG_ARM64_BUILD_RUN_ID }}
-          path: components/ffmpeg-arm64
-          merge-multiple: true
-      - name: Verify and stage pinned FFmpeg components and source kit
-        run: |
-          mkdir -p components/osx-x64 components/osx-arm64 universal/ffmpeg universal/materials
-          tar -xf components/native-osx-x64/native.tar -C components/osx-x64
-          tar -xf components/native-osx-arm64/native.tar -C components/osx-arm64
-          python apps/macos/release-materials.py \
-            --output universal/materials \
-            --web-ref "$WEB_REF" \
-            --runtime osx-x64=components/osx-x64 \
-            --runtime osx-arm64=components/osx-arm64 \
-            --ffmpeg-component osx-x64=components/ffmpeg-x86_64 \
-            --ffmpeg-component osx-arm64=components/ffmpeg-arm64 \
-            --ffmpeg-run-id "osx-x64=$FFMPEG_X64_BUILD_RUN_ID" \
-            --ffmpeg-run-id "osx-arm64=$FFMPEG_ARM64_BUILD_RUN_ID" \
-            --source-kit-output "universal/SlopTank-$RELEASE_VERSION-ffmpeg-corresponding-source.tar.gz" \
-            --version "$RELEASE_VERSION"
-      - name: Merge launcher and FFmpeg slices, then assemble one app
-        run: |
-          lipo -create components/osx-x64/SlopTank components/osx-arm64/SlopTank -output universal/SlopTank
-          for tool in ffmpeg ffprobe; do
-            lipo -create "components/osx-x64/upstream/ffmpeg/$tool" "components/osx-arm64/upstream/ffmpeg/$tool" -output "universal/ffmpeg/$tool"
-            lipo "universal/ffmpeg/$tool" -verify_arch x86_64 arm64
-            codesign --force --sign - "universal/ffmpeg/$tool"
-          done
-          lipo universal/SlopTank -verify_arch x86_64 arm64
-          git archive HEAD -o universal/materials/server-and-installer-source.tar
-          mv web/web-source.tar universal/materials/
-          cp LICENSE* universal/materials/
-          cp components/osx-x64/upstream/components.json universal/materials/components-osx-x64.json
-          cp components/osx-arm64/upstream/components.json universal/materials/components-osx-arm64.json
-          python apps/macos/assemble-app.py --launcher-binary universal/SlopTank --runtime osx-x64=components/osx-x64 --runtime osx-arm64=components/osx-arm64 --web-dir web --ffmpeg-dir universal/ffmpeg --intro-skipper-plugin components/osx-x64/upstream/IntroSkipper --release-materials-dir universal/materials --version "$RELEASE_VERSION" --build-number "$GITHUB_RUN_NUMBER" --output universal/SlopTank.app
-          codesign --force --sign - universal/SlopTank.app
-          python apps/macos/package-dmg.py --app universal/SlopTank.app --output universal/SlopTank.dmg --timeout-seconds 1200
-          shasum -a 256 universal/SlopTank.dmg > universal/SlopTank.dmg.sha256
-      - uses: actions/upload-artifact@v4
-        with:
-          name: candidate-dmg
-          path: |
-            universal/SlopTank.dmg
-            universal/SlopTank.dmg.sha256
-          retention-days: 7
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ffmpeg-corresponding-source-kit
-          path: universal/SlopTank-${{ env.RELEASE_VERSION }}-ffmpeg-corresponding-source.tar.gz
-          retention-days: 14
-
-  installed-smoke:
-    needs: assemble
+  jxa-runtime:
     strategy:
       fail-fast: false
       matrix:
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: actions/download-artifact@v4
-        with:
-          name: candidate-dmg
-          path: candidate
-      - name: Install the pinned browser driver for the guest-only UI journey
-        env:
-          PLAYWRIGHT_INSTALL_PREFIX: ${{ runner.temp }}/sloptank-playwright
+      - name: Compare current-application and language delay calls
         run: |
-          npm install --prefix "$PLAYWRIGHT_INSTALL_PREFIX" --no-save --ignore-scripts --no-audit --no-fund @playwright/test@1.61.1
-          test "$(node -p "require('$PLAYWRIGHT_INSTALL_PREFIX/node_modules/@playwright/test/package.json').version")" = 1.61.1
-          test -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-          echo "SLOPTANK_PLAYWRIGHT_NODE_MODULES=$PLAYWRIGHT_INSTALL_PREFIX/node_modules" >> "$GITHUB_ENV"
-      - name: Exercise native welcome, browser setup and backend acceptance
-        env:
-          RUNNER_LABEL: ${{ matrix.runner }}
-        run: |
-          if [ "$RUNNER_LABEL" = macos-15-intel ]; then expected=x86_64; else expected=arm64; fi
-          test "$(python -c 'import platform; print(platform.machine())')" = "$expected"
           sw_vers
-          python apps/macos/smoke-installed-app.py --dmg candidate/SlopTank.dmg --work-dir "$RUNNER_TEMP/installed-smoke" --timeout-seconds 1800 --gui-acceptance
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: smoke-${{ matrix.runner }}
-          path: ${{ runner.temp }}/installed-smoke
-          retention-days: 7
-
-  artifact:
-    needs: installed-smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: candidate-dmg
-          path: candidate
-      - uses: actions/download-artifact@v4
-        with:
-          name: ffmpeg-corresponding-source-kit
-          path: candidate
-      - uses: actions/upload-artifact@v4
-        with:
-          name: SlopTank-universal-macos
-          path: candidate
-          retention-days: 14
+          /usr/bin/osascript -l JavaScript <<'JXA'
+          function sample(name, action) {
+              var started = Date.now();
+              try {
+                  action();
+                  console.log(JSON.stringify({ operation: name, ok: true,
+                      elapsedMs: Date.now() - started }));
+              } catch (error) {
+                  console.log(JSON.stringify({ operation: name, ok: false,
+                      number: error.number, code: error.code, message: String(error),
+                      stack: error.stack, elapsedMs: Date.now() - started }));
+              }
+          }
+          var current = Application.currentApplication();
+          current.includeStandardAdditions = true;
+          sample("current.delay", function () { current.delay(0.2); });
+          sample("global delay", function () { delay(0.2); });
+          JXA

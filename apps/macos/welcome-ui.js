@@ -40,8 +40,6 @@ function run(argv) {
             "Invoke welcome-ui.js with the config path as its only argument.");
     }
     var cfg = readConfig(argv[0]);
-    var current = Application.currentApplication();
-    current.includeStandardAdditions = true;
     var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(cfg.pid);
     if (!app || ObjC.unwrap(app.isTerminated)) {
         welcomeError("app_missing", "Owned SlopTank PID is not running.",
@@ -59,7 +57,7 @@ function run(argv) {
             "Inspect the runner's accessibility automation permission.");
     }
 
-    function delayBriefly() { current.delay(0.2); }
+    function delayBriefly() { delay(0.2); }
     function findWindow(title) {
         try {
             var windows = process.windows;

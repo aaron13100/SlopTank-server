@@ -148,16 +148,35 @@ async function completeWizard(page, config, receipt) {
     await landing.waitFor({ state: 'visible', timeout: 60000 });
     const loginPage = page.locator('#loginPage');
     if (await loginPage.isVisible()) {
-        const manual = loginPage.locator('.btnManual');
-        if (await manual.isVisible().catch(() => false)) {
-            await manual.click();
-        }
-        await loginPage.locator('#txtManualName').fill(config.adminName);
-        await loginPage.locator('#txtManualPassword').fill(config.adminPassword);
-        await loginPage.locator('.manualLoginForm .button-submit').click();
+        await signInFromLoginPage(loginPage, config);
     }
     await page.locator('#homeTab').waitFor({ state: 'visible', timeout: 90000 });
     return libraryId;
+}
+
+/**
+ * Signs in through a rendered manual or populated visual login view.
+ * @param {import('@playwright/test').Locator} loginPage Visible login page locator.
+ * @param {{adminName: string, adminPassword: string}} config Smoke account credentials.
+ * @returns {Promise<void>} Resolves after submitting the visible manual login form.
+ */
+async function signInFromLoginPage(loginPage, config) {
+    const manualName = loginPage.locator('#txtManualName');
+    const visualUser = loginPage.locator('.visualLoginForm .card');
+    await manualName.or(visualUser).filter({ visible: true }).first().waitFor({ state: 'visible', timeout: 60000 });
+
+    if (!(await manualName.isVisible())) {
+        await loginPage.locator('.btnManual').click();
+    }
+
+    const manualPassword = loginPage.locator('#txtManualPassword');
+    const submit = loginPage.locator('.manualLoginForm .button-submit');
+    await manualName.waitFor({ state: 'visible', timeout: 60000 });
+    await manualPassword.waitFor({ state: 'visible', timeout: 60000 });
+    await submit.waitFor({ state: 'visible', timeout: 60000 });
+    await manualName.fill(config.adminName);
+    await manualPassword.fill(config.adminPassword);
+    await submit.click();
 }
 
 async function playItem(page, config, receipt, item) {
@@ -286,7 +305,11 @@ async function main() {
     }
 }
 
-main().catch(error => {
-    process.stderr.write(`${error && error.stack || error}\n`);
-    process.exitCode = 1;
-});
+module.exports = { signInFromLoginPage };
+
+if (require.main === module) {
+    main().catch(error => {
+        process.stderr.write(`${error && error.stack || error}\n`);
+        process.exitCode = 1;
+    });
+}

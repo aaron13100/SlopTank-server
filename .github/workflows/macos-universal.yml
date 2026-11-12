@@ -1,10 +1,16 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11, 2026-11-12.
 name: Universal Mac artifact
 
 on:
   push:
     branches: [release-universal]
   workflow_dispatch:
+    inputs:
+      reuse_run_id:
+        description: Recheck a previously assembled candidate after a harness-only fix
+        required: false
+        type: string
+        default: ''
 
 env:
   WEB_REF: 4c7048b9be584ba0bf545bf07fa3c9f44b16129b
@@ -18,6 +24,7 @@ permissions:
 
 jobs:
   native:
+    if: ${{ !inputs.reuse_run_id }}
     strategy:
       fail-fast: false
       matrix:
@@ -58,6 +65,7 @@ jobs:
           retention-days: 7
 
   web:
+    if: ${{ !inputs.reuse_run_id }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -83,6 +91,7 @@ jobs:
           retention-days: 7
 
   assemble:
+    if: ${{ !inputs.reuse_run_id }}
     needs: [native, web]
     runs-on: macos-15
     timeout-minutes: 60
@@ -167,6 +176,7 @@ jobs:
 
   installed-smoke:
     needs: assemble
+    if: ${{ !cancelled() && (needs.assemble.result == 'success' || (inputs.reuse_run_id && needs.assemble.result == 'skipped')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -175,13 +185,63 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Require unchanged product inputs for a reused candidate
+        if: ${{ inputs.reuse_run_id }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REUSE_RUN_ID: ${{ inputs.reuse_run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, re, subprocess
+
+          class CandidateReuseError(RuntimeError):
+              pass
+
+          run_id = os.environ['REUSE_RUN_ID']
+          if not re.fullmatch(r'[1-9][0-9]*', run_id):
+              raise CandidateReuseError('Reuse run ID must be a positive integer.')
+          endpoint = f"repos/{os.environ['GH_REPO']}/actions/runs/{run_id}"
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', path], text=True, timeout=30))
+          run = api(endpoint)
+          if (run['path'] != '.github/workflows/macos-universal.yml'
+                  or run['head_branch'] != 'release-universal' or run['status'] != 'completed'):
+              raise CandidateReuseError('Reuse requires a completed Universal run on release-universal.')
+          jobs = {job['name']: job['conclusion'] for job in api(endpoint + '/jobs?per_page=100')['jobs']}
+          required = ('web', 'assemble', 'native (macos-15, osx-arm64, arm64)',
+                      'native (macos-15-intel, osx-x64, x86_64)')
+          if any(jobs.get(name) != 'success' for name in required):
+              raise CandidateReuseError(f'Candidate build jobs did not all pass: {jobs}')
+          source = run['head_sha']
+          subprocess.run(['git', 'merge-base', '--is-ancestor', source, 'HEAD'], check=True, timeout=30)
+          allowed = {'.github/workflows/macos-universal.yml', 'apps/macos/smoke-installed-app.py',
+                     'apps/macos/smoke-browser-ui.cjs', 'apps/macos/welcome-ui.js',
+                     'apps/macos/owned_app_processes.py', 'apps/macos/smoke_deadline.py',
+                     'apps/macos/SLOPTANK-MODIFICATION-NOTICES.txt'}
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only', source, 'HEAD'],
+                                               text=True, timeout=30).splitlines())
+          if changed - allowed:
+              raise CandidateReuseError(f'Product files changed since candidate build: {sorted(changed - allowed)}')
+          workflow = subprocess.check_output(['git', 'show', source + ':.github/workflows/macos-universal.yml'],
+                                             text=True, timeout=30)
+          for key in ('WEB_REF', 'RELEASE_VERSION', 'FFMPEG_X64_BUILD_RUN_ID', 'FFMPEG_ARM64_BUILD_RUN_ID'):
+              match = re.search(r'^  ' + key + r':\s*(.+)$', workflow, re.MULTILINE)
+              if not match or match.group(1).strip().strip('\"\'') != os.environ[key]:
+                  raise CandidateReuseError(f'Candidate build input differs: {key}')
+          print(f'Reusing run {run_id}, product source {source}, with the corrected harness.')
+          PY
       - uses: actions/download-artifact@v4
         with:
           name: candidate-dmg
           path: candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.reuse_run_id || github.run_id }}
       - name: Install the pinned browser driver for the guest-only UI journey
         env:
           PLAYWRIGHT_INSTALL_PREFIX: ${{ runner.temp }}/sloptank-playwright
@@ -207,6 +267,7 @@ jobs:
 
   artifact:
     needs: installed-smoke
+    if: ${{ !cancelled() && needs['installed-smoke'].result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -214,10 +275,14 @@ jobs:
         with:
           name: candidate-dmg
           path: candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.reuse_run_id || github.run_id }}
       - uses: actions/download-artifact@v4
         with:
           name: ffmpeg-corresponding-source-kit
           path: candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.reuse_run_id || github.run_id }}
       - uses: actions/upload-artifact@v4
         with:
           name: SlopTank-universal-macos

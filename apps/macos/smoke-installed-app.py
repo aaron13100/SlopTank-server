@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11, 2026-11-12.
 """Run backend API checks and optional GUI acceptance against a SlopTank DMG.
 
 Usage: python3 apps/macos/smoke-installed-app.py --dmg SlopTank.dmg \
@@ -32,7 +32,7 @@ import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 # The same portable helper lives under tools in the operations checkout.
@@ -41,6 +41,8 @@ if not preparation_source.is_dir():
     preparation_source = Path(__file__).resolve().parents[2] / "tools"
 sys.path.insert(0, str(preparation_source))
 from lib.load_scaled_timeout import load_scaled_timeout
+from owned_app_processes import launch_app, quit_app, server_child, stop_owned_processes
+from smoke_deadline import POLL_SECONDS, Deadline, SmokeError, run
 
 
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -50,43 +52,7 @@ ADMIN_NAME = "smoke-admin"
 ADMIN_PASSWORD = "Smoke-only-password-4917!"
 MEDIA_NAME = "SlopTank Installed App Smoke.mp4"
 UNREADY_NAME = "SlopTank Preparation Smoke.mkv"
-POLL_SECONDS = 0.5
-EXITING_WAIT_SECONDS = 5
 CLEANUP_RESERVE_SECONDS = 75
-
-
-class SmokeError(RuntimeError):
-    """An acceptance step failed with its observed diagnostic."""
-
-
-class Deadline:
-    """One wall-clock deadline shared by all commands and HTTP requests."""
-
-    def __init__(self, seconds: float):
-        self.at = time.monotonic() + seconds
-
-    def remaining(self) -> float:
-        return self.at - time.monotonic()
-
-    def timeout(self, maximum: float, label: str) -> float:
-        remaining = self.remaining()
-        if remaining <= 0:
-            raise SmokeError(f"Overall smoke deadline expired before {label}.")
-        return min(load_scaled_timeout(maximum), remaining)
-
-
-def run(argv: list[str], label: str, deadline: Deadline, timeout: float = 60,
-        *, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    """Run a bounded command and retain diagnostics only when it fails."""
-    try:
-        result = subprocess.run(argv, text=True, capture_output=True, stdin=subprocess.DEVNULL, env=env,
-                                timeout=deadline.timeout(timeout, label), check=False)
-    except subprocess.TimeoutExpired as error:
-        stderr = error.stderr.decode(errors="replace") if isinstance(error.stderr, bytes) else error.stderr or ""
-        raise SmokeError(f"{label} timed out: {stderr[-1500:]}") from error
-    if check and result.returncode:
-        raise SmokeError(f"{label} exited {result.returncode}: {result.stderr[-2000:]} {result.stdout[-1000:]}")
-    return result
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
@@ -240,92 +206,16 @@ def direct_range(base: str, token: str, item_id: str, media: Path, deadline: Dea
 def run_welcome_ui(app_pid: int, app_bundle: Path, home: Path, action: str,
                    work: Path, deadline: Deadline, selected_root: Path | None = None) -> None:
     """Use macOS accessibility only against the recorded launcher PID."""
-    script_config = {"pid": app_pid, "bundle": str(app_bundle), "home": str(home),
-                     "action": action, "selectedRoot": str(selected_root) if selected_root else None}
-    config_literal = json.dumps(script_config, ensure_ascii=False)
-    script = f'''ObjC.import("AppKit");
-var cfg = {config_literal};
-var current = Application.currentApplication();
-current.includeStandardAdditions = true;
-var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(cfg.pid);
-if (!app || ObjC.unwrap(app.isTerminated)) throw new Error("Owned SlopTank PID is not running.");
-var actualBundle = ObjC.unwrap(app.bundleURL.path);
-if (actualBundle !== cfg.bundle) throw new Error("PID bundle mismatch: " + actualBundle);
-var systemEvents = Application("System Events");
-var process = systemEvents.processes.whose({{ unixId: cfg.pid }})[0];
-if (!process || !process.exists()) throw new Error("System Events cannot see the owned PID.");
-process.frontmost = true;
-function delayBriefly() {{ current.delay(0.2); }}
-function findWindow(title) {{
-    var windows = process.windows;
-    for (var index = 0; index < windows.length; index++) {{
-        var candidate = windows[index];
-        if (candidate.exists() && candidate.name() === title) return candidate;
-    }}
-    return null;
-}}
-function waitForWindow(title, seconds) {{
-    var until = Date.now() + seconds * 1000;
-    while (Date.now() < until) {{
-        var candidate = findWindow(title);
-        if (candidate) return candidate;
-        delayBriefly();
-    }}
-    throw new Error("Timed out waiting for owned-app window: " + title);
-}}
-function waitForButton(window, title, seconds) {{
-    var until = Date.now() + seconds * 1000;
-    while (Date.now() < until) {{
-        try {{
-            var button = window.buttons.byName(title);
-            if (button.exists()) return button;
-        }} catch (_) {{}}
-        delayBriefly();
-    }}
-    throw new Error("Timed out waiting for button: " + title);
-}}
-var welcomeTitle = "Welcome to SlopTank";
-if (cfg.action === "assert-no-welcome") {{
-    var welcomeUntil = Date.now() + 2000;
-    while (Date.now() < welcomeUntil) {{
-        if (findWindow(welcomeTitle)) throw new Error("Welcome window reappeared after profile initialization.");
-        delayBriefly();
-    }}
-}} else {{
-    var welcome = waitForWindow(welcomeTitle, 30);
-    if (cfg.action === "choose-and-start") {{
-        if (!cfg.selectedRoot) throw new Error("Alternate data root was not supplied.");
-        waitForButton(welcome, "Use another drive...", 10).click();
-        var panel = waitForWindow("Choose Server Data Location", 20);
-        systemEvents.keystroke("g", {{ using: ["command down", "shift down"] }});
-        var sheet = null;
-        var sheetUntil = Date.now() + 10 * 1000;
-        while (Date.now() < sheetUntil) {{
-            if (panel.sheets.length > 0) {{ sheet = panel.sheets[0]; break; }}
-            delayBriefly();
-        }}
-        if (!sheet || !sheet.exists() || sheet.textFields.length === 0) {{
-            throw new Error("Go to Folder sheet did not expose its path field.");
-        }}
-        sheet.textFields[0].value = cfg.selectedRoot;
-        systemEvents.keyCode(36);
-        var useFolder = waitForButton(panel, "Use This Folder", 15);
-        useFolder.click();
-        welcome = waitForWindow(welcomeTitle, 10);
-        var shown = welcome.staticTexts().map(function (text) {{ return String(text.value()); }});
-        if (!shown.some(function (value) {{ return value.indexOf(cfg.selectedRoot) !== -1; }})) {{
-            throw new Error("Welcome window does not display the selected data root " + cfg.selectedRoot + ": " + JSON.stringify(shown));
-        }}
-    }} else if (cfg.action !== "start-default") {{
-        throw new Error("Unknown welcome action: " + cfg.action);
-    }}
-    waitForButton(welcome, "Start SlopTank", 10).click();
-}}
-'''
-    script_path = work / "welcome-ui.js"
-    script_path.write_text(script, encoding="utf-8")
-    run(["/usr/bin/osascript", "-l", "JavaScript", str(script_path)],
-        f"Run {action} against SlopTank PID {app_pid}", deadline, timeout=120)
+    config_path = work / "welcome-ui-config.json"
+    write_json(config_path, {"pid": app_pid, "bundle": str(app_bundle), "home": str(home),
+                             "action": action, "selectedRoot": str(selected_root) if selected_root else None})
+    config_path.chmod(0o600)
+    script_path = Path(__file__).with_name("welcome-ui.js")
+    try:
+        run(["/usr/bin/osascript", "-l", "JavaScript", str(script_path), str(config_path)],
+            f"Run {action} against SlopTank PID {app_pid}", deadline, timeout=120)
+    finally:
+        config_path.unlink(missing_ok=True)
 
 
 def _read_profile(home: Path) -> tuple[dict[str, Any], Path]:
@@ -489,7 +379,7 @@ def run_gui_acceptance(source_app: Path, copied_app: Path, work: Path, media_dir
         journey_key = "default_root" if name == "gui-default" else "alternate_root"
         journeys[journey_key].update({"native_app_log": str(app_log),
                                       "server_log": str(expected_root / "Logs/server.log"),
-                                      "welcome_control": str(work / name / "welcome-ui.js")})
+                                      "welcome_control": str(Path(__file__).with_name("welcome-ui.js"))})
         process = launch_app(executable, environment, app_log)
         live.update({"process": process, "child": None, "data_path": expected_root / "Data",
                      "server_log": expected_root / "Logs/server.log", "home": home, "app_log": app_log})
@@ -614,7 +504,7 @@ def run_gui_acceptance(source_app: Path, copied_app: Path, work: Path, media_dir
         "gui-alternate", alternate_home, "choose-and-start", alternate_root)
     journeys["alternate_root"].update({"native_app_log": str(app_log),
                                        "server_log": str(actual_alternate_root / "Logs/server.log"),
-                                       "welcome_control": str(work / "gui-alternate/welcome-ui.js")})
+                                       "welcome_control": str(Path(__file__).with_name("welcome-ui.js"))})
     alternate_base = f"http://127.0.0.1:{alternate_port}"
     alternate_profile_id = alternate_profile.get("profileID")
     if not alternate_profile_id or not (actual_alternate_root / ".sloptank-profile").is_file():
@@ -672,208 +562,12 @@ def run_gui_acceptance(source_app: Path, copied_app: Path, work: Path, media_dir
     return journeys
 
 
-def server_child(app_pid: int, app_bundle: Path, profile_data: Path, expected_rid: str,
-                 deadline: Deadline) -> dict[str, Any]:
-    """Identify and verify the launcher-owned server child and native runtime."""
-    while deadline.remaining() > 0:
-        children = run(["/usr/bin/pgrep", "-P", str(app_pid)], "Inspect launcher children", deadline, timeout=5, check=False)
-        if children.returncode not in (0, 1):
-            raise SmokeError(f"Could not inspect launcher PID {app_pid} children: {children.stderr[-1000:]}")
-        for line in children.stdout.splitlines():
-            pid_text = line.strip()
-            if not pid_text.isdigit():
-                continue
-            pid = int(pid_text)
-            command = run(["/bin/ps", "-ww", "-p", pid_text, "-o", "command="], "Inspect bundled server child", deadline, timeout=5)
-            cmd = command.stdout.strip()
-            runtime = None
-            for rid in ("osx-x64", "osx-arm64"):
-                executable = app_bundle / "Contents/Resources/Runtimes" / rid / "Server/jellyfin"
-                if str(executable) in cmd:
-                    runtime = rid
-                    break
-            if runtime and str(profile_data) in cmd and "--datadir" in cmd:
-                if runtime != expected_rid:
-                    raise SmokeError(f"Native {platform.machine()} app launched {runtime} server, expected {expected_rid}.")
-                return {"pid": pid, "ppid": app_pid, "runtime_id": runtime,
-                        "executable": str(app_bundle / "Contents/Resources/Runtimes" / runtime / "Server/jellyfin")}
-        time.sleep(min(POLL_SECONDS, max(0, deadline.remaining())))
-    raise SmokeError(f"Could not identify the expected {expected_rid} server child of launcher PID {app_pid}.")
-
-
-def quit_app(app: subprocess.Popen[bytes], work: Path, port: int, deadline: Deadline) -> None:
-    script = work / "terminate-owned-app.js"
-    script.write_text(
-        "ObjC.import('AppKit');\n"
-        "class QuitFailure extends Error { constructor(code, message) { super(message); "
-        "this.name = 'QuitFailure'; this.code = code; this.hint = 'Inspect the owned app log.'; } }\n"
-        f"var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier({app.pid});\n"
-        "if (!app || ObjC.unwrap(app.isTerminated)) throw new QuitFailure('app_missing', 'Owned SlopTank app is not running.');\n"
-        "var accepted = app.terminate;\n"
-        "if (!ObjC.unwrap(accepted)) throw new QuitFailure('quit_refused', 'NSRunningApplication refused normal Quit.');\n",
-        encoding="utf-8",
-    )
-    run(["/usr/bin/osascript", "-l", "JavaScript", str(script)],
-        f"Request PID-specific AppKit Quit for {app.pid}", deadline, timeout=10)
-    try:
-        status = app.wait(timeout=deadline.timeout(60, "native app normal Quit"))
-    except subprocess.TimeoutExpired as error:
-        raise SmokeError(f"Native app PID {app.pid} did not exit after normal AppKit Quit.") from error
-    if status != 0:
-        raise SmokeError(f"Native app exited {status} after normal Quit.")
-    while deadline.remaining() > 0:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=min(0.25, deadline.timeout(1, "verify server shutdown"))):
-                pass
-        except ConnectionRefusedError:
-            return
-        except OSError as error:
-            raise SmokeError(f"Could not verify server port {port} closed: {error}") from error
-        time.sleep(min(POLL_SECONDS, max(0, deadline.remaining())))
-    raise SmokeError(f"Server port {port} remained open after normal app Quit.")
-
-
 def log_tail(path: Path, limit: int = 20000) -> str:
     if not path.is_file():
         return ""
     with path.open("rb") as stream:
         stream.seek(max(0, path.stat().st_size - limit))
         return stream.read().decode("utf-8", errors="replace")
-
-
-def classify_owned_process(state: str, command: str, executable: str, profile_data: Path) -> str:
-    """Classify the `ps` row of the recorded server as "running", "exiting" or "exited".
-
-    Any other program is refused with SmokeError, so cleanup never signals a process that is not
-    the recorded server. A zombie has stopped. A process the kernel is tearing down (state flag E)
-    no longer has its arguments: ps shows only its name in parentheses, for example `(jellyfin)`.
-    """
-    if state.startswith("Z"):
-        return "exited"
-    if "E" in state and command == f"({Path(executable).name})":
-        return "exiting"
-    if not command.startswith(executable + " ") or "--datadir " + str(profile_data) not in command:
-        raise SmokeError(f"Owned server no longer matches its executable and profile: {state!r} {command!r}")
-    return "running"
-
-
-def owned_server_status(child: dict[str, Any], profile_data: Path, deadline: Deadline) -> str:
-    """Report the recorded server PID as "running", "exiting", "exited" or "gone"."""
-    pid = str(child["pid"])
-    result = run(["/bin/ps", "-ww", "-p", pid, "-o", "stat=", "-o", "command="],
-                 "Inspect owned server before cleanup", deadline, timeout=5, check=False)
-    if result.returncode == 1 and not result.stdout.strip():
-        try:
-            os.kill(int(pid), 0)
-        except ProcessLookupError:
-            return "gone"
-        raise SmokeError(f"Could not inspect still-present server PID {pid}: {result.stderr!r}")
-    if result.returncode:
-        raise SmokeError(f"Could not inspect owned server PID {pid}: {result.stderr!r}")
-    parts = result.stdout.strip().split(None, 1)
-    if not parts:
-        raise SmokeError(f"No process state returned for owned server PID {pid}.")
-    return classify_owned_process(parts[0], parts[1] if len(parts) == 2 else "", str(child["executable"]), profile_data)
-
-
-def owned_server_alive(child: dict[str, Any], profile_data: Path, deadline: Deadline,
-                       *, exit_wait_seconds: float = EXITING_WAIT_SECONDS,
-                       status: Callable[[dict[str, Any], Path, Deadline], str] = owned_server_status) -> bool:
-    """True while the recorded server runs; one caught mid-exit is waited for, never taken for another process."""
-    wait_until = min(deadline.at, time.monotonic() + load_scaled_timeout(exit_wait_seconds))
-    while True:
-        current = status(child, profile_data, deadline)
-        if current == "running":
-            return True
-        if current != "exiting":
-            return False
-        if time.monotonic() >= wait_until:
-            raise SmokeError(f"Owned server PID {child['pid']} is still exiting after {exit_wait_seconds}s.")
-        time.sleep(min(POLL_SECONDS, max(0, wait_until - time.monotonic())))
-
-
-def bundle_processes(copied_app: Path, deadline: Deadline) -> list[dict[str, Any]]:
-    """List live processes executing from the owned app copy, whatever their ancestry.
-
-    A server whose launcher died is re-parented to launchd and a worker it spawned is a
-    grandchild, so a parent-PID walk misses exactly the processes that make removing the
-    bundle unsafe. Matching the executable path covers both; zombies hold no executable.
-    """
-    listing = run(["/bin/ps", "-axww", "-o", "pid=", "-o", "stat=", "-o", "command="],
-                  "List processes for owned bundle cleanup", deadline, timeout=10)
-    prefix = str(copied_app) + "/"
-    found = []
-    for row in listing.stdout.splitlines():
-        parts = row.strip().split(None, 2)
-        if len(parts) < 3 or not parts[0].isdigit() or parts[1].startswith("Z"):
-            continue
-        if parts[2].startswith(prefix):
-            found.append({"pid": int(parts[0]), "state": parts[1], "command": parts[2][:300]})
-    return found
-
-
-def stop_owned_processes(app: subprocess.Popen[bytes] | None, child: dict[str, Any] | None,
-                         data_path: Path | None, copied_app: Path | None,
-                         receipt: dict[str, Any], deadline: Deadline) -> bool:
-    """Stop the launcher, its recorded server and anything else running from the owned bundle.
-
-    Returns True only when the launcher has exited and no process executes from the bundle,
-    so a failure before the server child was identified never counts as "nothing running".
-    """
-    cleanup = receipt.setdefault("cleanup", [])
-    remaining: list[dict[str, Any]] = []
-    # Cleanup most often runs because the overall deadline expired, so it gets its own grace period.
-    grace = Deadline(60.0)
-    try:
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            targets: dict[int, str] = {}
-            if child is not None and data_path is not None:
-                try:
-                    if owned_server_alive(child, data_path, grace):
-                        targets[int(child["pid"])] = "server_pid"
-                except (OSError, SmokeError) as error:
-                    receipt["cleanup_errors"].append(f"Could not inspect recorded server PID {child['pid']}: {error}")
-            if copied_app is not None:
-                for row in bundle_processes(copied_app, grace):
-                    targets.setdefault(row["pid"], "bundle_pid")
-            if app is not None and app.poll() is None:
-                targets[app.pid] = "app_pid"
-            for pid, role in targets.items():
-                try:
-                    os.kill(pid, sig)
-                    cleanup.append({role: pid, "signal": sig.name})
-                except ProcessLookupError:
-                    cleanup.append({role: pid, "already_stopped": True})
-                except OSError as error:
-                    receipt["cleanup_errors"].append(f"Could not signal {role} {pid}: {error}")
-            end = min(grace.at, time.monotonic() + 5)
-            while True:
-                remaining = bundle_processes(copied_app, grace) if copied_app is not None else []
-                if not remaining and (app is None or app.poll() is not None):
-                    return True
-                if time.monotonic() >= end:
-                    break
-                time.sleep(min(0.2, max(0, end - time.monotonic())))
-        receipt["cleanup_errors"].append(
-            f"Owned processes still running after SIGKILL: app_running={app is not None and app.poll() is None}, "
-            f"bundle={remaining!r}")
-        return False
-    except Exception as error:
-        receipt["cleanup_errors"].append(f"Could not verify owned process cleanup: {error}")
-        return False
-    finally:
-        if app is not None:
-            try:
-                app.poll()  # Reap the launcher even when it has already become a zombie.
-            except OSError as error:
-                receipt["cleanup_errors"].append(f"Could not reap app PID {app.pid}: {error}")
-
-
-def launch_app(executable: Path, environment: dict[str, str], log_path: Path) -> subprocess.Popen[bytes]:
-    with log_path.open("ab", buffering=0) as log:
-        return subprocess.Popen([str(executable)], cwd=str(executable.parent), env=environment,
-                                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                close_fds=True, start_new_session=True)
 
 
 def main() -> int:

@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-03, 2026-11-04, 2026-11-11.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-03, 2026-11-04, 2026-11-11, 2026-11-12.
 // allow-no-test-found: private integration coverage is assigned to sloptank-tests/server/tests.
 #pragma warning disable CS1591
 using System;
@@ -396,20 +396,6 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
             && MediaFileFingerprint.DiffersFromRecorded(path, attested.RecordedSize, attested.RecordedLastWriteUtc);
     }
 
-    /// <summary>The facts a Ready attestation rests on, read from a row or a live item.</summary>
-    private readonly record struct ReadyAttestation(
-        string? ObjectIdentity,
-        string? AlgorithmVersion,
-        long? RecordedSize,
-        DateTime? RecordedLastWriteUtc)
-    {
-        public static ReadyAttestation From(BaseItemEntity persisted)
-            => new(persisted.PlaybackReadyObjectIdentity, persisted.PlaybackReadyAlgorithmVersion, persisted.Size, persisted.DateModified);
-
-        public static ReadyAttestation From(BaseItem item)
-            => new(item.PlaybackReadyObjectIdentity, item.PlaybackReadyAlgorithmVersion, item.Size, item.DateModified);
-    }
-
     /// <summary>
     /// Copies persisted readiness onto the registered item, which answers playback requests
     /// until a restart would otherwise reload it from the database.
@@ -573,5 +559,19 @@ public sealed class PlaybackPreparationService : IPlaybackPreparationService
         }
 
         return attempt;
+    }
+
+    /// <summary>The facts a Ready attestation rests on, read from a row or a live item.</summary>
+    private readonly record struct ReadyAttestation(
+        string? ObjectIdentity,
+        string? AlgorithmVersion,
+        long? RecordedSize,
+        DateTime? RecordedLastWriteUtc)
+    {
+        public static ReadyAttestation From(BaseItemEntity persisted)
+            => new(persisted.PlaybackReadyObjectIdentity, persisted.PlaybackReadyAlgorithmVersion, persisted.Size, persisted.DateModified);
+
+        public static ReadyAttestation From(BaseItem item)
+            => new(item.PlaybackReadyObjectIdentity, item.PlaybackReadyAlgorithmVersion, item.Size, item.DateModified);
     }
 }

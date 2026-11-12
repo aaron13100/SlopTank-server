@@ -282,28 +282,26 @@ def _make_isolated_environment(home: Path) -> dict[str, str]:
 
 def _user_defaults_key_present(bundle_id: str, environment: dict[str, str], deadline: Deadline) -> bool:
     result = run(["/usr/bin/defaults", "read", bundle_id, "serverDataRootBookmark"],
-                 f"Inspect isolated UserDefaults bookmark for {bundle_id}", deadline,
+                 f"Inspect guest UserDefaults bookmark for {bundle_id}", deadline,
                  timeout=10, check=False, env=environment)
     return result.returncode == 0
 
 
-def _isolated_bookmark_file(home: Path, bundle_id: str, deadline: Deadline) -> Path:
-    candidates = (
-        home / "Library/Preferences" / f"{bundle_id}.plist",
-        home / "Library/Containers" / bundle_id / "Data/Library/Preferences" / f"{bundle_id}.plist",
-    )
-    wait_until = min(deadline.at, time.monotonic() + load_scaled_timeout(10))
-    while time.monotonic() < wait_until:
-        for candidate in candidates:
-            if not candidate.is_symlink() and candidate.is_file():
-                try:
-                    values = plistlib.loads(candidate.read_bytes())
-                except (OSError, plistlib.InvalidFileException) as error:
-                    raise SmokeError(f"Could not read the isolated app preferences plist {candidate}: {error}") from error
-                if isinstance(values, dict) and values.get("serverDataRootBookmark"):
-                    return candidate
-        time.sleep(min(0.2, max(0, wait_until - time.monotonic())))
-    raise SmokeError(f"Selected data bookmark was not persisted inside isolated HOME {home}.")
+def _capture_bookmark_preferences(bundle_id: str, environment: dict[str, str], output: Path,
+                                  deadline: Deadline) -> Path:
+    """Capture the effective guest-user domain after quit, without assuming its disk path."""
+    result = run(["/usr/bin/defaults", "export", bundle_id, "-"],
+                 f"Export guest UserDefaults domain for {bundle_id}", deadline,
+                 timeout=10, env=environment)
+    try:
+        values = plistlib.loads(result.stdout.encode("utf-8"))
+    except plistlib.InvalidFileException as error:
+        raise SmokeError(f"UserDefaults export for {bundle_id} was not a valid plist: {error}") from error
+    bookmark = values.get("serverDataRootBookmark") if isinstance(values, dict) else None
+    if not isinstance(bookmark, bytes) or not bookmark:
+        raise SmokeError(f"UserDefaults domain {bundle_id} has no nonempty data bookmark after app quit.")
+    output.write_bytes(plistlib.dumps(values))
+    return output
 
 
 def _run_browser_wizard(base_url: str, media_directory: Path, media: Path, library_name: str,
@@ -510,14 +508,17 @@ def run_gui_acceptance(source_app: Path, copied_app: Path, work: Path, media_dir
     if not alternate_profile_id or not (actual_alternate_root / ".sloptank-profile").is_file():
         raise SmokeError("Alternate-root welcome journey did not persist its profile marker and identity.")
     if not _user_defaults_key_present(bundle_id, alternate_env, deadline):
-        raise SmokeError("Alternate data-root bookmark is not readable in its isolated UserDefaults domain.")
+        raise SmokeError("Alternate data-root bookmark is not readable in the guest UserDefaults domain.")
     journeys["alternate_root"].update({"selected_root": str(actual_alternate_root),
                                       "profile_id": alternate_profile_id, "server_id": alternate_info["Id"],
                                       "user_defaults_bookmark_present": True,
                                       "browser_setup": "intentionally not repeated on this second fresh profile"})
     quit_journey(alternate_process, alternate_port)
-    preferences_file = _isolated_bookmark_file(alternate_home, bundle_id, deadline)
-    journeys["alternate_root"]["isolated_preferences_file"] = str(preferences_file)
+    # CFPreferences belongs to the ephemeral runner user; HOME isolates app files, not that service.
+    preferences_file = _capture_bookmark_preferences(
+        bundle_id, alternate_env, work / "gui-alternate/bookmark-preferences.plist", deadline)
+    journeys["alternate_root"]["preferences_capture"] = str(preferences_file)
+    journeys["alternate_root"]["preferences_scope"] = "ephemeral macOS guest user"
 
     alternate_env = _make_isolated_environment(alternate_home)
     alternate_process = launch_app(executable, alternate_env, work / "gui-alternate/relaunch-app.log")

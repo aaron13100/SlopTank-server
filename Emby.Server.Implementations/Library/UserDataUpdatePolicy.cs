@@ -26,7 +26,12 @@ internal static class UserDataUpdatePolicy
             [UserDataSaveReason.UpdateUserData] = ApplyWholeRecord,
         };
 
-    /// <summary>Apply only the fields owned by this snapshot's operation.</summary>
+    /// <summary>
+    /// Applies only the fields owned by this snapshot's operation.
+    /// </summary>
+    /// <param name="current">The current or new row in the caller's transaction.</param>
+    /// <param name="incoming">The caller's potentially older snapshot.</param>
+    /// <param name="reason">The operation whose fields may change.</param>
     internal static void ApplySnapshot(UserData current, UserItemData incoming, UserDataSaveReason reason)
     {
         if (!_snapshotUpdates.TryGetValue(reason, out var update))
@@ -37,7 +42,11 @@ internal static class UserDataUpdatePolicy
         update(current, incoming);
     }
 
-    /// <summary>Apply the fields explicitly supplied by a partial API request.</summary>
+    /// <summary>
+    /// Applies the fields explicitly supplied by a partial API request.
+    /// </summary>
+    /// <param name="current">The current or new row in the caller's transaction.</param>
+    /// <param name="incoming">The partial request, including an explicit rating-clear operation.</param>
     internal static void ApplyPatch(UserData current, UpdateUserItemDataDto incoming)
     {
         if (incoming.PlaybackPositionTicks.HasValue)

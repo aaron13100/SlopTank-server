@@ -111,7 +111,7 @@ namespace Emby.Server.Implementations.Library
                 update(userDataEntry);
             }
 
-            dbContext.SaveChanges(cancellationToken);
+            dbContext.SaveChanges();
             transaction.Commit();
 
             var userId = user.InternalId;

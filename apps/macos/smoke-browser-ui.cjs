@@ -102,18 +102,32 @@ async function waitForServerPlayback(api, itemId) {
     throw new Error(`no server session reported item ${itemId} as now playing; sessions: ${JSON.stringify(summary)}`);
 }
 
-async function completeWizard(page, config, receipt) {
-    await page.goto(config.baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+/**
+ * Completes the wizard's initial administrator form through its visible controls.
+ * @param {import('@playwright/test').Page} page Browser wizard page.
+ * @param {{adminName: string, adminPassword: string}} config Smoke account credentials.
+ * @returns {Promise<void>} Resolves after submitting the administrator form.
+ */
+async function configureAdministrator(page, config) {
     await page.locator('#txtUsername').waitFor({ state: 'visible', timeout: 60000 });
-    await page.locator('#txtUsername').fill(config.adminName);
-    await page.locator('#txtManualPassword').fill(config.adminPassword);
-    await page.locator('#txtPasswordConfirm').fill(config.adminPassword);
+    // Startup prefill assigns the username before it enables this button.
     await page.waitForFunction(
-        () => !document.querySelector('#wizardStartPage .button-submit')?.disabled,
+        () => {
+            const button = document.querySelector('#wizardStartPage .button-submit');
+            return button && !button.disabled;
+        },
         null,
         { timeout: 60000 }
     );
+    await page.locator('#txtUsername').fill(config.adminName);
+    await page.locator('#txtManualPassword').fill(config.adminPassword);
+    await page.locator('#txtPasswordConfirm').fill(config.adminPassword);
     await page.locator('#wizardStartPage .button-submit').click();
+}
+
+async function completeWizard(page, config, receipt) {
+    await page.goto(config.baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await configureAdministrator(page, config);
     await page.locator('#wizardLibraryPage').waitFor({ state: 'visible', timeout: 60000 });
 
     await page.locator('#addLibrary').click();
@@ -305,7 +319,7 @@ async function main() {
     }
 }
 
-module.exports = { signInFromLoginPage };
+module.exports = { configureAdministrator, signInFromLoginPage };
 
 if (require.main === module) {
     main().catch(error => {

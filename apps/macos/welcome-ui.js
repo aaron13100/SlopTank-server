@@ -89,7 +89,7 @@ function run(argv) {
                 var buttons = window.buttons;
                 for (var index = 0; index < buttons.length; index++) {
                     var button = buttons[index];
-                    if (button.exists() && button.name() === title) return button;
+                    if (button.exists() && button.name() === title && button.enabled()) return button;
                 }
             } catch (error) {
                 welcomeError("button_enumeration", "Could not enumerate or inspect buttons for target PID " +
@@ -138,12 +138,36 @@ function run(argv) {
             welcomeError("folder_sheet_missing", "Go to Folder sheet did not expose its path field.",
                 "Inspect the folder chooser's accessibility fields.");
         }
-        sheet.textFields[0].value = cfg.selectedRoot;
+        systemEvents.keystroke("a", { using: ["command down"] });
+        systemEvents.keystroke(cfg.selectedRoot);
         systemEvents.keyCode(36);
+        var navigationUntil = Date.now() + 15 * 1000;
+        while (panel.sheets.length > 0 && Date.now() < navigationUntil) delayBriefly();
+        if (panel.sheets.length > 0) {
+            welcomeError("folder_navigation_timeout", "Go to Folder did not finish navigating to " + cfg.selectedRoot,
+                "Inspect the chooser's path field and any navigation error.");
+        }
         waitForButton(panel, "Use This Folder", 15).click();
-        welcome = waitForWindow(welcomeTitle, 10);
-        var shown = welcome.staticTexts().map(function (text) { return String(text.value()); });
-        if (!shown.some(function (value) { return value.indexOf(cfg.selectedRoot) !== -1; })) {
+        // The welcome remains present behind the modal. Its new location proves the selection completed.
+        var locationUntil = Date.now() + 15 * 1000;
+        var shown = [];
+        var selectedRootDisplayed = false;
+        while (Date.now() < locationUntil) {
+            welcome = findWindow(welcomeTitle);
+            if (welcome) {
+                try {
+                    shown = welcome.staticTexts().map(function (text) { return String(text.value()); });
+                } catch (error) {
+                    welcomeError("location_inspection", "Could not inspect the selected data location for PID " +
+                        cfg.pid + ": " + String(error) + " (code " + nativeErrorCode(error) + ")",
+                    "Inspect the welcome window's accessibility text.", error);
+                }
+                selectedRootDisplayed = shown.some(function (value) { return value.indexOf(cfg.selectedRoot) !== -1; });
+                if (selectedRootDisplayed) break;
+            }
+            delayBriefly();
+        }
+        if (!selectedRootDisplayed) {
             welcomeError("root_not_displayed", "Welcome window does not display the selected data root " +
                 cfg.selectedRoot + ": " + JSON.stringify(shown),
             "Confirm the folder chooser applied the selected path.");

@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-12.
 using System;
 
 namespace MediaBrowser.Model.Dto
@@ -12,6 +13,13 @@ namespace MediaBrowser.Model.Dto
         /// </summary>
         /// <value>The rating.</value>
         public double? Rating { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether to remove the personal rating and like.
+        /// This optional operation takes precedence over Rating and Likes in the same update.
+        /// Its default value leaves omitted fields unchanged.
+        /// </summary>
+        public bool ClearRating { get; set; }
 
         /// <summary>
         /// Gets or sets the played percentage.

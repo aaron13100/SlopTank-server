@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-10-07, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-10-07, 2026-10-14, 2026-10-31, 2026-11-12.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -53,6 +53,34 @@ namespace Emby.Server.Implementations.Library
         {
             ArgumentNullException.ThrowIfNull(userData);
 
+            PersistUserData(
+                user,
+                item,
+                reason,
+                current =>
+                {
+                    userData.Key = current.CustomDataKey;
+                    UserDataUpdatePolicy.ApplySnapshot(current, userData, reason);
+                },
+                cancellationToken);
+        }
+
+        /// <inheritdoc />
+        public void SaveUserData(User user, BaseItem item, UpdateUserItemDataDto userDataDto, UserDataSaveReason reason)
+        {
+            ArgumentNullException.ThrowIfNull(userDataDto);
+
+            PersistUserData(
+                user,
+                item,
+                reason,
+                current => UserDataUpdatePolicy.ApplyPatch(current, userDataDto),
+                CancellationToken.None);
+        }
+
+        private void PersistUserData(User user, BaseItem item, UserDataSaveReason reason, Action<UserData> update, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(user);
             ArgumentNullException.ThrowIfNull(item);
 
             cancellationToken.ThrowIfCancellationRequested();
@@ -64,102 +92,42 @@ namespace Emby.Server.Implementations.Library
 
             foreach (var key in keys)
             {
-                userData.Key = key;
-                var userDataEntry = Map(userData, user.Id, item.Id);
-                if (dbContext.UserData.Any(f => f.ItemId == userDataEntry.ItemId && f.UserId == userDataEntry.UserId && f.CustomDataKey == userDataEntry.CustomDataKey))
+                // Read after acquiring the existing write transaction so updates use the committed row.
+                var userDataEntry = dbContext.UserData.SingleOrDefault(
+                    value => value.ItemId.Equals(item.Id) && value.UserId.Equals(user.Id) && value.CustomDataKey == key);
+                if (userDataEntry is null)
                 {
-                    dbContext.UserData.Attach(userDataEntry).State = EntityState.Modified;
-                }
-                else
-                {
+                    userDataEntry = new UserData
+                    {
+                        ItemId = item.Id,
+                        UserId = user.Id,
+                        CustomDataKey = key,
+                        Item = null,
+                        User = null,
+                    };
                     dbContext.UserData.Add(userDataEntry);
                 }
+
+                update(userDataEntry);
             }
 
-            dbContext.SaveChanges();
+            dbContext.SaveChanges(cancellationToken);
             transaction.Commit();
 
             var userId = user.InternalId;
             var cacheKey = GetCacheKey(userId, item.Id);
-            _cache.AddOrUpdate(cacheKey, userData);
             item.UserData = dbContext.UserData.Where(e => e.ItemId == item.Id).AsNoTracking().ToArray(); // rehydrate the cached userdata
+            var savedData = Map(item.UserData.Single(value => value.UserId.Equals(user.Id) && value.CustomDataKey == keys[^1]));
+            _cache.AddOrUpdate(cacheKey, savedData);
 
             UserDataSaved?.Invoke(this, new UserDataSaveEventArgs
             {
                 Keys = keys,
-                UserData = userData,
+                UserData = savedData,
                 SaveReason = reason,
                 UserId = user.Id,
                 Item = item
             });
-        }
-
-        /// <inheritdoc />
-        public void SaveUserData(User user, BaseItem item, UpdateUserItemDataDto userDataDto, UserDataSaveReason reason)
-        {
-            ArgumentNullException.ThrowIfNull(user);
-            ArgumentNullException.ThrowIfNull(item);
-            ArgumentNullException.ThrowIfNull(userDataDto);
-
-            var userData = GetUserData(user, item) ?? throw new InvalidOperationException("UserData should not be null.");
-
-            if (userDataDto.PlaybackPositionTicks.HasValue)
-            {
-                userData.PlaybackPositionTicks = userDataDto.PlaybackPositionTicks.Value;
-            }
-
-            if (userDataDto.PlayCount.HasValue)
-            {
-                userData.PlayCount = userDataDto.PlayCount.Value;
-            }
-
-            if (userDataDto.IsFavorite.HasValue)
-            {
-                userData.IsFavorite = userDataDto.IsFavorite.Value;
-            }
-
-            if (userDataDto.Likes.HasValue)
-            {
-                userData.Likes = userDataDto.Likes.Value;
-            }
-
-            if (userDataDto.Played.HasValue)
-            {
-                userData.Played = userDataDto.Played.Value;
-            }
-
-            if (userDataDto.LastPlayedDate.HasValue)
-            {
-                userData.LastPlayedDate = userDataDto.LastPlayedDate.Value;
-            }
-
-            if (userDataDto.Rating.HasValue)
-            {
-                userData.Rating = userDataDto.Rating.Value;
-            }
-
-            SaveUserData(user, item, userData, reason, CancellationToken.None);
-        }
-
-        private UserData Map(UserItemData dto, Guid userId, Guid itemId)
-        {
-            return new UserData()
-            {
-                ItemId = itemId,
-                CustomDataKey = dto.Key,
-                Item = null,
-                User = null,
-                AudioStreamIndex = dto.AudioStreamIndex,
-                IsFavorite = dto.IsFavorite,
-                LastPlayedDate = dto.LastPlayedDate,
-                Likes = dto.Likes,
-                PlaybackPositionTicks = dto.PlaybackPositionTicks,
-                PlayCount = dto.PlayCount,
-                Played = dto.Played,
-                Rating = dto.Rating,
-                UserId = userId,
-                SubtitleStreamIndex = dto.SubtitleStreamIndex,
-            };
         }
 
         private static UserItemData Map(UserData dto)

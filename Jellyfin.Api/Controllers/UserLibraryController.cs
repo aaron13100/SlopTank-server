@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-14, 2026-10-31.
+// SlopTank modification notice: added or changed by SlopTank on 2026-09-19, 2026-10-14, 2026-10-31, 2026-11-12.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -674,10 +674,9 @@ public class UserLibraryController : BaseJellyfinApiController
 
         if (data is not null)
         {
-            // Set favorite status
-            data.IsFavorite = isFavorite;
-
-            _userDataRepository.SaveUserData(user, item, data, UserDataSaveReason.UpdateUserRating, CancellationToken.None);
+            // A favorite request changes only favorite status, even if another request updates playback or rating.
+            var update = new UpdateUserItemDataDto { IsFavorite = isFavorite };
+            _userDataRepository.SaveUserData(user, item, update, UserDataSaveReason.UpdateUserRating);
         }
 
         return _userDataRepository.GetUserDataDto(item, user)!;
@@ -696,9 +695,9 @@ public class UserLibraryController : BaseJellyfinApiController
 
         if (data is not null)
         {
-            data.Likes = likes;
-
-            _userDataRepository.SaveUserData(user, item, data, UserDataSaveReason.UpdateUserRating, CancellationToken.None);
+            // The partial DTO treats null as omitted, so the delete endpoint must request clearing explicitly.
+            var update = new UpdateUserItemDataDto { Likes = likes, ClearRating = !likes.HasValue };
+            _userDataRepository.SaveUserData(user, item, update, UserDataSaveReason.UpdateUserRating);
         }
 
         return _userDataRepository.GetUserDataDto(item, user);

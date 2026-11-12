@@ -90,25 +90,41 @@ namespace Emby.Server.Implementations.Library
             using var dbContext = _repository.CreateDbContext();
             using var transaction = dbContext.Database.BeginTransaction();
 
-            foreach (var key in keys)
+            // Read the item's state after acquiring the existing write transaction. Metadata keys are aliases,
+            // so a newly discovered provider ID inherits the existing state instead of starting another counter.
+            var entries = dbContext.UserData
+                .Where(value => value.ItemId.Equals(item.Id) && value.UserId.Equals(user.Id))
+                .ToDictionary(value => value.CustomDataKey, StringComparer.Ordinal);
+            var canonicalKey = keys[^1];
+            if (!entries.TryGetValue(canonicalKey, out var current))
             {
-                // Read after acquiring the existing write transaction so updates use the committed row.
-                var userDataEntry = dbContext.UserData.SingleOrDefault(
-                    value => value.ItemId.Equals(item.Id) && value.UserId.Equals(user.Id) && value.CustomDataKey == key);
-                if (userDataEntry is null)
+                current = CreateUserDataEntry(user, item, canonicalKey);
+                var previous = keys.Select(key => entries.GetValueOrDefault(key)).FirstOrDefault(value => value is not null)
+                    ?? entries.Values.FirstOrDefault();
+                if (previous is not null)
                 {
-                    userDataEntry = new UserData
-                    {
-                        ItemId = item.Id,
-                        UserId = user.Id,
-                        CustomDataKey = key,
-                        Item = null,
-                        User = null,
-                    };
-                    dbContext.UserData.Add(userDataEntry);
+                    UserDataUpdatePolicy.CopyState(previous, current);
                 }
 
-                update(userDataEntry);
+                entries.Add(canonicalKey, current);
+                dbContext.UserData.Add(current);
+            }
+
+            update(current);
+            foreach (var key in keys)
+            {
+                if (!entries.TryGetValue(key, out var userDataEntry))
+                {
+                    userDataEntry = CreateUserDataEntry(user, item, key);
+                    entries.Add(key, userDataEntry);
+                    dbContext.UserData.Add(userDataEntry);
+                }
+            }
+
+            // Older provider keys can still appear in cached reads or later reattachment. They name this same item.
+            foreach (var entry in entries.Values)
+            {
+                UserDataUpdatePolicy.CopyState(current, entry);
             }
 
             dbContext.SaveChanges();
@@ -129,6 +145,16 @@ namespace Emby.Server.Implementations.Library
                 Item = item
             });
         }
+
+        private static UserData CreateUserDataEntry(User user, BaseItem item, string key)
+            => new()
+            {
+                ItemId = item.Id,
+                UserId = user.Id,
+                CustomDataKey = key,
+                Item = null,
+                User = null,
+            };
 
         private static UserItemData Map(UserData dto)
         {

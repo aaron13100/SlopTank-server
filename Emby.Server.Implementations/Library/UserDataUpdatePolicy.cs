@@ -95,6 +95,24 @@ internal static class UserDataUpdatePolicy
         }
     }
 
+    /// <summary>
+    /// Copies current item state to a metadata alias without changing its identity or retention marker.
+    /// </summary>
+    /// <param name="source">The current item state, updated once inside the transaction.</param>
+    /// <param name="destination">The row for another metadata key of the same item and user.</param>
+    internal static void CopyState(UserData source, UserData destination)
+    {
+        destination.PlayCount = source.PlayCount;
+        destination.LastPlayedDate = source.LastPlayedDate;
+        destination.Played = source.Played;
+        destination.PlaybackPositionTicks = source.PlaybackPositionTicks;
+        destination.IsFavorite = source.IsFavorite;
+        destination.Rating = source.Rating;
+        destination.Likes = source.Likes;
+        destination.AudioStreamIndex = source.AudioStreamIndex;
+        destination.SubtitleStreamIndex = source.SubtitleStreamIndex;
+    }
+
     private static void ApplyPlaybackStart(UserData current, UserItemData incoming)
     {
         // Increment the persisted count, not the count read before another request committed.

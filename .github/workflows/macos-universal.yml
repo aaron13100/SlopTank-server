@@ -345,7 +345,9 @@ jobs:
         if: always()
         with:
           name: smoke-${{ matrix.runner }}
-          path: ${{ runner.temp }}/installed-smoke
+          path: |
+            ${{ runner.temp }}/installed-smoke/**
+            !${{ runner.temp }}/installed-smoke/mounts/**
           retention-days: 7
 
   artifact:

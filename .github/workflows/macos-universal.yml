@@ -166,6 +166,8 @@ jobs:
           path: web
           github-token: ${{ github.token }}
           run-id: ${{ inputs.reuse_components_run_id || github.run_id }}
+      - name: Preserve the source asset recipe before checking out product source
+        run: cp apps/macos/source_assets.py "$RUNNER_TEMP/source_assets.py"
       - name: Use the source that built the components
         env:
           PRODUCT_SOURCE: ${{ steps.components.outputs.source }}
@@ -201,6 +203,9 @@ jobs:
             --ffmpeg-run-id "osx-arm64=$FFMPEG_ARM64_BUILD_RUN_ID" \
             --source-kit-output "universal/SlopTank-$RELEASE_VERSION-ffmpeg-corresponding-source.tar.gz" \
             --version "$RELEASE_VERSION"
+      - name: Package preparation corresponding source separately
+        run: |
+          python "$RUNNER_TEMP/source_assets.py" --materials-dir universal/materials --output "universal/SlopTank-$RELEASE_VERSION-preparation-corresponding-source.tar.gz" --version "$RELEASE_VERSION"
       - name: Merge launcher and FFmpeg slices, then assemble one app
         run: |
           lipo -create components/osx-x64/SlopTank components/osx-arm64/SlopTank -output universal/SlopTank
@@ -231,6 +236,12 @@ jobs:
         with:
           name: ffmpeg-corresponding-source-kit
           path: universal/SlopTank-${{ env.RELEASE_VERSION }}-ffmpeg-corresponding-source.tar.gz
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preparation-corresponding-source-kit
+          path: universal/SlopTank-${{ env.RELEASE_VERSION }}-preparation-corresponding-source.tar.gz
           retention-days: 14
 
   installed-smoke:
@@ -364,6 +375,11 @@ jobs:
           path: candidate
           github-token: ${{ github.token }}
           run-id: ${{ inputs.reuse_run_id || github.run_id }}
+      - uses: actions/download-artifact@v4
+        if: ${{ !inputs.reuse_run_id }}
+        with:
+          name: preparation-corresponding-source-kit
+          path: candidate
       - uses: actions/upload-artifact@v4
         with:
           name: SlopTank-universal-macos

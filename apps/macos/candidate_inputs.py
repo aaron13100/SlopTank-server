@@ -14,7 +14,7 @@ SCHEMA = 'org.sloptank.macos-candidate-inputs/v1'
 PINS = ('WEB_REF', 'RELEASE_VERSION', 'FFMPEG_X64_BUILD_RUN_ID', 'FFMPEG_ARM64_BUILD_RUN_ID')
 JOBS = ('web', 'native (macos-15, osx-arm64, arm64)', 'native (macos-15-intel, osx-x64, x86_64)')
 ARTIFACTS = ('web', 'native-osx-arm64', 'native-osx-x64')
-ALLOWED = {WORKFLOW, 'apps/macos/candidate_inputs.py', 'apps/macos/smoke-installed-app.py',
+ALLOWED = {WORKFLOW, 'apps/macos/candidate_inputs.py', 'apps/macos/source_assets.py', 'apps/macos/smoke-installed-app.py',
            'apps/macos/smoke-browser-ui.cjs', 'apps/macos/welcome-ui.js',
            'apps/macos/owned_app_processes.py', 'apps/macos/smoke_deadline.py',
            'apps/macos/smoke_server_api.py', 'apps/macos/fetch-release-asset.py',

@@ -218,7 +218,7 @@ jobs:
           python apps/macos/assemble-app.py --launcher-binary universal/SlopTank --runtime osx-x64=components/osx-x64 --runtime osx-arm64=components/osx-arm64 --web-dir web --ffmpeg-dir universal/ffmpeg --intro-skipper-plugin components/osx-x64/upstream/IntroSkipper --release-materials-dir universal/materials --version "$RELEASE_VERSION" --build-number "$GITHUB_RUN_NUMBER" --output universal/SlopTank.app
           codesign --force --sign - universal/SlopTank.app
           python apps/macos/package-dmg.py --app universal/SlopTank.app --output universal/SlopTank.dmg --timeout-seconds 1200
-          shasum -a 256 universal/SlopTank.dmg > universal/SlopTank.dmg.sha256
+          (cd universal && shasum -a 256 SlopTank.dmg > SlopTank.dmg.sha256)
       - uses: actions/upload-artifact@v4
         with:
           name: candidate-dmg
@@ -239,7 +239,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, macos-15-intel]
+        runner: [macos-26, macos-15-intel]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 55
     steps:
@@ -297,6 +297,7 @@ jobs:
           BASELINE_DMG_SHA256: ${{ inputs.baseline_dmg_sha256 }}
         run: |
           python apps/macos/fetch-release-asset.py --repository "$GITHUB_REPOSITORY" --asset-id "$SIGNED_DMG_ASSET_ID" --sha256 "$SIGNED_DMG_SHA256" --output candidate/SlopTank.dmg
+          (cd candidate && shasum -a 256 SlopTank.dmg > SlopTank.dmg.sha256)
           if [ -n "$BASELINE_DMG_ASSET_ID" ]; then
             python apps/macos/fetch-release-asset.py --repository "$GITHUB_REPOSITORY" --asset-id "$BASELINE_DMG_ASSET_ID" --sha256 "$BASELINE_DMG_SHA256" --output candidate/SlopTank-upgrade-baseline.dmg
           fi
@@ -354,7 +355,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SIGNED_DMG_ASSET_ID: ${{ inputs.signed_dmg_asset_id }}
           SIGNED_DMG_SHA256: ${{ inputs.signed_dmg_sha256 }}
-        run: python apps/macos/fetch-release-asset.py --repository "$GITHUB_REPOSITORY" --asset-id "$SIGNED_DMG_ASSET_ID" --sha256 "$SIGNED_DMG_SHA256" --output candidate/SlopTank.dmg
+        run: |
+          python apps/macos/fetch-release-asset.py --repository "$GITHUB_REPOSITORY" --asset-id "$SIGNED_DMG_ASSET_ID" --sha256 "$SIGNED_DMG_SHA256" --output candidate/SlopTank.dmg
+          (cd candidate && sha256sum SlopTank.dmg > SlopTank.dmg.sha256)
       - uses: actions/download-artifact@v4
         with:
           name: ffmpeg-corresponding-source-kit

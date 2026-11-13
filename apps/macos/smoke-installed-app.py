@@ -45,6 +45,7 @@ from owned_app_processes import launch_app, quit_app, server_child, stop_owned_p
 from smoke_deadline import POLL_SECONDS, Deadline, SmokeError, run
 from smoke_server_api import api, json_api
 from playback_retention import capture_playback_state, verify_playback_state
+from macos_distribution import distribution_checks
 
 
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -55,7 +56,6 @@ ADMIN_PASSWORD = "Smoke-only-password-4917!"
 MEDIA_NAME = "SlopTank Installed App Smoke.mp4"
 UNREADY_NAME = "SlopTank Preparation Smoke.mkv"
 CLEANUP_RESERVE_SECONDS = 105
-DEVELOPER_TEAM_ID = "6227ZC5AC2"
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
@@ -326,36 +326,6 @@ def _mount_app_image(dmg: Path, mounts: Path, devices: list[str], deadline: Dead
     if not mounted.is_relative_to(mounts.resolve()):
         raise SmokeError(f"Image mounted outside its owned directory: {mounted}")
     return mounted
-
-
-def _distribution_checks(dmg: Path, app: Path, deadline: Deadline, *, notarized: bool) -> dict[str, str]:
-    """Assess the supplied distribution before executing any of its application code."""
-    commands = {
-        "app_seal": ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)],
-        "app_signature": ["/usr/bin/codesign", "--display", "--verbose=4", str(app)],
-    }
-    if notarized:
-        commands.update({
-            "stapled_ticket": ["/usr/bin/xcrun", "stapler", "validate", str(dmg)],
-            "dmg_assessment": ["/usr/sbin/spctl", "--assess", "--type", "open", "--context", "context:primary-signature", "--verbose=4", str(dmg)],
-            "app_assessment": ["/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=4", str(app)],
-        })
-    results = {}
-    failures = {}
-    for name, command in commands.items():
-        result = run(command, name, deadline, timeout=120, check=False)
-        results[name] = result.stdout + result.stderr
-        if result.returncode:
-            failures[name] = results[name]
-    signature = results["app_signature"]
-    if (f"TeamIdentifier={DEVELOPER_TEAM_ID}" not in signature or "Timestamp=" not in signature
-            or "(runtime)" not in signature or "Authority=Developer ID Application:" not in signature):
-        failures["identity"] = f"App lacks the expected Developer ID identity, timestamp or runtime: {signature}"
-    if notarized and "source=Notarized Developer ID" not in results["app_assessment"]:
-        failures["notarization"] = results["app_assessment"]
-    if failures:
-        raise SmokeError(f"Distribution checks failed: {failures!r}")
-    return results
 
 
 def _replace_stopped_app(source_app: Path, copied_app: Path, deadline: Deadline) -> None:
@@ -708,7 +678,7 @@ def main() -> int:
         if not source_app.is_dir() or source_app.is_symlink():
             raise SmokeError(f"Mounted image has no regular {APP_NAME}: {source_app}")
         if args.require_notarized:
-            receipt["distribution"] = _distribution_checks(dmg, source_app, operations, notarized=True)
+            receipt["distribution"] = distribution_checks(dmg, source_app, operations, notarized=True)
             receipt["coverage"].append("developer-id-notarized")
         if args.baseline_dmg:
             baseline_mount = _mount_app_image(args.baseline_dmg, mounts / "baseline", devices, operations)
@@ -721,7 +691,7 @@ def main() -> int:
             if before["bundle_id"] != after["bundle_id"] or old_key >= new_key:
                 raise SmokeError(f"Upgrade requires the same app and a genuinely earlier version/build: {before!r} -> {after!r}")
             receipt["upgrade_baseline"] = {"dmg": str(args.baseline_dmg), "from": before, "to": after,
-                                           "signature": _distribution_checks(args.baseline_dmg, baseline_app, operations, notarized=False)}
+                                           "signature": distribution_checks(args.baseline_dmg, baseline_app, operations, notarized=False)}
             receipt["coverage"].append("signed-older-build-upgrade")
         copied_app = apps / APP_NAME
         run(["/usr/bin/ditto", str(source_app), str(copied_app)], "Copy app to isolated Applications", operations, timeout=480)

@@ -267,6 +267,7 @@ jobs:
                      'apps/macos/owned_app_processes.py', 'apps/macos/smoke_deadline.py',
                      'apps/macos/smoke_server_api.py', 'apps/macos/fetch-release-asset.py',
                      'apps/macos/playback_retention.py',
+                     'apps/macos/macos_distribution.py',
                      'apps/macos/SLOPTANK-MODIFICATION-NOTICES.txt'}
           changed = set(subprocess.check_output(['git', 'diff', '--name-only', source, 'HEAD'],
                                                text=True, timeout=30).splitlines())

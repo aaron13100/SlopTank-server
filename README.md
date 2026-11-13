@@ -1,4 +1,4 @@
-<!-- SlopTank modification notice: added or changed by SlopTank on 2026-07-22, 2026-09-08, 2026-09-09, 2026-09-19, 2026-10-14, 2026-10-31. -->
+<!-- SlopTank modification notice: added or changed by SlopTank on 2026-07-22, 2026-09-08, 2026-09-09, 2026-09-19, 2026-10-14, 2026-10-31, 2026-11-13. -->
 <h1 align="center">SlopTank Server</h1>
 <h3 align="center">A customized media server based on <a href="https://jellyfin.org">Jellyfin</a></h3>
 
@@ -41,6 +41,38 @@ organization. See `DISTRIBUTION-SOURCE.md` for the source/artifact contract,
 own contributions, and `LICENSE` for the distributed GPLv2 text.
 
 ## Server Development
+
+### Recorded media removals
+
+Explicit single-item and batch deletion record their origin when the last
+indexed version of a logical title is removed. Ordinary library cleanup records
+`Library`; an authorized deletion request records `Requested`. Issued aliases
+remain preserved. Restoring and identifying a title clears its old removal
+record. A missing file alone never establishes intentional deletion.
+
+Administrators can read `GET /Permalinks/{identifier}/Removal` or confirm a
+known historical deletion with `POST` on the same resource. The version-1 JSON
+response contains `Identifier`, `ContentId`, `LibraryItemCount`, `Status`,
+`Cause` and `RecordedAtUtc`. Status is `Indexed`, `IntentionallyDeleted`,
+`Removed` or `Unrecorded`. Indexed means database presence, not file playability.
+Unknown future causes remain visible and yield `Unrecorded`. The timestamp is
+when the removal or confirmation was recorded, not a reconstructed deletion date.
+
+Confirmation changes no files, URL or library association. It returns 404 for
+an unknown alias and 409 for an indexed title or ambiguous alias. Repeated
+confirmation preserves its first recorded timestamp. Both routes require
+administrator elevation; ordinary users cannot inspect private removal history.
+Normal user-scoped permalink resolution retains its existing visibility rules.
+
+The legacy import also preserves otherwise unmapped issued aliases when their
+recorded media kind is unambiguous. Their initial state is `Unrecorded` so an
+administrator can confirm known history without restoring media. Invalid or
+ambiguous legacy records remain explicit entries in the import report.
+A confirmed opaque removal without recorded provider metadata cannot be
+reassigned from a reused filename alone. Validated restoration and title joins
+retire empty source claims while preserving their historical rows and URLs;
+the upgrade applies the same rule to existing records. Claims with current
+items retain their existing ambiguity.
 
 These instructions set up a local development environment for this fork.
 Jellyfin's [development guide](https://jellyfin.org/docs/general/contributing/development.html)

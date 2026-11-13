@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03, 2026-11-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03, 2026-11-04, 2026-11-13.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -69,7 +69,8 @@ public sealed class MediaPermalinkRepository
                 contentId,
                 kind,
                 rows.Where(row => row.IsPublic && !row.DeletedAtUtc.HasValue).OrderBy(row => row.Ordinal).Select(row => row.Alias).ToArray(),
-                rows.Where(row => !row.DeletedAtUtc.HasValue).OrderBy(row => row.IsPublic ? row.Ordinal : int.MaxValue).Select(row => row.Alias).ToArray());
+                rows.Where(row => !row.DeletedAtUtc.HasValue).OrderBy(row => row.IsPublic ? row.Ordinal : int.MaxValue).Select(row => row.Alias).ToArray(),
+                rows.Any(row => row.LastRemovalRecordedAtUtc.HasValue));
         }
     }
 
@@ -171,6 +172,130 @@ public sealed class MediaPermalinkRepository
         }
     }
 
+    internal async Task<PermalinkRemovalBinding?> ReadRemovalAsync(string identifier, CancellationToken token)
+    {
+        var context = await _dbContextFactory.CreateDbContextAsync(token).ConfigureAwait(false);
+        await using (context.ConfigureAwait(false))
+        {
+            return await ReadRemovalBindingAsync(context, identifier, token).ConfigureAwait(false);
+        }
+    }
+
+    internal async Task<PermalinkRemovalBinding?> ConfirmRemovalAsync(string identifier, DateTime nowUtc, CancellationToken token)
+    {
+        var context = await _dbContextFactory.CreateDbContextAsync(token).ConfigureAwait(false);
+        await using (context.ConfigureAwait(false))
+        {
+            var transaction = await context.Database.BeginTransactionAsync(token).ConfigureAwait(false);
+            await using (transaction.ConfigureAwait(false))
+            {
+                var binding = await ReadRemovalBindingAsync(context, identifier, token).ConfigureAwait(false);
+                if (binding is null)
+                {
+                    return null;
+                }
+
+                if (binding.LibraryItemCount != 0)
+                {
+                    throw new PermalinkException(PermalinkErrorKind.Conflict, "title-still-indexed", "A title with current library records cannot be confirmed as removed.");
+                }
+
+                var recordedAt = binding.Cause == "Requested" && binding.RecordedAtUtc.HasValue
+                    ? binding.RecordedAtUtc.Value : nowUtc;
+                var rows = await context.MediaPermalinkAliases.Where(row => row.ContentId.Equals(binding.ContentId))
+                    .ToArrayAsync(token).ConfigureAwait(false);
+                foreach (var row in rows)
+                {
+                    if (row.LastRemovalCause == "Requested" && row.LastRemovalRecordedAtUtc == recordedAt)
+                    {
+                        continue;
+                    }
+
+                    row.LastRemovalCause = "Requested";
+                    row.LastRemovalRecordedAtUtc = recordedAt;
+                    row.UpdatedAtUtc = nowUtc;
+                }
+
+                await context.SaveChangesAsync(token).ConfigureAwait(false);
+                await transaction.CommitAsync(token).ConfigureAwait(false);
+                return binding with { Cause = "Requested", RecordedAtUtc = recordedAt };
+            }
+        }
+    }
+
+    private static async Task<PermalinkRemovalBinding?> ReadRemovalBindingAsync(JellyfinDbContext context, string identifier, CancellationToken token)
+    {
+        // One SELECT snapshots the alias metadata and current association count together.
+        var rows = await context.MediaPermalinkAliases
+            .Where(row => row.IsPublic && !row.DeletedAtUtc.HasValue && row.Alias == identifier)
+            .Select(row => new
+            {
+                row.ContentId,
+                row.RecordVersion,
+                LibraryItemCount = context.BaseItems.Count(item => item.PermalinkContentId.HasValue && item.PermalinkContentId.Value.Equals(row.ContentId)),
+                row.LastRemovalCause,
+                row.LastRemovalRecordedAtUtc
+            }).ToArrayAsync(token).ConfigureAwait(false);
+        if (rows.Length == 0)
+        {
+            return null;
+        }
+
+        if (rows.Length != 1)
+        {
+            throw new PermalinkException(PermalinkErrorKind.Conflict, "alias-identity-conflict", "The public alias has more than one active title identity.");
+        }
+
+        var value = rows[0];
+        var hasCause = value.LastRemovalCause is not null;
+        if (value.ContentId.Equals(Guid.Empty) || value.RecordVersion != 1
+            || hasCause != value.LastRemovalRecordedAtUtc.HasValue)
+        {
+            throw new PermalinkException(PermalinkErrorKind.Corrupt, "invalid-removal-record", "The title's stored removal record is incomplete or unsupported.");
+        }
+
+        return new PermalinkRemovalBinding(value.ContentId, value.LibraryItemCount, value.LastRemovalCause, value.LastRemovalRecordedAtUtc);
+    }
+
+    /// <summary>Retains an issued legacy URL without inventing a current library association or a removal cause.</summary>
+    /// <param name="request">The issued alias, its recorded kind and import identity/timestamp.</param>
+    /// <param name="token">The cancellation token.</param>
+    /// <returns>The completion of the idempotent preservation.</returns>
+    internal async Task PreserveUnmappedAliasAsync(UnmappedAliasPreservation request, CancellationToken token)
+    {
+        if (!MediaContentIdentifier.IsPublicAlias(request.Alias) || !_allowedKinds.Contains(request.Kind)
+            || request.ContentId.Equals(Guid.Empty) || request.NowUtc.Kind != DateTimeKind.Utc)
+        {
+            throw new PermalinkException(PermalinkErrorKind.Ineligible, "invalid-legacy-alias", "The issued legacy alias or its recorded media kind is invalid.");
+        }
+
+        var context = await _dbContextFactory.CreateDbContextAsync(token).ConfigureAwait(false);
+        await using (context.ConfigureAwait(false))
+        {
+            var transaction = await context.Database.BeginTransactionAsync(token).ConfigureAwait(false);
+            await using (transaction.ConfigureAwait(false))
+            {
+                // Never replace an existing claim, including one retired by metadata correction.
+                if (!await context.MediaPermalinkAliases.AnyAsync(row => row.Alias == request.Alias, token).ConfigureAwait(false))
+                {
+                    context.MediaPermalinkAliases.Add(new MediaPermalinkAlias
+                    {
+                        Alias = request.Alias,
+                        ContentId = request.ContentId,
+                        Kind = request.Kind,
+                        IsPublic = true,
+                        Ordinal = 0,
+                        CreatedAtUtc = request.NowUtc,
+                        UpdatedAtUtc = request.NowUtc
+                    });
+                    await context.SaveChangesAsync(token).ConfigureAwait(false);
+                }
+
+                await transaction.CommitAsync(token).ConfigureAwait(false);
+            }
+        }
+    }
+
     /// <summary>Preserves an already-issued legacy alias without merging distinct titles.</summary>
     /// <param name="request">The validated alias import request.</param>
     /// <param name="token">The cancellation token.</param>
@@ -198,6 +323,13 @@ public sealed class MediaPermalinkRepository
                 if (rows.Length == 0 || rows.Any(row => row.Kind != request.Kind))
                 {
                     throw MappingChanged();
+                }
+
+                await RetireUnoccupiedClaimsAsync(context, request, token).ConfigureAwait(false);
+                foreach (var row in rows.Where(row => row.IsPublic && request.PublicAliases.Contains(row.Alias) && row.DeletedAtUtc.HasValue))
+                {
+                    row.DeletedAtUtc = null;
+                    row.UpdatedAtUtc = request.NowUtc;
                 }
 
                 var ordinal = rows.Count(row => row.IsPublic);
@@ -320,6 +452,14 @@ public sealed class MediaPermalinkRepository
                 var aliasStateChanged = refinesKind;
                 foreach (var row in contentRows)
                 {
+                    if (row.LastRemovalCause is not null || row.LastRemovalRecordedAtUtc.HasValue)
+                    {
+                        row.LastRemovalCause = null;
+                        row.LastRemovalRecordedAtUtc = null;
+                        row.UpdatedAtUtc = request.NowUtc;
+                        aliasStateChanged = true;
+                    }
+
                     if (row.Kind != request.Kind)
                     {
                         row.Kind = request.Kind;
@@ -337,6 +477,19 @@ public sealed class MediaPermalinkRepository
                         row.DeletedAtUtc = request.NowUtc;
                         row.UpdatedAtUtc = request.NowUtc;
                         aliasStateChanged = true;
+                    }
+                }
+
+                if (request.ExpectedContentId.HasValue && !request.ExpectedContentId.Value.Equals(request.ContentId))
+                {
+                    var priorRows = await context.MediaPermalinkAliases
+                        .Where(row => row.ContentId.Equals(request.ExpectedContentId.Value) && row.LastRemovalRecordedAtUtc.HasValue)
+                        .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+                    foreach (var row in priorRows)
+                    {
+                        row.LastRemovalCause = null;
+                        row.LastRemovalRecordedAtUtc = null;
+                        row.UpdatedAtUtc = request.NowUtc;
                     }
                 }
 
@@ -409,6 +562,8 @@ public sealed class MediaPermalinkRepository
                         .ExecuteUpdateAsync(update => update.SetProperty(row => row.PermalinkContentId, request.ContentId), cancellationToken).ConfigureAwait(false);
                 }
 
+                await RetireUnoccupiedClaimsAsync(
+                    context, request with { PublicAliases = orderedAliases }, cancellationToken).ConfigureAwait(false);
                 context.MediaPermalinkAliases.AddRange(newRows);
                 try
                 {
@@ -421,6 +576,25 @@ public sealed class MediaPermalinkRepository
                 }
             }
         }
+    }
+
+    private static Task RetireUnoccupiedClaimsAsync(JellyfinDbContext context, PermalinkBindingRequest request, CancellationToken token)
+    {
+        // Current item-backed claims keep genuine ambiguity. A carried URL's
+        // empty source claim becomes historical in the same transaction that
+        // associates its current title, retaining its row and ordinal.
+        var aliases = request.PublicAliases.ToArray();
+        var compatibleKinds = _allowedKinds.Where(kind => MediaContentIdentifier.IsKindRefinement(kind, request.Kind)).ToArray();
+        return context.MediaPermalinkAliases
+            .Where(row => row.IsPublic && !row.DeletedAtUtc.HasValue
+                && aliases.Contains(row.Alias) && compatibleKinds.Contains(row.Kind)
+                && !row.ContentId.Equals(request.ContentId)
+                && !context.BaseItems.Any(item => item.PermalinkContentId.HasValue && item.PermalinkContentId.Value.Equals(row.ContentId)))
+            .ExecuteUpdateAsync(
+                update => update
+                    .SetProperty(row => row.DeletedAtUtc, (DateTime?)request.NowUtc)
+                    .SetProperty(row => row.UpdatedAtUtc, request.NowUtc),
+                token);
     }
 
     private static void ValidateRequest(PermalinkBindingRequest request)
@@ -609,7 +783,11 @@ public sealed class MediaPermalinkRepository
     private static PermalinkException MappingChanged() =>
         new(PermalinkErrorKind.Conflict, "mapping-changed", "The library item's permalink mapping changed before the update could be saved.");
 
-    internal sealed record PermalinkItemBinding(Guid? ContentId, string? Kind, IReadOnlyList<string> PublicAliases, IReadOnlyList<string> Keys);
+    internal sealed record PermalinkItemBinding(Guid? ContentId, string? Kind, IReadOnlyList<string> PublicAliases, IReadOnlyList<string> Keys, bool HasRecordedRemoval = false);
+
+    internal sealed record PermalinkRemovalBinding(Guid ContentId, int LibraryItemCount, string? Cause, DateTime? RecordedAtUtc);
+
+    internal sealed record UnmappedAliasPreservation(string Alias, string Kind, Guid ContentId, DateTime NowUtc);
 
     internal sealed record MediaPermalinkBinding(Guid ContentId, string Kind, IReadOnlyList<string> Ids, IReadOnlyList<string> Keys);
 

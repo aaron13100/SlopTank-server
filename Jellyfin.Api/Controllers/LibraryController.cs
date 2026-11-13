@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-18, 2026-09-19, 2026-10-14, 2026-10-31, 2026-11-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-14, 2026-09-18, 2026-09-19, 2026-10-14, 2026-10-31, 2026-11-04, 2026-11-13.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
@@ -390,7 +390,7 @@ public class LibraryController : BaseJellyfinApiController
 
         _libraryManager.DeleteItem(
             item,
-            new DeleteOptions { DeleteFileLocation = true },
+            new DeleteOptions { DeleteFileLocation = true, RemovalReason = LibraryRemovalReason.Requested },
             true);
 
         return NoContent();
@@ -442,7 +442,7 @@ public class LibraryController : BaseJellyfinApiController
         {
             _libraryManager.DeleteItem(
                 item,
-                new DeleteOptions { DeleteFileLocation = true },
+                new DeleteOptions { DeleteFileLocation = true, RemovalReason = LibraryRemovalReason.Requested },
                 true);
         }
 

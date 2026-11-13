@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03, 2026-11-13.
 using System;
 
 namespace Jellyfin.Database.Implementations.Entities;
@@ -34,4 +34,10 @@ public sealed class MediaPermalinkAlias
 
     /// <summary>Gets or sets when this alias was soft-deleted.</summary>
     public DateTime? DeletedAtUtc { get; set; }
+
+    /// <summary>Gets or sets the last recorded removal origin for this logical title.</summary>
+    public string? LastRemovalCause { get; set; }
+
+    /// <summary>Gets or sets when that removal or historical confirmation was recorded.</summary>
+    public DateTime? LastRemovalRecordedAtUtc { get; set; }
 }

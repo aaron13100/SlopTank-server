@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03, 2026-11-04, 2026-11-11.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-29, 2026-09-09, 2026-09-30, 2026-10-01, 2026-10-04, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03, 2026-11-04, 2026-11-11, 2026-11-13.
 #pragma warning disable CS1591
 #pragma warning disable CA5394
 
@@ -622,7 +622,7 @@ namespace Emby.Server.Implementations.Library
                 externalDataManager.DeleteExternalItemFiles(child);
             }
 
-            _persistenceService.DeleteItem([item.Id, .. children.Select(f => f.Id)]);
+            _persistenceService.DeleteItems(new LibraryItemRemoval([item.Id, .. children.Select(f => f.Id)], options.RemovalReason));
             _cache.TryRemove(item.Id, out _);
             foreach (var child in children)
             {

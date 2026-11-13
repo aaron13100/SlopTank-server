@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-03, 2026-11-13.
 #pragma warning disable RS0030 // Do not use banned APIs
 
 using System;
@@ -14,6 +14,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Permalinks;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Playlists;
@@ -162,7 +163,18 @@ public class ItemPersistenceService : IItemPersistenceService
 
     /// <inheritdoc />
     public void DeleteItem(params IReadOnlyList<Guid> ids)
+        => DeleteItems(new LibraryItemRemoval(ids, LibraryRemovalReason.Library));
+
+    /// <inheritdoc />
+    public void DeleteItems(LibraryItemRemoval removal)
     {
+        ArgumentNullException.ThrowIfNull(removal);
+        if (!Enum.IsDefined(removal.Reason))
+        {
+            throw new ArgumentOutOfRangeException(nameof(removal), removal.Reason, "Unknown library removal origin.");
+        }
+
+        var ids = removal.ItemIds;
         if (ids is null || ids.Count == 0 || ids.Any(f => f.Equals(BaseItemRepository.PlaceholderId)))
         {
             throw new ArgumentException("Guid can't be empty or the placeholder id.", nameof(ids));
@@ -171,7 +183,8 @@ public class ItemPersistenceService : IItemPersistenceService
         using var context = _dbProvider.CreateDbContext();
         using var transaction = context.Database.BeginTransaction();
 
-        var date = (DateTime?)DateTime.UtcNow;
+        var recordedAt = _clock.GetUtcNow().UtcDateTime;
+        var date = (DateTime?)recordedAt;
 
         var descendantIds = DescendantQueryHelper.GetOwnedDescendantIdsBatch(context, ids);
         foreach (var id in ids)
@@ -195,6 +208,12 @@ public class ItemPersistenceService : IItemPersistenceService
         }
 
         var relatedItems = descendantIds.ToArray();
+        var removedContentIds = context.BaseItems
+            .WhereOneOrMany(relatedItems, value => value.Id)
+            .Where(value => value.PermalinkContentId.HasValue)
+            .Select(value => value.PermalinkContentId!.Value)
+            .Distinct()
+            .ToArray();
 
         // When batch-deleting, multiple items may have UserData for the same (UserId, CustomDataKey).
         // Moving all of them to PlaceholderId would violate the UNIQUE constraint.
@@ -258,6 +277,18 @@ public class ItemPersistenceService : IItemPersistenceService
         context.PeopleBaseItemMap.WhereOneOrMany(relatedItems, e => e.ItemId).ExecuteDelete();
         context.Peoples.WhereOneOrMany(query, e => e.Id).Where(e => e.BaseItems!.Count == 0).ExecuteDelete();
         context.TrickplayInfos.WhereOneOrMany(relatedItems, e => e.ItemId).ExecuteDelete();
+        if (removedContentIds.Length > 0)
+        {
+            var cause = removal.Reason.ToString();
+            context.MediaPermalinkAliases
+                .WhereOneOrMany(removedContentIds, value => value.ContentId)
+                .Where(value => !context.BaseItems.Any(item => item.PermalinkContentId.HasValue && item.PermalinkContentId.Value.Equals(value.ContentId)))
+                .ExecuteUpdate(update => update
+                    .SetProperty(value => value.LastRemovalCause, cause)
+                    .SetProperty(value => value.LastRemovalRecordedAtUtc, date)
+                    .SetProperty(value => value.UpdatedAtUtc, recordedAt));
+        }
+
         context.SaveChanges();
         transaction.Commit();
     }

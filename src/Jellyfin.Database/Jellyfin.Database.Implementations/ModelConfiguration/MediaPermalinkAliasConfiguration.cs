@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-02.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-02, 2026-11-13.
 using Jellyfin.Database.Implementations.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
@@ -17,6 +17,7 @@ public sealed class MediaPermalinkAliasConfiguration : IEntityTypeConfiguration<
         builder.Property(alias => alias.Alias).HasMaxLength(512).IsRequired();
         builder.Property(alias => alias.Kind).HasMaxLength(32).IsRequired();
         builder.Property(alias => alias.RecordVersion).HasDefaultValue(1);
+        builder.Property(alias => alias.LastRemovalCause).HasMaxLength(32);
         builder.HasIndex(alias => alias.Alias);
         builder.HasIndex(alias => new { alias.ContentId, alias.Ordinal }).IsUnique();
         builder.ToTable("MediaPermalinkAliases", table =>

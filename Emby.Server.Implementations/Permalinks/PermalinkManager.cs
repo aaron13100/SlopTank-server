@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03, 2026-11-04.
+// SlopTank modification notice: added or changed by SlopTank on 2026-07-26, 2026-07-29, 2026-08-03, 2026-09-08, 2026-09-09, 2026-10-01, 2026-10-14, 2026-10-31, 2026-11-02, 2026-11-03, 2026-11-04, 2026-11-13.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -58,6 +58,43 @@ public sealed class PermalinkManager : IPermalinkManager
         ArgumentNullException.ThrowIfNull(item);
         var binding = await BindMetadataAsync(item, cancellationToken).ConfigureAwait(false);
         return new PermalinkResponse(1, binding.Ids, binding.Ids[0]);
+    }
+
+    /// <inheritdoc />
+    public async Task<PermalinkRemovalResponse?> GetRemovalAsync(string identifier, CancellationToken cancellationToken)
+    {
+        if (!MediaContentIdentifier.IsPublicAlias(identifier))
+        {
+            return null;
+        }
+
+        var binding = await _repository.ReadRemovalAsync(identifier, cancellationToken).ConfigureAwait(false);
+        return binding is null ? null : RemovalResponse(identifier, binding);
+    }
+
+    /// <inheritdoc />
+    public async Task<PermalinkRemovalResponse?> ConfirmRemovalAsync(string identifier, CancellationToken cancellationToken)
+    {
+        if (!MediaContentIdentifier.IsPublicAlias(identifier))
+        {
+            return null;
+        }
+
+        var binding = await _repository.ConfirmRemovalAsync(identifier, _clock.GetUtcNow().UtcDateTime, cancellationToken).ConfigureAwait(false);
+        return binding is null ? null : RemovalResponse(identifier, binding);
+    }
+
+    private static PermalinkRemovalResponse RemovalResponse(string identifier, MediaPermalinkRepository.PermalinkRemovalBinding binding)
+    {
+        var status = binding.LibraryItemCount > 0 ? "Indexed" : binding.Cause switch
+        {
+            "Requested" => "IntentionallyDeleted",
+            "Library" => "Removed",
+            _ => "Unrecorded"
+        };
+        var recordedAt = binding.RecordedAtUtc.HasValue
+            ? DateTime.SpecifyKind(binding.RecordedAtUtc.Value, DateTimeKind.Utc) : (DateTime?)null;
+        return new PermalinkRemovalResponse(1, identifier, binding.ContentId, binding.LibraryItemCount, status, binding.Cause, recordedAt);
     }
 
     /// <inheritdoc />
@@ -175,6 +212,7 @@ public sealed class PermalinkManager : IPermalinkManager
             }
 
             if (current.ContentId.HasValue && current.ContentId.Value.Equals(contentId) && current.Kind == metadata.Kind
+                && !current.HasRecordedRemoval
                 && retiredAliases.Length == 0
                 && aliases.All(alias => current.PublicAliases.Contains(alias, StringComparer.Ordinal))
                 && (metadata.CoordinateKey is null || current.Keys.Contains(metadata.CoordinateKey, StringComparer.Ordinal)))

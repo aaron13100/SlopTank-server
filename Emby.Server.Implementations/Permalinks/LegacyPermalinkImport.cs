@@ -1,4 +1,4 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-13.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -21,6 +21,7 @@ namespace Emby.Server.Implementations.Permalinks;
 /// <param name="legacy">The read-only old alias reader.</param>
 /// <param name="repository">The application alias table.</param>
 /// <param name="manager">The logical metadata association service.</param>
+/// <param name="identifiers">The existing internal logical identity allocator.</param>
 /// <param name="library">The existing library query service.</param>
 /// <param name="configuration">The old database location configuration.</param>
 /// <param name="paths">The application's report directory.</param>
@@ -30,6 +31,7 @@ public sealed class LegacyPermalinkImport(
     LegacyMediaPermalinkRepository legacy,
     MediaPermalinkRepository repository,
     PermalinkManager manager,
+    MediaContentIdentifier identifiers,
     ILibraryManager library,
     IConfiguration configuration,
     IApplicationPaths paths,
@@ -101,18 +103,47 @@ public sealed class LegacyPermalinkImport(
         var byId = items.ToDictionary(item => item.Id);
         var imported = 0;
         var casualties = 0;
+        var preservedUnmapped = 0;
+        var issuedByAlias = aliases.ToDictionary(alias => alias.Alias, StringComparer.Ordinal);
         foreach (var plan in Plan(aliases, snapshot))
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (plan.Error is not null)
             {
                 casualties++;
+                if (plan.Error == "no-current-library-title" && RecordedKind(issuedByAlias[plan.Alias]) is { } kind)
+                {
+                    // Absence cannot establish intent. Preserve the original URL so
+                    // an administrator can record known history without creating media.
+                    await repository.PreserveUnmappedAliasAsync(
+                        new MediaPermalinkRepository.UnmappedAliasPreservation(
+                            plan.Alias, kind, identifiers.CreateContentId(), clock.GetUtcNow().UtcDateTime),
+                        cancellationToken).ConfigureAwait(false);
+                    preservedUnmapped++;
+                }
+
                 await report.WriteLineAsync(JsonSerializer.Serialize(plan)).ConfigureAwait(false);
                 continue;
             }
 
             try
             {
+                if (MediaContentIdentifier.ParseProviderAlias(plan.Alias) is null
+                    && issuedByAlias[plan.Alias].ProviderAliases.Count == 0
+                    && await repository.ReadRemovalAsync(plan.Alias, cancellationToken).ConfigureAwait(false)
+                        is { Cause: "Requested", LibraryItemCount: 0 })
+                {
+                    // A reused filename cannot undo a confirmed removal. A
+                    // restored item must already have its logical association,
+                    // or matching recorded provider metadata, to reclaim this URL.
+                    casualties++;
+                    await report.WriteLineAsync(JsonSerializer.Serialize(plan with
+                    {
+                        Error = "confirmed-removal-needs-metadata-identity"
+                    })).ConfigureAwait(false);
+                    continue;
+                }
+
                 foreach (var itemId in plan.ItemIds)
                 {
                     await manager.EnsurePermalinkIdsAsync(byId[itemId], cancellationToken).ConfigureAwait(false);
@@ -140,7 +171,14 @@ public sealed class LegacyPermalinkImport(
         }
 
         logger.LogInformation("Imported {Imported} of {Total} legacy aliases; {Casualties} aliases need repair. Report: {ReportPath}", imported, aliases.Count, casualties, reportPath);
-        await report.WriteLineAsync(JsonSerializer.Serialize(new { Status = "summary", IssuedAliases = aliases.Count, ImportedAliases = imported, UnmappedAliases = casualties, MissingLibraryFiles = snapshot.Count(item => item.MissingFile) })).ConfigureAwait(false);
+        await report.WriteLineAsync(JsonSerializer.Serialize(new { Status = "summary", IssuedAliases = aliases.Count, ImportedAliases = imported, UnmappedAliases = casualties, PreservedUnmappedAliases = preservedUnmapped, MissingLibraryFiles = snapshot.Count(item => item.MissingFile) })).ConfigureAwait(false);
+    }
+
+    private static string? RecordedKind(LegacyMediaPermalinkRepository.LegacyAlias alias)
+    {
+        var kinds = alias.Kinds.Select(kind => kind.ToLowerInvariant()).Distinct(StringComparer.Ordinal).ToArray();
+        return kinds.Length == 1 && kinds[0] is "movie" or "series" or "season" or "episode" or "boxset" or "video" or "musicvideo"
+            ? kinds[0] : null;
     }
 
     /// <summary>Builds the same read-only import plan for startup and an operator dry run.</summary>

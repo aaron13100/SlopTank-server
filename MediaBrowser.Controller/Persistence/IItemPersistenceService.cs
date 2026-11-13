@@ -1,9 +1,10 @@
-// SlopTank modification notice: added or changed by SlopTank on 2026-11-03.
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-03, 2026-11-13.
 using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
 
 namespace MediaBrowser.Controller.Persistence;
 
@@ -31,6 +32,10 @@ public interface IItemPersistenceService
     /// </summary>
     /// <param name="ids">The IDs to delete.</param>
     void DeleteItem(params IReadOnlyList<Guid> ids);
+
+    /// <summary>Deletes items and records their removal origin in the same transaction.</summary>
+    /// <param name="removal">The records and known origin of the removal.</param>
+    void DeleteItems(LibraryItemRemoval removal);
 
     /// <summary>
     /// Saves items to the database.

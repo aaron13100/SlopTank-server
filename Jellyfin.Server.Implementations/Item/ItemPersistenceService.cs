@@ -177,7 +177,7 @@ public class ItemPersistenceService : IItemPersistenceService
         var ids = removal.ItemIds;
         if (ids is null || ids.Count == 0 || ids.Any(f => f.Equals(BaseItemRepository.PlaceholderId)))
         {
-            throw new ArgumentException("Guid can't be empty or the placeholder id.", nameof(ids));
+            throw new ArgumentException("Guid can't be empty or the placeholder id.", nameof(removal));
         }
 
         using var context = _dbProvider.CreateDbContext();

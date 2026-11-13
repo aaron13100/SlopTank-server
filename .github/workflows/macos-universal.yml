@@ -139,21 +139,30 @@ jobs:
         run: |
           python apps/macos/candidate_inputs.py component-selection --run-id "$COMPONENT_RUN_ID" --manifest "$RUNNER_TEMP/candidate-build-inputs.json"
           echo "source=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["product_source_commit"])' "$RUNNER_TEMP/candidate-build-inputs.json")" >> "$GITHUB_OUTPUT"
+          for mapping in native_x64_id=native-osx-x64 native_arm64_id=native-osx-arm64 web_id=web; do
+            key=${mapping%%=*}
+            name=${mapping#*=}
+            id=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["components"][sys.argv[2]]["id"])' "$RUNNER_TEMP/candidate-build-inputs.json" "$name")
+            echo "$key=$id" >> "$GITHUB_OUTPUT"
+          done
       - uses: actions/download-artifact@v4
         with:
-          name: native-osx-x64
+          artifact-ids: ${{ steps.components.outputs.native_x64_id }}
+          merge-multiple: true
           path: components/native-osx-x64
           github-token: ${{ github.token }}
           run-id: ${{ inputs.reuse_components_run_id || github.run_id }}
       - uses: actions/download-artifact@v4
         with:
-          name: native-osx-arm64
+          artifact-ids: ${{ steps.components.outputs.native_arm64_id }}
+          merge-multiple: true
           path: components/native-osx-arm64
           github-token: ${{ github.token }}
           run-id: ${{ inputs.reuse_components_run_id || github.run_id }}
       - uses: actions/download-artifact@v4
         with:
-          name: web
+          artifact-ids: ${{ steps.components.outputs.web_id }}
+          merge-multiple: true
           path: web
           github-token: ${{ github.token }}
           run-id: ${{ inputs.reuse_components_run_id || github.run_id }}

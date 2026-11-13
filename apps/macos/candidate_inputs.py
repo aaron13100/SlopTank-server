@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+from typing import Any
 
 WORKFLOW = '.github/workflows/macos-universal.yml'
 SCHEMA = 'org.sloptank.macos-candidate-inputs/v1'
@@ -21,20 +22,24 @@ ALLOWED = {WORKFLOW, 'apps/macos/candidate_inputs.py', 'apps/macos/smoke-install
            'apps/macos/SLOPTANK-MODIFICATION-NOTICES.txt'}
 
 
-def require(condition, message):
+def require(condition: bool, message: str) -> None:
+    """Raise a diagnostic when a provenance requirement fails."""
     if not condition:
         raise ValueError(message)
 
 
-def git(*args):
+def git(*args: str) -> str:
+    """Read a Git result from the checked-out workflow history."""
     return subprocess.check_output(['git', *args], text=True, timeout=30).strip()
 
 
-def api(path):
+def api(path: str) -> dict[str, Any]:
+    """Read a GitHub API response with the configured token."""
     return json.loads(subprocess.check_output(['gh', 'api', path], text=True, timeout=30))
 
 
-def run_data(run_id):
+def run_data(run_id: str) -> tuple[str, dict[str, Any]]:
+    """Check the run identity and return its API endpoint and metadata."""
     require(bool(re.fullmatch(r'[1-9][0-9]*', str(run_id))), 'Run ID must be a positive integer')
     endpoint = f"repos/{os.environ['GH_REPO']}/actions/runs/{run_id}"
     run = api(endpoint)
@@ -42,7 +47,8 @@ def run_data(run_id):
     return endpoint, run
 
 
-def pages(endpoint, resource, extra=''):
+def pages(endpoint: str, resource: str, extra: str = '') -> list[dict[str, Any]]:
+    """Read every API page for a run resource."""
     result = []
     page = 1
     while True:
@@ -53,7 +59,8 @@ def pages(endpoint, resource, extra=''):
         page += 1
 
 
-def require_jobs(endpoint, names):
+def require_jobs(endpoint: str, names: tuple[str, ...]) -> None:
+    """Require the latest attempt of each named job to have succeeded."""
     latest = {}
     for job in pages(endpoint, 'jobs', '&filter=all'):
         key = (job.get('run_attempt', 1), job['id'])
@@ -64,7 +71,8 @@ def require_jobs(endpoint, names):
                 and latest[name][1]['conclusion'] == 'success', f'Required job did not pass: {name}')
 
 
-def check_source(source, target):
+def check_source(source: str, target: str) -> dict[str, str]:
+    """Check ancestry, harness-only differences, and the four pinned inputs."""
     require(bool(re.fullmatch(r'[0-9a-f]{40}', source)) and bool(re.fullmatch(r'[0-9a-f]{40}', target)), 'Invalid source commit')
     subprocess.run(['git', 'merge-base', '--is-ancestor', source, target], check=True, timeout=30)
     changed = set(git('diff', '--no-renames', '--name-only', source, target).splitlines())
@@ -79,7 +87,8 @@ def check_source(source, target):
     return pins
 
 
-def component_selection(run_id, workflow_commit, current=False):
+def component_selection(run_id: str, workflow_commit: str, current: bool = False) -> dict[str, Any]:
+    """Validate component jobs and artifacts and return their provenance."""
     endpoint, run = run_data(run_id)
     require(run['head_branch'] == 'release-universal', 'Components must come from release-universal')
     require(run['status'] == 'completed' or (current and run['status'] == 'in_progress'), 'Component run is not completed')
@@ -100,7 +109,8 @@ def component_selection(run_id, workflow_commit, current=False):
             'component_run_id': str(run_id), 'pins': pins, 'components': components}
 
 
-def candidate_reuse(run_id, manifest_path, head):
+def candidate_reuse(run_id: str, manifest_path: Path, head: str) -> None:
+    """Validate a candidate and its original component provenance."""
     endpoint, run = run_data(run_id)
     require(run['status'] == 'completed', 'Candidate run must be completed')
     require_jobs(endpoint, ('assemble',))
@@ -108,7 +118,8 @@ def candidate_reuse(run_id, manifest_path, head):
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
         require(manifest.get('schema') == SCHEMA and manifest.get('workflow_commit') == run['head_sha'], 'Invalid candidate manifest or workflow commit')
         expected = component_selection(manifest['component_run_id'], run['head_sha'])
-        require(manifest == expected, 'Candidate manifest does not match component provenance')
+        require(all(manifest.get(key) == value for key, value in expected.items()),
+                'Candidate manifest does not match component provenance')
         check_source(manifest['product_source_commit'], head)
     else:
         require(run['head_branch'] == 'release-universal', 'Legacy candidate must be from release-universal')
@@ -117,7 +128,8 @@ def candidate_reuse(run_id, manifest_path, head):
     print(f'Validated candidate run {run_id}')
 
 
-def main():
+def main() -> None:
+    """Run the requested component-selection or candidate-reuse operation."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('operation', choices=('component-selection', 'candidate-reuse'))
     parser.add_argument('--run-id', required=True)

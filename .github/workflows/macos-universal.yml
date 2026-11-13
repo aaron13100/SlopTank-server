@@ -247,6 +247,10 @@ jobs:
   installed-smoke:
     needs: assemble
     if: ${{ !cancelled() && (needs.assemble.result == 'success' || (needs.assemble.result == 'skipped' && (inputs.reuse_run_id || inputs.signed_dmg_asset_id || inputs.signed_dmg_sha256 || inputs.baseline_dmg_asset_id || inputs.baseline_dmg_sha256))) }}
+    # Draft release asset reads require push visibility; grant it only to this fetching job.
+    permissions:
+      contents: write
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -347,6 +351,10 @@ jobs:
   artifact:
     needs: installed-smoke
     if: ${{ !cancelled() && needs['installed-smoke'].result == 'success' }}
+    # Draft release asset reads require push visibility; grant it only to this fetching job.
+    permissions:
+      contents: write
+      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

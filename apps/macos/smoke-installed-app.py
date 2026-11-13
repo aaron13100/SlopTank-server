@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11, 2026-11-12.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11, 2026-11-12, 2026-11-13.
 """Run backend API checks and optional GUI acceptance against a SlopTank DMG.
 
 Usage: python3 apps/macos/smoke-installed-app.py --dmg SlopTank.dmg \
@@ -43,6 +43,8 @@ sys.path.insert(0, str(preparation_source))
 from lib.load_scaled_timeout import load_scaled_timeout
 from owned_app_processes import launch_app, quit_app, server_child, stop_owned_processes
 from smoke_deadline import POLL_SECONDS, Deadline, SmokeError, run
+from smoke_server_api import api, json_api
+from playback_retention import capture_playback_state, verify_playback_state
 
 
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -52,7 +54,8 @@ ADMIN_NAME = "smoke-admin"
 ADMIN_PASSWORD = "Smoke-only-password-4917!"
 MEDIA_NAME = "SlopTank Installed App Smoke.mp4"
 UNREADY_NAME = "SlopTank Preparation Smoke.mkv"
-CLEANUP_RESERVE_SECONDS = 75
+CLEANUP_RESERVE_SECONDS = 105
+DEVELOPER_TEAM_ID = "6227ZC5AC2"
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
@@ -94,51 +97,6 @@ def make_profile(home: Path, port: int) -> dict[str, Path | str]:
     )
     return {"support": support, "profile": profile, "authority": authority,
             "config": config, "cache": cache, "profile_id": profile_id}
-
-
-def api(
-    base: str,
-    method: str,
-    path: str,
-    deadline: Deadline,
-    *,
-    body: dict[str, Any] | None = None,
-    token: str | None = None,
-    timeout: float = 30,
-) -> tuple[int, bytes, dict[str, str]]:
-    headers = {
-        "Accept": "application/json",
-        "Authorization": ('MediaBrowser Client="SlopTank Installed App Smoke", Device="Smoke", '
-                          'DeviceId="installed-app-smoke", Version="1.0"'),
-    }
-    payload = json.dumps(body).encode() if body is not None else None
-    if payload is not None:
-        headers["Content-Type"] = "application/json"
-    if token:
-        headers["Authorization"] += f', Token="{token}"'
-    request = urllib.request.Request(base.rstrip("/") + path, data=payload, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=deadline.timeout(timeout, f"{method} {path}")) as response:
-            return response.status, response.read(), dict(response.headers.items())
-    except urllib.error.HTTPError as error:
-        return error.code, error.read(), dict(error.headers.items())
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
-        raise SmokeError(f"{method} {path}: {error}") from error
-
-
-def json_api(base: str, method: str, path: str, deadline: Deadline, *,
-             body: dict[str, Any] | None = None, token: str | None = None,
-             timeout: float = 30) -> dict[str, Any]:
-    status, data, _ = api(base, method, path, deadline, body=body, token=token, timeout=timeout)
-    if not 200 <= status < 300:
-        raise SmokeError(f"{method} {path}: HTTP {status}: {data[:2000].decode(errors='replace')}")
-    try:
-        value = json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise SmokeError(f"{method} {path}: invalid JSON response {data[:500]!r}") from error
-    if not isinstance(value, dict):
-        raise SmokeError(f"{method} {path}: expected JSON object, got {type(value).__name__}")
-    return value
 
 
 def public_info(base: str, deadline: Deadline, app: subprocess.Popen[bytes]) -> dict[str, Any]:
@@ -332,10 +290,97 @@ def _run_browser_wizard(base_url: str, media_directory: Path, media: Path, libra
     return receipt
 
 
+def _bundle_version(app: Path) -> dict[str, str]:
+    """Read the real version fields without changing the supplied app bundle."""
+    info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    result = {"bundle_id": info.get("CFBundleIdentifier"),
+              "version": info.get("CFBundleShortVersionString"), "build": info.get("CFBundleVersion")}
+    if (not all(isinstance(value, str) and value for value in result.values())
+            or not all(all(part.isdecimal() for part in result[key].split(".")) for key in ("version", "build"))):
+        raise SmokeError(f"App has no comparable bundle version and build: {app}: {result!r}")
+    return result
+
+
+def _regular_dmg(value: str) -> Path:
+    """Normalize an image argument before any workspace or mount is created."""
+    image = Path(value).expanduser().absolute()
+    if not image.is_file() or image.is_symlink():
+        raise argparse.ArgumentTypeError(f"Expected a regular DMG file: {image}")
+    return image
+
+
+def _mount_app_image(dmg: Path, mounts: Path, devices: list[str], deadline: Deadline) -> Path:
+    """Mount inside the owned workspace and register its device before validation."""
+    mounts.mkdir(mode=0o700, parents=True, exist_ok=True)
+    attach = run(["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-plist",
+                  "-mountroot", str(mounts), str(dmg)], "Mount DMG read-only", deadline, timeout=90)
+    attached = plistlib.loads(attach.stdout.encode())
+    entities = attached.get("system-entities", [])
+    device = next((entry.get("dev-entry") for entry in entities if entry.get("dev-entry")), None)
+    if device:
+        devices.append(str(device))
+    mount_entry = next((entry for entry in entities if entry.get("mount-point")), None)
+    if not mount_entry or not device:
+        raise SmokeError(f"hdiutil attach omitted a mounted volume or device: {attached!r}")
+    mounted = Path(mount_entry["mount-point"]).resolve()
+    if not mounted.is_relative_to(mounts.resolve()):
+        raise SmokeError(f"Image mounted outside its owned directory: {mounted}")
+    return mounted
+
+
+def _distribution_checks(dmg: Path, app: Path, deadline: Deadline, *, notarized: bool) -> dict[str, str]:
+    """Assess the supplied distribution before executing any of its application code."""
+    commands = {
+        "app_seal": ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)],
+        "app_signature": ["/usr/bin/codesign", "--display", "--verbose=4", str(app)],
+    }
+    if notarized:
+        commands.update({
+            "stapled_ticket": ["/usr/bin/xcrun", "stapler", "validate", str(dmg)],
+            "dmg_assessment": ["/usr/sbin/spctl", "--assess", "--type", "open", "--context", "context:primary-signature", "--verbose=4", str(dmg)],
+            "app_assessment": ["/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=4", str(app)],
+        })
+    results = {}
+    failures = {}
+    for name, command in commands.items():
+        result = run(command, name, deadline, timeout=120, check=False)
+        results[name] = result.stdout + result.stderr
+        if result.returncode:
+            failures[name] = results[name]
+    signature = results["app_signature"]
+    if (f"TeamIdentifier={DEVELOPER_TEAM_ID}" not in signature or "Timestamp=" not in signature
+            or "(runtime)" not in signature or "Authority=Developer ID Application:" not in signature):
+        failures["identity"] = f"App lacks the expected Developer ID identity, timestamp or runtime: {signature}"
+    if notarized and "source=Notarized Developer ID" not in results["app_assessment"]:
+        failures["notarization"] = results["app_assessment"]
+    if failures:
+        raise SmokeError(f"Distribution checks failed: {failures!r}")
+    return results
+
+
+def _replace_stopped_app(source_app: Path, copied_app: Path, deadline: Deadline) -> None:
+    """Replace an owned app after its launcher and server have been stopped."""
+    replacement = copied_app.with_name("SlopTank.replacement.app")
+    previous = copied_app.with_name("SlopTank.previous.app")
+    if replacement.exists() or replacement.is_symlink() or previous.exists() or previous.is_symlink():
+        raise SmokeError("Owned app replacement paths are unexpectedly occupied.")
+    run(["/usr/bin/ditto", str(source_app), str(replacement)],
+        "Copy the app bundle for stopped-app replacement", deadline, timeout=480)
+    os.replace(copied_app, previous)
+    try:
+        os.replace(replacement, copied_app)
+    except OSError:
+        os.replace(previous, copied_app)
+        raise
+    run([sys.executable, "-c", "import shutil,sys; shutil.rmtree(sys.argv[1])", str(previous)],
+        "Remove the owned previous app copy after replacement", deadline, timeout=120)
+
+
 def run_gui_acceptance(source_app: Path, copied_app: Path, work: Path, media_directory: Path,
                        media: Path, expected_rid: str, live: dict[str, Any],
-                       journeys: dict[str, Any], deadline: Deadline) -> dict[str, Any]:
-    """Exercise the default and alternate native welcome paths in separate homes."""
+                       journeys: dict[str, Any], deadline: Deadline, *,
+                       baseline_app: Path | None = None) -> dict[str, Any]:
+    """Exercise fresh native paths and an optional genuine older-build upgrade."""
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_OS") != "macOS" or not os.environ.get("GITHUB_RUN_ID"):
         raise SmokeError("Interactive acceptance is allowed only inside its authorized GitHub macOS guest.")
     if not shutil.which("node"):
@@ -374,7 +419,7 @@ def run_gui_acceptance(source_app: Path, copied_app: Path, work: Path, media_dir
         app_log = work / name / "native-app.log"
         app_log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         expected_root = selected_root or home / PROFILE_RELATIVE / "ServerProfile"
-        journey_key = "default_root" if name == "gui-default" else "alternate_root"
+        journey_key = {"gui-default": "default_root", "gui-alternate": "alternate_root", "gui-upgrade": "upgrade"}[name]
         journeys[journey_key].update({"native_app_log": str(app_log),
                                       "server_log": str(expected_root / "Logs/server.log"),
                                       "welcome_control": str(Path(__file__).with_name("welcome-ui.js"))})
@@ -403,97 +448,104 @@ def run_gui_acceptance(source_app: Path, copied_app: Path, work: Path, media_dir
         live.update({"process": None, "child": None, "data_path": None, "server_log": None,
                      "home": None, "app_log": None})
 
-    default_home = work / "gui-default/isolated-home"
-    default_work = work / "gui-default"
-    journeys["default_root"] = {"status": "running", "welcome_action": "Start SlopTank"}
-    default_process, default_profile, default_root, default_port, default_child, default_env, default_info = launch_journey(
-        "gui-default", default_home, "start-default")
-    default_server_id = str(default_info["Id"])
-    journeys["default_root"].update({"server_log": str(default_root / "Logs/server.log")})
-    if _user_defaults_key_present(bundle_id, default_env, deadline):
-        raise SmokeError("The normal default-root journey unexpectedly stored a location bookmark.")
-    default_base = f"http://127.0.0.1:{default_port}"
-    browser_env = dict(default_env)
-    browser_env["NODE_PATH"] = os.environ["SLOPTANK_PLAYWRIGHT_NODE_MODULES"]
-    browser_env["PATH"] = SYSTEM_PATH + os.pathsep + str(node_bin_dir)
-    browser_receipt = _run_browser_wizard(default_base, media_directory, media, "Smoke Movies",
-                                          ADMIN_NAME, ADMIN_PASSWORD, node, default_work, browser_env, deadline)
-    token, user_id = authenticate(default_base, deadline)
-    item_query = urllib.parse.urlencode({"Recursive": "true", "IncludeItemTypes": "Movie", "Fields": "Path"})
-    items = json_api(default_base, "GET", "/Items?" + item_query, deadline, token=token).get("Items", [])
-    media_items = [row for row in items if isinstance(row, dict)
-                   and Path(str(row.get("Path", ""))).resolve() == media]
-    if len(media_items) != 1:
-        raise SmokeError(f"Browser wizard did not create exactly one library item for {media}: {media_items!r}")
-    item_id = str(media_items[0].get("Id"))
-    playback_report = browser_receipt.get("serverPlaybackReport")
-    if (browser_receipt.get("itemId") != item_id or not isinstance(playback_report, dict)
-            or playback_report.get("nowPlayingItemId") != item_id):
-        raise SmokeError(f"Browser journey did not play the expected library item {item_id}: {browser_receipt!r}")
-    user_data = json_api(default_base, "GET", f"/Users/{user_id}/Items/{item_id}", deadline, token=token).get("UserData")
-    if not isinstance(user_data, dict) or int(user_data.get("PlayCount") or 0) < 1:
-        raise SmokeError(f"Server recorded no playback start for the UI-played item {item_id}: {user_data!r}")
-    default_profile_id = default_profile.get("profileID")
-    if not default_profile_id:
-        raise SmokeError("Default welcome journey did not record its private profile ID.")
-    journeys["default_root"].update({"profile": str(default_root), "profile_id": default_profile_id,
-                                     "server_id": default_info["Id"], "browser": browser_receipt,
-                                     "admin_user_id": user_id, "library_item_id": item_id,
-                                     "server_playback": {"play_count": user_data.get("PlayCount"),
-                                                         "last_played_date": user_data.get("LastPlayedDate"),
-                                                         "session_report": playback_report},
-                                     "backend_api_coverage": "API confirms UI-created account/library item and its playback start",
-                                     "user_defaults_bookmark_present": False})
-    quit_journey(default_process, default_port)
+    def default_journey(name: str) -> dict[str, Path]:
+        journey_key = {"gui-default": "default_root", "gui-upgrade": "upgrade"}[name]
+        before_version = _bundle_version(copied_app)
+        target_version = _bundle_version(source_app)
+        default_home = work / name / "isolated-home"
+        default_work = work / name
+        journeys[journey_key] = {"status": "running", "welcome_action": "Start SlopTank"}
+        default_process, default_profile, default_root, default_port, default_child, default_env, default_info = launch_journey(
+            name, default_home, "start-default")
+        default_server_id = str(default_info["Id"])
+        journeys[journey_key].update({"server_log": str(default_root / "Logs/server.log")})
+        if _user_defaults_key_present(bundle_id, default_env, deadline):
+            raise SmokeError("The normal default-root journey unexpectedly stored a location bookmark.")
+        default_base = f"http://127.0.0.1:{default_port}"
+        browser_env = dict(default_env)
+        browser_env["NODE_PATH"] = os.environ["SLOPTANK_PLAYWRIGHT_NODE_MODULES"]
+        browser_env["PATH"] = SYSTEM_PATH + os.pathsep + str(node_bin_dir)
+        browser_receipt = _run_browser_wizard(default_base, media_directory, media, "Smoke Movies",
+                                              ADMIN_NAME, ADMIN_PASSWORD, node, default_work, browser_env, deadline)
+        token, user_id = authenticate(default_base, deadline)
+        item_query = urllib.parse.urlencode({"Recursive": "true", "IncludeItemTypes": "Movie", "Fields": "Path"})
+        items = json_api(default_base, "GET", "/Items?" + item_query, deadline, token=token).get("Items", [])
+        media_items = [row for row in items if isinstance(row, dict)
+                       and Path(str(row.get("Path", ""))).resolve() == media]
+        if len(media_items) != 1:
+            raise SmokeError(f"Browser wizard did not create exactly one library item for {media}: {media_items!r}")
+        item_id = str(media_items[0].get("Id"))
+        playback_report = browser_receipt.get("serverPlaybackReport")
+        if (browser_receipt.get("itemId") != item_id or not isinstance(playback_report, dict)
+                or playback_report.get("nowPlayingItemId") != item_id):
+            raise SmokeError(f"Browser journey did not play the expected library item {item_id}: {browser_receipt!r}")
+        user_data = json_api(default_base, "GET", f"/Users/{user_id}/Items/{item_id}", deadline, token=token).get("UserData")
+        if not isinstance(user_data, dict) or int(user_data.get("PlayCount") or 0) < 1:
+            raise SmokeError(f"Server recorded no playback start for the UI-played item {item_id}: {user_data!r}")
+        played_state = capture_playback_state({"base": default_base, "token": token,
+                                               "user_id": user_id, "item_id": item_id}, deadline)
+        default_profile_id = default_profile.get("profileID")
+        if not default_profile_id:
+            raise SmokeError("Default welcome journey did not record its private profile ID.")
+        journeys[journey_key].update({"profile": str(default_root), "profile_id": default_profile_id,
+                                         "server_id": default_info["Id"], "browser": browser_receipt,
+                                         "admin_user_id": user_id, "library_item_id": item_id,
+                                         "server_playback": {"play_count": user_data.get("PlayCount"),
+                                                             "last_played_date": user_data.get("LastPlayedDate"),
+                                                             "session_report": playback_report},
+                                         "backend_api_coverage": "API confirms UI-created account/library item and its playback start",
+                                         "user_defaults_bookmark_present": False})
+        quit_journey(default_process, default_port)
 
-    replacement = copied_app.with_name("SlopTank.replacement.app")
-    previous = copied_app.with_name("SlopTank.previous.app")
-    if replacement.exists() or replacement.is_symlink() or previous.exists() or previous.is_symlink():
-        raise SmokeError("Owned app replacement paths are unexpectedly occupied.")
-    run(["/usr/bin/ditto", str(source_app), str(replacement)],
-        "Copy the same-candidate app bundle for stopped-app replacement", deadline, timeout=480)
-    os.replace(copied_app, previous)
-    try:
-        os.replace(replacement, copied_app)
-    except OSError:
-        os.replace(previous, copied_app)
-        raise
-    run([sys.executable, "-c", "import shutil,sys; shutil.rmtree(sys.argv[1])", str(previous)],
-        "Remove the owned old same-version app copy after replacement", deadline, timeout=120)
+        _replace_stopped_app(source_app, copied_app, deadline)
 
-    replacement_env = _make_isolated_environment(default_home)
-    default_process = launch_app(executable, replacement_env, work / "gui-default/replacement-app.log")
-    live.update({"process": default_process, "child": None, "data_path": None,
-                 "server_log": None, "home": default_home, "app_log": work / "gui-default/replacement-app.log"})
-    profile_after, root_after = _read_profile(default_home)
-    if profile_after.get("profileID") != default_profile_id or root_after != default_root:
-        raise SmokeError("Same-version replacement changed the default profile identity or data root.")
-    default_data = root_after / "Data"
-    default_log = root_after / "Logs/server.log"
-    default_port = _profile_port(root_after)
-    default_child = server_child(default_process.pid, copied_app, default_data, expected_rid, deadline)
-    live.update({"process": default_process, "child": default_child, "data_path": default_data,
-                 "server_log": default_log, "home": default_home, "app_log": work / "gui-default/replacement-app.log"})
-    journeys["default_root"]["replacement_app_log"] = str(work / "gui-default/replacement-app.log")
-    default_info = public_info(f"http://127.0.0.1:{default_port}", deadline, default_process)
-    run_welcome_ui(default_process.pid, copied_app, default_home, "assert-no-welcome", work / "gui-default", deadline)
-    if default_info.get("Id") != default_server_id:
-        raise SmokeError(f"Same-version replacement changed the server identity: {default_server_id!r} -> {default_info.get('Id')!r}")
-    if default_info.get("StartupWizardCompleted") is not True:
-        raise SmokeError(f"Same-version replacement did not preserve completed web setup: {default_info!r}")
-    replacement_token, replacement_user = authenticate(f"http://127.0.0.1:{default_port}", deadline)
-    retained = json_api(f"http://127.0.0.1:{default_port}", "GET", "/Items?" + item_query,
-                        deadline, token=replacement_token).get("Items", [])
-    if replacement_user != user_id or not any(isinstance(row, dict) and str(row.get("Id")) == item_id for row in retained):
-        raise SmokeError("Same-version app replacement did not preserve the admin and UI-created library item.")
-    if not media.is_file():
-        raise SmokeError("Same-version app replacement removed the retained scratch media.")
-    journeys["default_root"]["same_version_replacement"] = {
-        "profile_id": profile_after.get("profileID"), "selected_root": str(root_after),
-        "server_id": default_info.get("Id"), "admin_user_id": replacement_user,
-        "library_item_retained": True, "media_retained": True, "welcome_reappeared": False
-    }
-    quit_journey(default_process, default_port)
+        replacement_env = _make_isolated_environment(default_home)
+        default_process = launch_app(executable, replacement_env, work / name / "replacement-app.log")
+        live.update({"process": default_process, "child": None, "data_path": None,
+                     "server_log": None, "home": default_home, "app_log": work / name / "replacement-app.log"})
+        profile_after, root_after = _read_profile(default_home)
+        if profile_after.get("profileID") != default_profile_id or root_after != default_root:
+            raise SmokeError("App replacement changed the default profile identity or data root.")
+        default_data = root_after / "Data"
+        default_log = root_after / "Logs/server.log"
+        default_port = _profile_port(root_after)
+        default_child = server_child(default_process.pid, copied_app, default_data, expected_rid, deadline)
+        live.update({"process": default_process, "child": default_child, "data_path": default_data,
+                     "server_log": default_log, "home": default_home, "app_log": work / name / "replacement-app.log"})
+        journeys[journey_key]["replacement_app_log"] = str(work / name / "replacement-app.log")
+        default_info = public_info(f"http://127.0.0.1:{default_port}", deadline, default_process)
+        run_welcome_ui(default_process.pid, copied_app, default_home, "assert-no-welcome", work / name, deadline)
+        if default_info.get("Id") != default_server_id:
+            raise SmokeError(f"App replacement changed the server identity: {default_server_id!r} -> {default_info.get('Id')!r}")
+        if default_info.get("StartupWizardCompleted") is not True:
+            raise SmokeError(f"App replacement did not preserve completed web setup: {default_info!r}")
+        replacement_token, replacement_user = authenticate(f"http://127.0.0.1:{default_port}", deadline)
+        retained = json_api(f"http://127.0.0.1:{default_port}", "GET", "/Items?" + item_query,
+                            deadline, token=replacement_token).get("Items", [])
+        if replacement_user != user_id or not any(isinstance(row, dict) and str(row.get("Id")) == item_id for row in retained):
+            raise SmokeError("App replacement did not preserve the admin and UI-created library item.")
+        journeys[journey_key]["playback_retention"] = verify_playback_state(
+            {"base": f"http://127.0.0.1:{default_port}", "token": replacement_token,
+             "user_id": replacement_user, "item_id": item_id}, played_state, deadline)
+        if not media.is_file():
+            raise SmokeError("App replacement removed the retained scratch media.")
+        journeys[journey_key]["version_transition" if before_version != target_version else "same_version_replacement"] = {
+            "from": before_version, "to": target_version,
+            "profile_id": profile_after.get("profileID"), "selected_root": str(root_after),
+            "server_id": default_info.get("Id"), "admin_user_id": replacement_user,
+            "library_item_retained": True, "media_retained": True, "welcome_reappeared": False
+        }
+        quit_journey(default_process, default_port)
+
+        journeys[journey_key]["status"] = "passed"
+        return {"home": default_home, "root": default_root}
+
+    default = default_journey("gui-default")
+    default_home, default_root = default["home"], default["root"]
+    upgrade = None
+    if baseline_app is not None:
+        _replace_stopped_app(baseline_app, copied_app, deadline)
+        upgrade = default_journey("gui-upgrade")
 
     alternate_home = work / "gui-alternate/isolated-home"
     alternate_root = work / "gui-alternate/empty-server-data"
@@ -554,6 +606,8 @@ def run_gui_acceptance(source_app: Path, copied_app: Path, work: Path, media_dir
         and alternate_root_after.is_dir(),
         "media": media.is_file(),
     }
+    if upgrade is not None:
+        retained_profiles["upgrade"] = (upgrade["home"] / PROFILE_RELATIVE / "profile.json").is_file() and upgrade["root"].is_dir()
     if not all(retained_profiles.values()):
         raise SmokeError(f"A GUI journey did not retain its isolated profile or scratch media: {retained_profiles!r}")
     journeys["retained_after_both_journeys"] = retained_profiles
@@ -573,12 +627,16 @@ def log_tail(path: Path, limit: int = 20000) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dmg", required=True, type=Path)
+    parser.add_argument("--dmg", required=True, type=_regular_dmg)
+    parser.add_argument("--baseline-dmg", type=_regular_dmg, help="Also exercise a genuine older signed app before replacing it with this candidate")
+    parser.add_argument("--require-notarized", action="store_true", help="Require Developer ID, hardened runtime, a stapled DMG and Gatekeeper acceptance")
     parser.add_argument("--work-dir", required=True, type=Path)
     parser.add_argument("--timeout-seconds", type=int, default=1200, help="One deadline for the full journey and cleanup; default 1200")
     parser.add_argument("--gui-acceptance", action="store_true",
                         help="Also run PID-scoped native welcome and real browser journeys; GitHub macOS guest only")
     args = parser.parse_args()
+    if args.baseline_dmg and not args.gui_acceptance:
+        parser.error("--baseline-dmg requires the authorized guest-only --gui-acceptance journey.")
     if sys.platform != "darwin":
         parser.error("This installed-app smoke runs only on macOS.")
     if args.gui_acceptance and not (
@@ -592,9 +650,7 @@ def main() -> int:
         parser.error("--gui-acceptance requires the runner's installed Google Chrome browser.")
     if args.timeout_seconds < 300:
         parser.error("--timeout-seconds must be at least 300")
-    dmg = args.dmg.expanduser().absolute()
-    if not dmg.is_file() or dmg.is_symlink():
-        parser.error(f"--dmg must name a regular file: {dmg}")
+    dmg = args.dmg
     work = args.work_dir.expanduser().absolute()
     if work.is_symlink():
         parser.error(f"--work-dir cannot be a symbolic link: {work}")
@@ -625,7 +681,8 @@ def main() -> int:
     for folder in (mounts, apps, home, media_dir):
         folder.mkdir(mode=0o700, parents=True)
     mounted: Path | None = None
-    device: str | None = None
+    devices: list[str] = []
+    baseline_app: Path | None = None
     copied_app: Path | None = None
     process: subprocess.Popen[bytes] | None = None
     child: dict[str, Any] | None = None
@@ -646,20 +703,26 @@ def main() -> int:
     signal.signal(signal.SIGTERM, interrupted)
 
     try:
-        attach = run(["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-plist",
-                      "-mountroot", str(mounts), str(dmg)], "Mount DMG read-only", operations, timeout=90)
-        attached = plistlib.loads(attach.stdout.encode())
-        entities = attached.get("system-entities", [])
-        device = next((entry.get("dev-entry") for entry in entities if entry.get("dev-entry")), None)
-        mount_entry = next((entry for entry in entities if entry.get("mount-point")), None)
-        if not mount_entry or not device:
-            raise SmokeError(f"hdiutil attach omitted a mounted volume or device: {attached!r}")
-        mounted = Path(mount_entry["mount-point"]).resolve()
-        if not mounted.is_relative_to(mounts.resolve()):
-            raise SmokeError(f"Image mounted outside its owned directory: {mounted}")
+        mounted = _mount_app_image(dmg, mounts, devices, operations)
         source_app = mounted / APP_NAME
         if not source_app.is_dir() or source_app.is_symlink():
             raise SmokeError(f"Mounted image has no regular {APP_NAME}: {source_app}")
+        if args.require_notarized:
+            receipt["distribution"] = _distribution_checks(dmg, source_app, operations, notarized=True)
+            receipt["coverage"].append("developer-id-notarized")
+        if args.baseline_dmg:
+            baseline_mount = _mount_app_image(args.baseline_dmg, mounts / "baseline", devices, operations)
+            baseline_app = baseline_mount / APP_NAME
+            if not baseline_app.is_dir() or baseline_app.is_symlink():
+                raise SmokeError(f"Baseline image has no regular {APP_NAME}: {baseline_app}")
+            before, after = _bundle_version(baseline_app), _bundle_version(source_app)
+            old_key = [tuple(map(int, before[field].split("."))) for field in ("version", "build")]
+            new_key = [tuple(map(int, after[field].split("."))) for field in ("version", "build")]
+            if before["bundle_id"] != after["bundle_id"] or old_key >= new_key:
+                raise SmokeError(f"Upgrade requires the same app and a genuinely earlier version/build: {before!r} -> {after!r}")
+            receipt["upgrade_baseline"] = {"dmg": str(args.baseline_dmg), "from": before, "to": after,
+                                           "signature": _distribution_checks(args.baseline_dmg, baseline_app, operations, notarized=False)}
+            receipt["coverage"].append("signed-older-build-upgrade")
         copied_app = apps / APP_NAME
         run(["/usr/bin/ditto", str(source_app), str(copied_app)], "Copy app to isolated Applications", operations, timeout=480)
         executable = copied_app / "Contents/MacOS/SlopTank"
@@ -733,9 +796,10 @@ def main() -> int:
                             "sha256": hashlib.sha256(media.read_bytes()).hexdigest()}
 
         if args.gui_acceptance:
-            receipt["gui_acceptance"] = {"status": "running", "journeys": ["default-root", "alternate-empty-root"]}
+            receipt["gui_acceptance"] = {"status": "running", "journeys": ["default-root", "alternate-empty-root"] + (["older-build-upgrade"] if baseline_app else [])}
             receipt["gui_acceptance"] = run_gui_acceptance(source_app, copied_app, work, media_dir, media,
-                                                           expected_rid, gui_live, receipt["gui_acceptance"], operations)
+                                                           expected_rid, gui_live, receipt["gui_acceptance"], operations,
+                                                           baseline_app=baseline_app)
 
         unready = media_dir / UNREADY_NAME
         run([str(ffmpeg), "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
@@ -887,7 +951,7 @@ def main() -> int:
                         receipt["cleanup_errors"].append(f"Could not remove owned replacement copy {temporary_app}: {error}")
                         receipt["status"] = "failed"
                         result_code = 1
-        if device:
+        for device in reversed(devices):
             try:
                 run(["/usr/bin/hdiutil", "detach", str(device)], "Detach mounted DMG", deadline, timeout=30)
             except Exception as error:
@@ -900,7 +964,7 @@ def main() -> int:
                                "server_tail": log_tail(server_log) if server_log else ""}
             if args.gui_acceptance:
                 gui_logs: dict[str, dict[str, Any]] = {}
-                for journey_name in ("default_root", "alternate_root"):
+                for journey_name in ("default_root", "alternate_root") + (("upgrade",) if args.baseline_dmg else ()):
                     journey = receipt.get("gui_acceptance", {}).get(journey_name, {})
                     gui_logs[journey_name] = {}
                     for key in ("native_app_log", "replacement_app_log", "relaunch_app_log", "server_log"):

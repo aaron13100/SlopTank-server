@@ -1,4 +1,4 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11, 2026-11-12.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11, 2026-11-12, 2026-11-13.
 name: Universal Mac artifact
 
 on:
@@ -8,6 +8,26 @@ on:
     inputs:
       reuse_run_id:
         description: Recheck a previously assembled candidate after a harness-only fix
+        required: false
+        type: string
+        default: ''
+      signed_dmg_asset_id:
+        description: Repository release asset ID of the signed and stapled SlopTank.dmg
+        required: false
+        type: string
+        default: ''
+      signed_dmg_sha256:
+        description: Exact SHA-256 after notarization and stapling
+        required: false
+        type: string
+        default: ''
+      baseline_dmg_asset_id:
+        description: Optional SlopTank-upgrade-baseline.dmg release asset ID for a genuine older-build upgrade
+        required: false
+        type: string
+        default: ''
+      baseline_dmg_sha256:
+        description: Exact SHA-256 of the older signed upgrade fixture
         required: false
         type: string
         default: ''
@@ -24,7 +44,7 @@ permissions:
 
 jobs:
   native:
-    if: ${{ !inputs.reuse_run_id }}
+    if: ${{ !inputs.reuse_run_id && !inputs.signed_dmg_asset_id && !inputs.signed_dmg_sha256 && !inputs.baseline_dmg_asset_id && !inputs.baseline_dmg_sha256 }}
     strategy:
       fail-fast: false
       matrix:
@@ -65,7 +85,7 @@ jobs:
           retention-days: 7
 
   web:
-    if: ${{ !inputs.reuse_run_id }}
+    if: ${{ !inputs.reuse_run_id && !inputs.signed_dmg_asset_id && !inputs.signed_dmg_sha256 && !inputs.baseline_dmg_asset_id && !inputs.baseline_dmg_sha256 }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -91,7 +111,7 @@ jobs:
           retention-days: 7
 
   assemble:
-    if: ${{ !inputs.reuse_run_id }}
+    if: ${{ !inputs.reuse_run_id && !inputs.signed_dmg_asset_id && !inputs.signed_dmg_sha256 && !inputs.baseline_dmg_asset_id && !inputs.baseline_dmg_sha256 }}
     needs: [native, web]
     runs-on: macos-15
     timeout-minutes: 60
@@ -176,13 +196,13 @@ jobs:
 
   installed-smoke:
     needs: assemble
-    if: ${{ !cancelled() && (needs.assemble.result == 'success' || (inputs.reuse_run_id && needs.assemble.result == 'skipped')) }}
+    if: ${{ !cancelled() && (needs.assemble.result == 'success' || (needs.assemble.result == 'skipped' && (inputs.reuse_run_id || inputs.signed_dmg_asset_id || inputs.signed_dmg_sha256 || inputs.baseline_dmg_asset_id || inputs.baseline_dmg_sha256))) }}
     strategy:
       fail-fast: false
       matrix:
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
         with:
@@ -190,6 +210,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Validate signed-distribution inputs
+        env:
+          REUSE_RUN_ID: ${{ inputs.reuse_run_id }}
+          SIGNED_DMG_ASSET_ID: ${{ inputs.signed_dmg_asset_id }}
+          SIGNED_DMG_SHA256: ${{ inputs.signed_dmg_sha256 }}
+          BASELINE_DMG_ASSET_ID: ${{ inputs.baseline_dmg_asset_id }}
+          BASELINE_DMG_SHA256: ${{ inputs.baseline_dmg_sha256 }}
+        run: |
+          python - <<'PY'
+          import os
+
+          class ReleaseInputError(RuntimeError):
+              pass
+
+          for prefix in ('SIGNED', 'BASELINE'):
+              if bool(os.environ[prefix + '_DMG_ASSET_ID']) != bool(os.environ[prefix + '_DMG_SHA256']):
+                  raise ReleaseInputError(prefix + ' requires both an asset ID and SHA-256.')
+          if (os.environ['SIGNED_DMG_ASSET_ID'] or os.environ['BASELINE_DMG_ASSET_ID']) and not os.environ['REUSE_RUN_ID']:
+              raise ReleaseInputError('Post-build distribution checks require the exact qualified reuse_run_id.')
+          if os.environ['BASELINE_DMG_ASSET_ID'] and not os.environ['SIGNED_DMG_ASSET_ID']:
+              raise ReleaseInputError('The older-build upgrade fixture requires a signed release candidate.')
+          PY
       - name: Require unchanged product inputs for a reused candidate
         if: ${{ inputs.reuse_run_id }}
         env:
@@ -223,6 +265,8 @@ jobs:
           allowed = {'.github/workflows/macos-universal.yml', 'apps/macos/smoke-installed-app.py',
                      'apps/macos/smoke-browser-ui.cjs', 'apps/macos/welcome-ui.js',
                      'apps/macos/owned_app_processes.py', 'apps/macos/smoke_deadline.py',
+                     'apps/macos/smoke_server_api.py', 'apps/macos/fetch-release-asset.py',
+                     'apps/macos/playback_retention.py',
                      'apps/macos/SLOPTANK-MODIFICATION-NOTICES.txt'}
           changed = set(subprocess.check_output(['git', 'diff', '--name-only', source, 'HEAD'],
                                                text=True, timeout=30).splitlines())
@@ -242,6 +286,19 @@ jobs:
           path: candidate
           github-token: ${{ github.token }}
           run-id: ${{ inputs.reuse_run_id || github.run_id }}
+      - name: Fetch the exact notarized distribution and optional upgrade fixture
+        if: ${{ inputs.signed_dmg_asset_id }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED_DMG_ASSET_ID: ${{ inputs.signed_dmg_asset_id }}
+          SIGNED_DMG_SHA256: ${{ inputs.signed_dmg_sha256 }}
+          BASELINE_DMG_ASSET_ID: ${{ inputs.baseline_dmg_asset_id }}
+          BASELINE_DMG_SHA256: ${{ inputs.baseline_dmg_sha256 }}
+        run: |
+          python apps/macos/fetch-release-asset.py --repository "$GITHUB_REPOSITORY" --asset-id "$SIGNED_DMG_ASSET_ID" --sha256 "$SIGNED_DMG_SHA256" --output candidate/SlopTank.dmg
+          if [ -n "$BASELINE_DMG_ASSET_ID" ]; then
+            python apps/macos/fetch-release-asset.py --repository "$GITHUB_REPOSITORY" --asset-id "$BASELINE_DMG_ASSET_ID" --sha256 "$BASELINE_DMG_SHA256" --output candidate/SlopTank-upgrade-baseline.dmg
+          fi
       - name: Install the pinned browser driver for the guest-only UI journey
         env:
           PLAYWRIGHT_INSTALL_PREFIX: ${{ runner.temp }}/sloptank-playwright
@@ -253,11 +310,20 @@ jobs:
       - name: Exercise native welcome, browser setup and backend acceptance
         env:
           RUNNER_LABEL: ${{ matrix.runner }}
+          SIGNED_DMG_ASSET_ID: ${{ inputs.signed_dmg_asset_id }}
+          BASELINE_DMG_ASSET_ID: ${{ inputs.baseline_dmg_asset_id }}
         run: |
           if [ "$RUNNER_LABEL" = macos-15-intel ]; then expected=x86_64; else expected=arm64; fi
           test "$(python -c 'import platform; print(platform.machine())')" = "$expected"
           sw_vers
-          python apps/macos/smoke-installed-app.py --dmg candidate/SlopTank.dmg --work-dir "$RUNNER_TEMP/installed-smoke" --timeout-seconds 1800 --gui-acceptance
+          distribution_arguments=()
+          timeout_seconds=1800
+          if [ -n "$SIGNED_DMG_ASSET_ID" ]; then distribution_arguments+=(--require-notarized); fi
+          if [ -n "$BASELINE_DMG_ASSET_ID" ]; then
+            distribution_arguments+=(--baseline-dmg candidate/SlopTank-upgrade-baseline.dmg)
+            timeout_seconds=2400
+          fi
+          python apps/macos/smoke-installed-app.py --dmg candidate/SlopTank.dmg --work-dir "$RUNNER_TEMP/installed-smoke" --timeout-seconds "$timeout_seconds" --gui-acceptance "${distribution_arguments[@]}"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -271,12 +337,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
           name: candidate-dmg
           path: candidate
           github-token: ${{ github.token }}
           run-id: ${{ inputs.reuse_run_id || github.run_id }}
+      - name: Retain the exact signed DMG that both runners accepted
+        if: ${{ inputs.signed_dmg_asset_id }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED_DMG_ASSET_ID: ${{ inputs.signed_dmg_asset_id }}
+          SIGNED_DMG_SHA256: ${{ inputs.signed_dmg_sha256 }}
+        run: python apps/macos/fetch-release-asset.py --repository "$GITHUB_REPOSITORY" --asset-id "$SIGNED_DMG_ASSET_ID" --sha256 "$SIGNED_DMG_SHA256" --output candidate/SlopTank.dmg
       - uses: actions/download-artifact@v4
         with:
           name: ffmpeg-corresponding-source-kit

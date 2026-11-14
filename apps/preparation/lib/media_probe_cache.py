@@ -1,5 +1,5 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04.
-"""Cache successful raw ffprobe JSON beside the external media repository.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-14.
+"""Cache successful raw ffprobe JSON under the selected profile.
 
 The cache stores probe facts only. Callers continue applying current policy to
 those facts on every invocation. Metadata snapshots and a quiet interval guard
@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Callable
 
 from lib.encode_cancellation import EncodeCancelled, bound_cancel_event
+from lib.organize_media_config import ROOT
 
 log = logging.getLogger("organize-media")
 
@@ -120,9 +121,8 @@ def _valid_stdout(stdout: str | bytes, expected_key: str) -> bytes | None:
 
 
 def _cache_directory() -> Path:
-    """Return the repository cache directory and reject a symlinked location."""
-    repository = Path(__file__).resolve().parents[2]
-    directory = repository / "cache" / "media-probe"
+    """Return the selected profile's cache and reject a symlinked location."""
+    directory = ROOT.resolve() / "cache" / "media-probe"
     ancestor = directory
     while not ancestor.exists() and not ancestor.is_symlink():
         ancestor = ancestor.parent
@@ -130,7 +130,7 @@ def _cache_directory() -> Path:
         raise OSError(f"probe cache ancestor is a symlink: {ancestor}")
     directory.mkdir(parents=True, exist_ok=True)
     if directory.resolve(strict=True) != directory:
-        raise OSError(f"probe cache directory resolves outside repository: {directory}")
+        raise OSError(f"probe cache directory resolves outside profile: {directory}")
     return directory
 
 

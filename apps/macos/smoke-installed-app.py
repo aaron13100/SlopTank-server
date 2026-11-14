@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11, 2026-11-12, 2026-11-13.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11, 2026-11-12, 2026-11-13, 2026-11-14.
 """Run backend API checks and optional GUI acceptance against a SlopTank DMG.
 
 Usage: python3 apps/macos/smoke-installed-app.py --dmg SlopTank.dmg \
@@ -46,6 +46,8 @@ from smoke_deadline import POLL_SECONDS, Deadline, SmokeError, run
 from smoke_server_api import api, json_api
 from playback_retention import capture_playback_state, verify_playback_state
 from macos_distribution import distribution_checks
+from smoke_gui_controls import write_json, run_welcome_ui, _run_browser_wizard
+from smoke_receipt_reuse import reusable_journeys
 
 
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -56,12 +58,6 @@ ADMIN_PASSWORD = "Smoke-only-password-4917!"
 MEDIA_NAME = "SlopTank Installed App Smoke.mp4"
 UNREADY_NAME = "SlopTank Preparation Smoke.mkv"
 CLEANUP_RESERVE_SECONDS = 105
-
-
-def write_json(path: Path, value: dict[str, Any]) -> None:
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
 
 
 def make_profile(home: Path, port: int) -> dict[str, Path | str]:
@@ -161,21 +157,6 @@ def direct_range(base: str, token: str, item_id: str, media: Path, deadline: Dea
     return {"status": status, "content_range": content_range, "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
 
 
-def run_welcome_ui(app_pid: int, app_bundle: Path, home: Path, action: str,
-                   work: Path, deadline: Deadline, selected_root: Path | None = None) -> None:
-    """Use macOS accessibility only against the recorded launcher PID."""
-    config_path = work / "welcome-ui-config.json"
-    write_json(config_path, {"pid": app_pid, "bundle": str(app_bundle), "home": str(home),
-                             "action": action, "selectedRoot": str(selected_root) if selected_root else None})
-    config_path.chmod(0o600)
-    script_path = Path(__file__).with_name("welcome-ui.js")
-    try:
-        run(["/usr/bin/osascript", "-l", "JavaScript", str(script_path), str(config_path)],
-            f"Run {action} against SlopTank PID {app_pid}", deadline, timeout=120)
-    finally:
-        config_path.unlink(missing_ok=True)
-
-
 def _read_profile(home: Path) -> tuple[dict[str, Any], Path]:
     profile_file = home / PROFILE_RELATIVE / "profile.json"
     if not profile_file.is_file() or profile_file.is_symlink():
@@ -260,34 +241,6 @@ def _capture_bookmark_preferences(bundle_id: str, environment: dict[str, str], o
         raise SmokeError(f"UserDefaults domain {bundle_id} has no nonempty data bookmark after app quit.")
     output.write_bytes(plistlib.dumps(values))
     return output
-
-
-def _run_browser_wizard(base_url: str, media_directory: Path, media: Path, library_name: str,
-                        admin_name: str, admin_password: str, node: str, work: Path,
-                        environment: dict[str, str], deadline: Deadline) -> dict[str, Any]:
-    module_dir = os.environ.get("SLOPTANK_PLAYWRIGHT_NODE_MODULES")
-    if not module_dir or not Path(module_dir).is_dir():
-        raise SmokeError("Pinned Playwright module directory is missing; interactive acceptance cannot continue.")
-    config_path = work / "browser-config.json"
-    write_json(config_path, {"baseUrl": base_url, "mediaDirectory": str(media_directory),
-                             "mediaName": media.name, "mediaTitle": media.stem, "mediaPath": str(media),
-                             "libraryName": library_name, "adminName": admin_name,
-                             "adminPassword": admin_password, "workDir": str(work)})
-    config_path.chmod(0o600)
-    try:
-        result = run([node, str(Path(__file__).with_name("smoke-browser-ui.cjs")), str(config_path)],
-                     "Complete browser setup, add the scratch library and decode its video", deadline,
-                     timeout=600, env=environment)
-    finally:
-        config_path.unlink(missing_ok=True)
-    receipt_path = work / "browser-journey.json"
-    try:
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        raise SmokeError(f"Browser driver did not write a valid receipt (exit {result.returncode}): {error}") from error
-    if result.returncode or receipt.get("status") != "passed":
-        raise SmokeError(f"Browser acceptance failed: {result.stderr[-2000:]} {receipt.get('error', '')}")
-    return receipt
 
 
 def _bundle_version(app: Path) -> dict[str, str]:
@@ -510,74 +463,76 @@ def run_gui_acceptance(source_app: Path, copied_app: Path, work: Path, media_dir
         journeys[journey_key]["status"] = "passed"
         return {"home": default_home, "root": default_root}
 
-    default = default_journey("gui-default")
-    default_home, default_root = default["home"], default["root"]
-    upgrade = None
-    if baseline_app is not None:
-        _replace_stopped_app(baseline_app, copied_app, deadline)
-        upgrade = default_journey("gui-upgrade")
+    retained_profiles = {"media": media.is_file()}
+    for key, name, source in (("default_root", "gui-default", None), ("upgrade", "gui-upgrade", baseline_app)):
+        if key == "upgrade" and source is None:
+            continue
+        if journeys.get(key, {}).get("status") != "passed":
+            if source is not None:
+                _replace_stopped_app(source, copied_app, deadline)
+            observed = default_journey(name)
+            retained_profiles["upgrade" if key == "upgrade" else "default"] = (
+                (observed["home"] / PROFILE_RELATIVE / "profile.json").is_file() and observed["root"].is_dir())
+        else:
+            retained_profiles["upgrade" if key == "upgrade" else "default"] = True
 
-    alternate_home = work / "gui-alternate/isolated-home"
-    alternate_root = work / "gui-alternate/empty-server-data"
-    journeys["alternate_root"] = {"status": "running", "welcome_action": "choose empty alternate folder, then Start SlopTank"}
-    alternate_process, alternate_profile, actual_alternate_root, alternate_port, alternate_child, alternate_env, alternate_info = launch_journey(
-        "gui-alternate", alternate_home, "choose-and-start", alternate_root)
-    journeys["alternate_root"].update({"native_app_log": str(app_log),
-                                       "server_log": str(actual_alternate_root / "Logs/server.log"),
-                                       "welcome_control": str(Path(__file__).with_name("welcome-ui.js"))})
-    alternate_base = f"http://127.0.0.1:{alternate_port}"
-    alternate_profile_id = alternate_profile.get("profileID")
-    if not alternate_profile_id or not (actual_alternate_root / ".sloptank-profile").is_file():
-        raise SmokeError("Alternate-root welcome journey did not persist its profile marker and identity.")
-    if not _user_defaults_key_present(bundle_id, alternate_env, deadline):
-        raise SmokeError("Alternate data-root bookmark is not readable in the guest UserDefaults domain.")
-    journeys["alternate_root"].update({"selected_root": str(actual_alternate_root),
-                                      "profile_id": alternate_profile_id, "server_id": alternate_info["Id"],
-                                      "user_defaults_bookmark_present": True,
-                                      "browser_setup": "intentionally not repeated on this second fresh profile"})
-    quit_journey(alternate_process, alternate_port)
-    # CFPreferences belongs to the ephemeral runner user; HOME isolates app files, not that service.
-    preferences_file = _capture_bookmark_preferences(
-        bundle_id, alternate_env, work / "gui-alternate/bookmark-preferences.plist", deadline)
-    journeys["alternate_root"]["preferences_capture"] = str(preferences_file)
-    journeys["alternate_root"]["preferences_scope"] = "ephemeral macOS guest user"
+    if journeys.get("alternate_root", {}).get("status") == "passed":
+        retained_profiles["alternate"] = True
+    else:
+        alternate_home = work / "gui-alternate/isolated-home"
+        alternate_root = work / "gui-alternate/empty-server-data"
+        journeys["alternate_root"] = {"status": "running", "welcome_action": "choose empty alternate folder, then Start SlopTank"}
+        alternate_process, alternate_profile, actual_alternate_root, alternate_port, alternate_child, alternate_env, alternate_info = launch_journey(
+            "gui-alternate", alternate_home, "choose-and-start", alternate_root)
+        journeys["alternate_root"].update({"native_app_log": str(app_log),
+                                           "server_log": str(actual_alternate_root / "Logs/server.log"),
+                                           "welcome_control": str(Path(__file__).with_name("welcome-ui.js"))})
+        alternate_base = f"http://127.0.0.1:{alternate_port}"
+        alternate_profile_id = alternate_profile.get("profileID")
+        if not alternate_profile_id or not (actual_alternate_root / ".sloptank-profile").is_file():
+            raise SmokeError("Alternate-root welcome journey did not persist its profile marker and identity.")
+        if not _user_defaults_key_present(bundle_id, alternate_env, deadline):
+            raise SmokeError("Alternate data-root bookmark is not readable in the guest UserDefaults domain.")
+        journeys["alternate_root"].update({"selected_root": str(actual_alternate_root),
+                                          "profile_id": alternate_profile_id, "server_id": alternate_info["Id"],
+                                          "user_defaults_bookmark_present": True,
+                                          "browser_setup": "intentionally not repeated on this second fresh profile"})
+        quit_journey(alternate_process, alternate_port)
+        # CFPreferences belongs to the ephemeral runner user; HOME isolates app files, not that service.
+        preferences_file = _capture_bookmark_preferences(
+            bundle_id, alternate_env, work / "gui-alternate/bookmark-preferences.plist", deadline)
+        journeys["alternate_root"]["preferences_capture"] = str(preferences_file)
+        journeys["alternate_root"]["preferences_scope"] = "ephemeral macOS guest user"
 
-    alternate_env = _make_isolated_environment(alternate_home)
-    alternate_process = launch_app(executable, alternate_env, work / "gui-alternate/relaunch-app.log")
-    live.update({"process": alternate_process, "child": None, "data_path": None,
-                 "server_log": None, "home": alternate_home, "app_log": work / "gui-alternate/relaunch-app.log"})
-    alternate_after, alternate_root_after = _read_profile(alternate_home)
-    if alternate_after.get("profileID") != alternate_profile_id or alternate_root_after != actual_alternate_root:
-        raise SmokeError("Alternate-root relaunch changed the selected folder or profile identity.")
-    alternate_data = alternate_root_after / "Data"
-    alternate_log = alternate_root_after / "Logs/server.log"
-    alternate_port = _profile_port(alternate_root_after)
-    alternate_child = server_child(alternate_process.pid, copied_app, alternate_data, expected_rid, deadline)
-    live.update({"process": alternate_process, "child": alternate_child, "data_path": alternate_data,
-                 "server_log": alternate_log, "home": alternate_home,
-                 "app_log": work / "gui-alternate/relaunch-app.log"})
-    journeys["alternate_root"]["relaunch_app_log"] = str(work / "gui-alternate/relaunch-app.log")
-    alternate_after_info = public_info(f"http://127.0.0.1:{alternate_port}", deadline, alternate_process)
-    run_welcome_ui(alternate_process.pid, copied_app, alternate_home, "assert-no-welcome",
-                   work / "gui-alternate", deadline)
-    if alternate_after_info.get("Id") != alternate_info.get("Id") or alternate_after_info.get("StartupWizardCompleted") is not False:
-        raise SmokeError("Alternate-root relaunch did not preserve its running server identity and pending browser wizard.")
-    if not _user_defaults_key_present(bundle_id, alternate_env, deadline):
-        raise SmokeError("Alternate data-root bookmark disappeared after launcher restart.")
-    journeys["alternate_root"]["relaunch"] = {
-        "selected_root": str(alternate_root_after), "profile_id": alternate_after.get("profileID"),
-        "server_id": alternate_after_info.get("Id"), "server_data_path": str(alternate_data),
-        "welcome_reappeared": False, "wizard_remains_pending": True
-    }
-    quit_journey(alternate_process, alternate_port)
-    retained_profiles = {
-        "default": (default_home / PROFILE_RELATIVE / "profile.json").is_file() and default_root.is_dir(),
-        "alternate": (alternate_home / PROFILE_RELATIVE / "profile.json").is_file()
-        and alternate_root_after.is_dir(),
-        "media": media.is_file(),
-    }
-    if upgrade is not None:
-        retained_profiles["upgrade"] = (upgrade["home"] / PROFILE_RELATIVE / "profile.json").is_file() and upgrade["root"].is_dir()
+        alternate_env = _make_isolated_environment(alternate_home)
+        alternate_process = launch_app(executable, alternate_env, work / "gui-alternate/relaunch-app.log")
+        live.update({"process": alternate_process, "child": None, "data_path": None,
+                     "server_log": None, "home": alternate_home, "app_log": work / "gui-alternate/relaunch-app.log"})
+        alternate_after, alternate_root_after = _read_profile(alternate_home)
+        if alternate_after.get("profileID") != alternate_profile_id or alternate_root_after != actual_alternate_root:
+            raise SmokeError("Alternate-root relaunch changed the selected folder or profile identity.")
+        alternate_data = alternate_root_after / "Data"
+        alternate_log = alternate_root_after / "Logs/server.log"
+        alternate_port = _profile_port(alternate_root_after)
+        alternate_child = server_child(alternate_process.pid, copied_app, alternate_data, expected_rid, deadline)
+        live.update({"process": alternate_process, "child": alternate_child, "data_path": alternate_data,
+                     "server_log": alternate_log, "home": alternate_home,
+                     "app_log": work / "gui-alternate/relaunch-app.log"})
+        journeys["alternate_root"]["relaunch_app_log"] = str(work / "gui-alternate/relaunch-app.log")
+        alternate_after_info = public_info(f"http://127.0.0.1:{alternate_port}", deadline, alternate_process)
+        run_welcome_ui(alternate_process.pid, copied_app, alternate_home, "assert-no-welcome",
+                       work / "gui-alternate", deadline)
+        if alternate_after_info.get("Id") != alternate_info.get("Id") or alternate_after_info.get("StartupWizardCompleted") is not False:
+            raise SmokeError("Alternate-root relaunch did not preserve its running server identity and pending browser wizard.")
+        if not _user_defaults_key_present(bundle_id, alternate_env, deadline):
+            raise SmokeError("Alternate data-root bookmark disappeared after launcher restart.")
+        journeys["alternate_root"]["relaunch"] = {
+            "selected_root": str(alternate_root_after), "profile_id": alternate_after.get("profileID"),
+            "server_id": alternate_after_info.get("Id"), "server_data_path": str(alternate_data),
+            "welcome_reappeared": False, "wizard_remains_pending": True
+        }
+        quit_journey(alternate_process, alternate_port)
+        retained_profiles["alternate"] = (alternate_home / PROFILE_RELATIVE / "profile.json").is_file() and alternate_root_after.is_dir()
     if not all(retained_profiles.values()):
         raise SmokeError(f"A GUI journey did not retain its isolated profile or scratch media: {retained_profiles!r}")
     journeys["retained_after_both_journeys"] = retained_profiles
@@ -599,6 +554,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dmg", required=True, type=_regular_dmg)
     parser.add_argument("--baseline-dmg", type=_regular_dmg, help="Also exercise a genuine older signed app before replacing it with this candidate")
+    parser.add_argument("--reuse-smoke-receipt", type=Path, help="Reuse only validated passed GUI rows for the same signed app/runtime")
     parser.add_argument("--require-notarized", action="store_true", help="Require Developer ID, hardened runtime, a stapled DMG and Gatekeeper acceptance")
     parser.add_argument("--work-dir", required=True, type=Path)
     parser.add_argument("--timeout-seconds", type=int, default=1200, help="One deadline for the full journey and cleanup; default 1200")
@@ -607,6 +563,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.baseline_dmg and not args.gui_acceptance:
         parser.error("--baseline-dmg requires the authorized guest-only --gui-acceptance journey.")
+    if args.reuse_smoke_receipt and not (args.gui_acceptance and args.require_notarized):
+        parser.error("--reuse-smoke-receipt requires guest GUI acceptance and current notarized distribution checks.")
     if sys.platform != "darwin":
         parser.error("This installed-app smoke runs only on macOS.")
     if args.gui_acceptance and not (
@@ -634,6 +592,8 @@ def main() -> int:
         work.mkdir(mode=0o700)
     work.chmod(0o700)
 
+    with dmg.open("rb") as image:
+        dmg_sha256 = hashlib.file_digest(image, "sha256").hexdigest()
     started = time.monotonic()
     deadline = Deadline(args.timeout_seconds)
     operations = Deadline(max(1, args.timeout_seconds - CLEANUP_RESERVE_SECONDS))
@@ -641,7 +601,8 @@ def main() -> int:
     receipt_path = work / "smoke-installed-app.json"
     receipt: dict[str, Any] = {"schemaVersion": 1, "type": "sloptank-installed-app-smoke",
                                "status": "running", "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                               "dmg": str(dmg), "work_dir": str(work), "timeout_seconds": args.timeout_seconds,
+                               "dmg": str(dmg), "dmg_sha256": dmg_sha256, "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+                               "work_dir": str(work), "timeout_seconds": args.timeout_seconds,
                                "machine": platform.machine(), "cleanup_errors": [],
                                "coverage": ["backend-api"] + (["native-welcome-and-browser-ui"] if args.gui_acceptance else [])}
     mounts = work / "mounts"
@@ -767,6 +728,22 @@ def main() -> int:
 
         if args.gui_acceptance:
             receipt["gui_acceptance"] = {"status": "running", "journeys": ["default-root", "alternate-empty-root"] + (["older-build-upgrade"] if baseline_app else [])}
+            if args.reuse_smoke_receipt:
+                prior_path = args.reuse_smoke_receipt
+                if prior_path.is_symlink() or not prior_path.is_file():
+                    raise SmokeError(f"Prior smoke receipt must be a regular file: {prior_path}")
+                raw = prior_path.read_bytes()
+                prior = json.loads(raw)
+                reused = reusable_journeys(prior, distribution=receipt["distribution"], runtime_id=expected_rid,
+                                           bundle_version=_bundle_version(source_app), baseline=receipt.get("upgrade_baseline"),
+                                           dmg_sha256=dmg_sha256)
+                (work / "prior-smoke-original.json").write_bytes(raw)
+                receipt["gui_reuse"] = {"source_run_id": os.environ.get("SLOPTANK_REUSE_SMOKE_RUN_ID"),
+                    "source_receipt": str(prior_path), "source_receipt_sha256": hashlib.sha256(raw).hexdigest(),
+                    "source_status": prior.get("status"), "source_started_at": prior.get("started_at"),
+                    "source_finished_at": prior.get("finished_at"), "journeys": list(reused)}
+                receipt["gui_acceptance"].update(reused)
+                receipt["gui_acceptance"]["reused_journeys"] = list(reused)
             receipt["gui_acceptance"] = run_gui_acceptance(source_app, copied_app, work, media_dir, media,
                                                            expected_rid, gui_live, receipt["gui_acceptance"], operations,
                                                            baseline_app=baseline_app)
@@ -937,6 +914,9 @@ def main() -> int:
                 for journey_name in ("default_root", "alternate_root") + (("upgrade",) if args.baseline_dmg else ()):
                     journey = receipt.get("gui_acceptance", {}).get(journey_name, {})
                     gui_logs[journey_name] = {}
+                    if journey_name in receipt.get("gui_reuse", {}).get("journeys", []):
+                        gui_logs[journey_name]["source"] = "Historical log paths retained verbatim in prior-smoke-original.json; not reopened on this guest"
+                        continue
                     for key in ("native_app_log", "replacement_app_log", "relaunch_app_log", "server_log"):
                         log_path = journey.get(key)
                         if log_path:

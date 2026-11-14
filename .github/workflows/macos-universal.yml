@@ -1,4 +1,4 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11, 2026-11-12, 2026-11-13.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-11, 2026-11-12, 2026-11-13, 2026-11-14.
 name: Universal Mac artifact
 
 on:
@@ -13,6 +13,11 @@ on:
         default: ''
       reuse_run_id:
         description: Recheck a previously assembled candidate after a harness-only fix
+        required: false
+        type: string
+        default: ''
+      reuse_smoke_run_id:
+        description: Reuse passed same-app GUI journeys from this repository's smoke artifacts
         required: false
         type: string
         default: ''
@@ -268,6 +273,7 @@ jobs:
         env:
           REUSE_RUN_ID: ${{ inputs.reuse_run_id }}
           REUSE_COMPONENTS_RUN_ID: ${{ inputs.reuse_components_run_id }}
+          REUSE_SMOKE_RUN_ID: ${{ inputs.reuse_smoke_run_id }}
           SIGNED_DMG_ASSET_ID: ${{ inputs.signed_dmg_asset_id }}
           SIGNED_DMG_SHA256: ${{ inputs.signed_dmg_sha256 }}
           BASELINE_DMG_ASSET_ID: ${{ inputs.baseline_dmg_asset_id }}
@@ -288,6 +294,8 @@ jobs:
               raise ReleaseInputError('Post-build distribution checks require the exact qualified reuse_run_id.')
           if os.environ['BASELINE_DMG_ASSET_ID'] and not os.environ['SIGNED_DMG_ASSET_ID']:
               raise ReleaseInputError('The older-build upgrade fixture requires a signed release candidate.')
+          if os.environ['REUSE_SMOKE_RUN_ID'] and (not os.environ['REUSE_SMOKE_RUN_ID'].isdecimal() or not os.environ['SIGNED_DMG_ASSET_ID']):
+              raise ReleaseInputError('Smoke reuse requires a numeric same-repository run ID and the exact signed candidate.')
           PY
       - uses: actions/download-artifact@v4
         with:
@@ -316,6 +324,14 @@ jobs:
           if [ -n "$BASELINE_DMG_ASSET_ID" ]; then
             python apps/macos/fetch-release-asset.py --repository "$GITHUB_REPOSITORY" --asset-id "$BASELINE_DMG_ASSET_ID" --sha256 "$BASELINE_DMG_SHA256" --output candidate/SlopTank-upgrade-baseline.dmg
           fi
+      - name: Download this runtime's previous smoke observations
+        if: ${{ inputs.reuse_smoke_run_id }}
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-${{ matrix.runner }}
+          path: prior-smoke
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.reuse_smoke_run_id }}
       - name: Install the pinned browser driver for the guest-only UI journey
         env:
           PLAYWRIGHT_INSTALL_PREFIX: ${{ runner.temp }}/sloptank-playwright
@@ -329,6 +345,7 @@ jobs:
           RUNNER_LABEL: ${{ matrix.runner }}
           SIGNED_DMG_ASSET_ID: ${{ inputs.signed_dmg_asset_id }}
           BASELINE_DMG_ASSET_ID: ${{ inputs.baseline_dmg_asset_id }}
+          SLOPTANK_REUSE_SMOKE_RUN_ID: ${{ inputs.reuse_smoke_run_id }}
         run: |
           if [ "$RUNNER_LABEL" = macos-15-intel ]; then expected=x86_64; else expected=arm64; fi
           test "$(python -c 'import platform; print(platform.machine())')" = "$expected"
@@ -340,6 +357,7 @@ jobs:
             distribution_arguments+=(--baseline-dmg candidate/SlopTank-upgrade-baseline.dmg)
             timeout_seconds=2400
           fi
+          if [ -n "$SLOPTANK_REUSE_SMOKE_RUN_ID" ]; then distribution_arguments+=(--reuse-smoke-receipt prior-smoke/smoke-installed-app.json); fi
           python apps/macos/smoke-installed-app.py --dmg candidate/SlopTank.dmg --work-dir "$RUNNER_TEMP/installed-smoke" --timeout-seconds "$timeout_seconds" --gui-acceptance "${distribution_arguments[@]}"
       - uses: actions/upload-artifact@v4
         if: always()

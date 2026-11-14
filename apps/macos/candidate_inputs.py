@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-13.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-13, 2026-11-14.
 """Validate retained macOS build inputs against GitHub and Git history."""
 import argparse
 import json
@@ -18,6 +18,7 @@ ALLOWED = {WORKFLOW, 'apps/macos/candidate_inputs.py', 'apps/macos/source_assets
            'apps/macos/smoke-browser-ui.cjs', 'apps/macos/welcome-ui.js',
            'apps/macos/owned_app_processes.py', 'apps/macos/smoke_deadline.py',
            'apps/macos/smoke_server_api.py', 'apps/macos/fetch-release-asset.py',
+           'apps/macos/smoke_receipt_reuse.py', 'apps/macos/smoke_gui_controls.py',
            'apps/macos/playback_retention.py', 'apps/macos/macos_distribution.py',
            'apps/macos/SLOPTANK-MODIFICATION-NOTICES.txt'}
 

@@ -91,6 +91,12 @@ function run(argv) {
                     var button = buttons[index];
                     if (button.exists() && button.name() === title && button.enabled()) return button;
                 }
+                var descendants = window.entireContents();
+                for (var child = 0; child < descendants.length; child++) {
+                    var descendant = descendants[child];
+                    if (descendant.exists() && descendant.role() === "AXButton"
+                            && descendant.name() === title && descendant.enabled()) return descendant;
+                }
             } catch (error) {
                 welcomeError("button_enumeration", "Could not enumerate or inspect buttons for target PID " +
                     cfg.pid + ": " + String(error) + " (code " + nativeErrorCode(error) + ")",
@@ -149,13 +155,22 @@ function run(argv) {
             var windows = process.windows;
             for (var index = 0; index < windows.length && index < 4 && Date.now() <= until; index++) {
                 var window = windows[index];
-                var observed = { name: value(window, "name"), topLevelButtons: [], sheets: [] };
+                var observed = { name: value(window, "name"), topLevelButtons: [], descendantButtons: [], sheets: [] };
+                record.windows.push(observed);
                 try {
                     var buttons = window.buttons;
                     for (var button = 0; button < buttons.length && button < 30; button++) {
                         observed.topLevelButtons.push({ name: value(buttons[button], "name"),
                             enabled: value(buttons[button], "enabled") });
                     }
+                    var descendants = window.entireContents();
+                    for (var child = 0; child < descendants.length && Date.now() <= until; child++) {
+                        if (value(descendants[child], "role") === "AXButton") {
+                            observed.descendantButtons.push({ name: value(descendants[child], "name"),
+                                enabled: value(descendants[child], "enabled") });
+                        }
+                    }
+                    save(); // Retain flat button observations before the bounded hierarchy.
                     var sheets = window.sheets;
                     for (var sheet = 0; sheet < sheets.length && sheet < 3; sheet++) {
                         observed.sheets.push(hierarchy(sheets[sheet], 0));
@@ -164,7 +179,6 @@ function run(argv) {
                     observed.windowStateError = { message: String(error), code: nativeErrorCode(error) };
                 }
                 observed.hierarchy = hierarchy(window, 0);
-                record.windows.push(observed);
                 save();
             }
             record.nodesCaptured = nodes;

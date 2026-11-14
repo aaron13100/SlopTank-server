@@ -51,8 +51,8 @@ jobs:
       RELEASE_VERSION: ${{ inputs.version || '0.1.0' }}
       FFMPEG_SHA256: ${{ inputs.ffmpeg_sha256 || '5544e96e76cc896c290aeede60116b5cfa15347905ca52d5fb9df92f07de1f31' }}
       PREPARATION_SHA256: ${{ inputs.preparation_sha256 || 'fa62ba44dca06e83ffdd4937d5e4c756531119169800df59d207226502469345' }}
-      RECEIPT_DIR: ${{ runner.temp }}/source-kit-relay-receipts
-      STAGE_DIR: ${{ runner.temp }}/source-kit-relay-stage
+      RECEIPT_DIR: ${{ github.workspace }}/source-kit-relay/receipts
+      STAGE_DIR: ${{ github.workspace }}/source-kit-relay/stage
     steps:
       - uses: actions/checkout@v4
 
@@ -65,7 +65,6 @@ jobs:
           import os
           import re
           import subprocess
-          import sys
           from pathlib import Path
 
           receipt = Path(os.environ['RECEIPT_DIR']) / 'receipt.jsonl'
@@ -78,13 +77,6 @@ jobs:
               value = re.sub(r'(https?://[^\s?]+)\?[^\s]+', r'\1?<redacted>', value)
               token = os.environ.get('GH_TOKEN', '')
               return value.replace(token, '<redacted>') if token else value
-
-          def sha256(path):
-              digest = hashlib.sha256()
-              with path.open('rb') as stream:
-                  for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-                      digest.update(chunk)
-              return digest.hexdigest()
 
           def gh_json(args):
               result = subprocess.run(['gh', 'api', *args], text=True, capture_output=True)
@@ -135,14 +127,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ffmpeg-corresponding-source-kit
-          path: ${{ runner.temp }}/source-kit-relay-stage/ffmpeg
+          path: ${{ env.STAGE_DIR }}/ffmpeg
           github-token: ${{ github.token }}
           run-id: ${{ inputs.source_run_id || '43621230231' }}
 
       - uses: actions/download-artifact@v4
         with:
           name: preparation-corresponding-source-kit
-          path: ${{ runner.temp }}/source-kit-relay-stage/preparation
+          path: ${{ env.STAGE_DIR }}/preparation
           github-token: ${{ github.token }}
           run-id: ${{ inputs.source_run_id || '43621230231' }}
 
@@ -294,7 +286,9 @@ jobs:
               local_size = path.stat().st_size
               matching = [asset for asset in assets if asset.get('name') == name]
               existing = matching[-1] if matching else None
-              if existing and existing.get('digest') == 'sha256:' + local_hash and existing.get('size') == local_size:
+              if (existing and existing.get('state') == 'uploaded'
+                      and existing.get('digest') == 'sha256:' + local_hash
+                      and existing.get('size') == local_size):
                   record('asset_reused', filename=name, asset_id=existing.get('id'), digest=existing.get('digest'),
                          size=existing.get('size'), status='already-matching')
                   continue
@@ -310,9 +304,13 @@ jobs:
               assets = gh_json([f'repos/{repo}/releases/{release_id}/assets?per_page=100'])
               uploaded = [asset for asset in assets if asset.get('name') == name]
               verified = uploaded[-1] if uploaded else None
-              if not verified or verified.get('digest') != 'sha256:' + local_hash or verified.get('size') != local_size:
+              if (not verified or verified.get('state') != 'uploaded'
+                      or verified.get('digest') != 'sha256:' + local_hash
+                      or verified.get('size') != local_size):
                   record('asset_verification_failed', filename=name, expected_digest='sha256:' + local_hash,
-                         expected_size=local_size, observed=verified)
+                         expected_size=local_size,
+                         observed={key: verified.get(key) for key in ('id', 'name', 'state', 'digest', 'size')}
+                         if verified else None)
                   raise RuntimeError(f'GitHub asset digest or size mismatch for {name}')
               record('asset_staged', filename=name, asset_id=verified.get('id'), digest=verified.get('digest'),
                      size=verified.get('size'), status='uploaded-and-verified')
@@ -320,15 +318,10 @@ jobs:
                  runner_validation='GitHub Actions ubuntu-latest')
           PY
 
-      - name: Remove downloaded source archives from runner staging
-        if: ${{ always() }}
-        shell: bash
-        run: python3 -c 'import os, shutil; from pathlib import Path; p=Path(os.environ["STAGE_DIR"]); shutil.rmtree(p) if p.exists() and p.is_relative_to(Path(os.environ["RUNNER_TEMP"])) else None'
-
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
           name: source-kit-relay-receipt-${{ github.run_id }}
-          path: ${{ runner.temp }}/source-kit-relay-receipts/receipt.jsonl
+          path: ${{ env.RECEIPT_DIR }}/receipt.jsonl
           if-no-files-found: warn
           retention-days: 7

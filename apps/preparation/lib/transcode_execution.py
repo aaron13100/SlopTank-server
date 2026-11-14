@@ -1,4 +1,4 @@
-# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05.
+# SlopTank modification notice: added or changed by SlopTank on 2026-11-04, 2026-11-05, 2026-11-14.
 """Retry, verification, and replacement mechanics for streaming conversion."""
 
 from __future__ import annotations
@@ -56,11 +56,25 @@ def _should_retry_without_subs(stderr: str | None) -> bool:
 
 
 def _should_retry_in_software(command: list[str], result) -> bool:
-    """Retry hardware failure only when it produced explicitly zero frames."""
+    """Retry hardware failure only when it produced explicitly zero frames.
+
+    ffmpeg does not always print its progress line when the encoder fails
+    before opening.  In that case its output-muxer diagnostic is the equally
+    explicit proof: nothing was written because a stream received no packets.
+    A progress line reporting real frames remains authoritative and prevents
+    the expensive retry even if a later diagnostic mentions another stream.
+    """
     if result.returncode == 0 or "h264_videotoolbox" not in command:
         return False
-    frames = [int(match) for match in _FRAME_COUNT_RE.findall(result.stderr or "")]
-    return bool(frames) and max(frames) == 0
+    stderr = result.stderr or ""
+    frames = [int(match) for match in _FRAME_COUNT_RE.findall(stderr)]
+    if frames:
+        return max(frames) == 0
+    lowered = stderr.lower()
+    return (
+        "nothing was written into output file" in lowered
+        and "received no packets" in lowered
+    )
 
 
 def _log_transcode_failure(path: Path, result, attempt: str) -> None:

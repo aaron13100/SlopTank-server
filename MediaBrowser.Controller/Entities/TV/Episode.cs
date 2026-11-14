@@ -1,3 +1,4 @@
+// SlopTank modification notice: added or changed by SlopTank on 2026-11-14.
 #nullable disable
 
 #pragma warning disable CS1591
@@ -47,7 +48,7 @@ namespace MediaBrowser.Controller.Entities.TV
         public int? IndexNumberEnd { get; set; }
 
         [JsonIgnore]
-        protected override bool SupportsOwnedItems => IsStacked || MediaSourceCount > 1;
+        protected override bool SupportsOwnedItems => IsStacked || MediaSourceCount > 1 || LocalAlternateVersions.Length > 0;
 
         [JsonIgnore]
         public override bool SupportsInheritedParentImages => true;
